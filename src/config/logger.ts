@@ -5,8 +5,8 @@ export const logger = pino({
   level: env.IS_TEST
     ? 'silent'
     : env.IS_DEVELOPMENT
-    ? 'debug'
-    : 'info',
+      ? 'debug'
+      : 'info',
 
   ...(env.IS_DEVELOPMENT && {
     transport: {
@@ -31,29 +31,24 @@ export const logger = pino({
       'headers.authorization',
       'headers.cookie',
       'headers["x-api-key"]',
-
       'req.body.password',
       'body.password',
       'user.password',
       'input.password',
       'password',
       '*.password',
-
       'req.body.token',
       'body.token',
       'token',
       '*.token',
-
       'req.body.accessToken',
       'body.accessToken',
       'accessToken',
       '*.accessToken',
-
       'req.body.refreshToken',
       'body.refreshToken',
       'refreshToken',
       '*.refreshToken',
-
       'apiKey',
       '*.apiKey',
       'secret',
@@ -64,5 +59,6 @@ export const logger = pino({
 
   base: {
     env: env.NODE_ENV,
+    hostname: process.env.HOSTNAME,
   },
 });

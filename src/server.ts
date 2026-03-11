@@ -23,6 +23,12 @@ const startServer = async (): Promise<void> => {
 
       logger.info({ signal }, 'Shutdown signal received');
 
+      // Force shutdown after 10 seconds if graceful shutdown hangs
+      setTimeout(() => {
+        logger.warn('Forcing shutdown after timeout');
+        process.exit(1);
+      }, 10000).unref();
+
       server.close(async (closeErr) => {
         if (closeErr) {
           logger.error({ err: closeErr }, 'Error closing HTTP server');

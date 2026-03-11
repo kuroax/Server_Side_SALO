@@ -8,7 +8,7 @@ import {
   JWT_REFRESH_EXPIRES_IN,
   BCRYPT_SALT_ROUNDS,
 } from '#/config/env.js';
-import type { IUser, JWTPayload, AuthPayload } from '#/modules/auth/auth.types.js';
+import type { JWTPayload, AuthPayload, SafeUser } from '#/modules/auth/auth.types.js';
 import type { IUserDocument } from '#/modules/auth/auth.model.js';
 
 // ─── Password Helpers ─────────────────────────────────────────────────────────
@@ -68,11 +68,6 @@ export const verifyRefreshToken = (token: string): JWTPayload => {
 };
 
 // ─── User Mapper ──────────────────────────────────────────────────────────────
-
-export type SafeUser = Pick<
-  IUser,
-  'username' | 'email' | 'role' | 'isActive' | 'createdAt' | 'updatedAt'
-> & { id: string };
 
 export const toAuthUser = (user: IUserDocument): SafeUser => ({
   id: user._id.toString(),

@@ -23,6 +23,18 @@ export interface IUser {
   updatedAt: Date;
 }
 
+// ─── Safe User (no password, id instead of _id) ───────────────────────────────
+
+export type SafeUser = {
+  id: string;
+  username: string;
+  email?: string;
+  role: Role;
+  isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 // ─── Auth Payloads ───────────────────────────────────────────────────────────
 
 export interface LoginInput {
@@ -40,7 +52,7 @@ export interface RegisterInput {
 export interface AuthPayload {
   accessToken: string;
   refreshToken: string;
-  user: Omit<IUser, 'password'>;
+  user: SafeUser;
 }
 
 export interface RefreshPayload {

@@ -6,7 +6,7 @@ import { expressMiddleware } from '@as-integrations/express5';
 import pinoHttp from 'pino-http';
 
 import { schema } from '#/graphql/schema/index.js';
-import { createContext } from '#/graphql/context.js';
+import { createGraphQLContext } from '#/graphql/context.js';
 import { CORS_ORIGIN, IS_DEVELOPMENT } from '#/config/env.js';
 import { logger } from '#/config/logger.js';
 
@@ -57,7 +57,7 @@ export const createApp = async (): Promise<Application> => {
   app.use(
     '/api/graphql',
     expressMiddleware(server, {
-      context: createContext,
+      context: createGraphQLContext,
     }),
   );
 

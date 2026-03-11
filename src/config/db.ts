@@ -25,9 +25,7 @@ mongoose.connection.on('reconnected', () => {
 export const connectDB = async (): Promise<void> => {
   try {
     mongoose.set('strictQuery', true);
-
     const conn = await mongoose.connect(MONGODB_URI, MONGOOSE_OPTIONS);
-
     logger.info(
       {
         host: conn.connection.host,
