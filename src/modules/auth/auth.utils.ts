@@ -38,11 +38,15 @@ const isJWTPayload = (value: unknown): value is JWTPayload => {
 // ─── Token Helpers ────────────────────────────────────────────────────────────
 
 export const signAccessToken = (payload: JWTPayload): string => {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+  return jwt.sign(payload, JWT_SECRET, {
+    expiresIn: JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+  });
 };
 
 export const signRefreshToken = (payload: JWTPayload): string => {
-  return jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });
+  return jwt.sign(payload, JWT_REFRESH_SECRET, {
+    expiresIn: JWT_REFRESH_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+  });
 };
 
 const verifyTokenBase = (token: string, secret: string): JWTPayload => {

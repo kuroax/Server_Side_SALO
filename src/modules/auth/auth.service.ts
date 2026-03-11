@@ -4,12 +4,8 @@ import {
   registerSchema,
   refreshTokenSchema,
   changePasswordSchema,
-  type LoginSchema,
-  type RegisterSchema,
-  type RefreshTokenSchema,
-  type ChangePasswordSchema,
 } from '#/modules/auth/auth.validation.js';
-import type { AuthPayload, RefreshPayload, JWTPayload } from '#/modules/auth/auth.types.js';
+import type { AuthPayload, RefreshPayload, JWTPayload, SafeUser } from '#/modules/auth/auth.types.js';
 import {
   hashPassword,
   comparePassword,
@@ -17,7 +13,6 @@ import {
   signAccessToken,
   verifyRefreshToken,
   toAuthUser,
-  type SafeUser,
 } from '#/modules/auth/auth.utils.js';
 import { logger } from '#/config/logger.js';
 import {
@@ -27,7 +22,7 @@ import {
 
 // ─── Register ─────────────────────────────────────────────────────────────────
 
-export const register = async (input: RegisterSchema): Promise<AuthPayload> => {
+export const register = async (input: unknown): Promise<AuthPayload> => {
   const validated = registerSchema.parse(input);
 
   const existingUser = await UserModel.findOne({
@@ -68,7 +63,7 @@ export const register = async (input: RegisterSchema): Promise<AuthPayload> => {
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
-export const login = async (input: LoginSchema): Promise<AuthPayload> => {
+export const login = async (input: unknown): Promise<AuthPayload> => {
   const validated = loginSchema.parse(input);
 
   const user = await UserModel.findOne({
@@ -107,9 +102,7 @@ export const login = async (input: LoginSchema): Promise<AuthPayload> => {
 
 // ─── Refresh Token ────────────────────────────────────────────────────────────
 
-export const refreshToken = async (
-  input: RefreshTokenSchema,
-): Promise<RefreshPayload> => {
+export const refreshToken = async (input: unknown): Promise<RefreshPayload> => {
   const validated = refreshTokenSchema.parse(input);
 
   let payload: JWTPayload;
@@ -143,7 +136,7 @@ export const refreshToken = async (
 
 export const changePassword = async (
   userId: string,
-  input: ChangePasswordSchema,
+  input: unknown,
 ): Promise<void> => {
   const validated = changePasswordSchema.parse(input);
 

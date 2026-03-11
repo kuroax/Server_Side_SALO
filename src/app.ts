@@ -3,7 +3,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@as-integrations/express5';
-import pinoHttp from 'pino-http';
+import { pinoHttp } from 'pino-http';
 
 import { schema } from '#/graphql/schema/index.js';
 import { createGraphQLContext } from '#/graphql/context.js';
@@ -30,7 +30,7 @@ export const createApp = async (): Promise<Application> => {
     pinoHttp({
       logger,
       quietReqLogger: true,
-      customLogLevel: (_req, res) => {
+      customLogLevel: (_req, res: { statusCode: number }) => {
         if (res.statusCode >= 500) return 'error';
         if (res.statusCode >= 400) return 'warn';
         return 'info';

@@ -43,21 +43,21 @@ export const authResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN]);
-      return register(input);
+      return register(input as unknown);
     },
 
     login: async (
       _: unknown,
       { input }: { input: Record<string, unknown> },
     ) => {
-      return login(input);
+      return login(input as unknown);
     },
 
     refreshToken: async (
       _: unknown,
       { input }: { input: Record<string, unknown> },
     ) => {
-      return refreshToken(input);
+      return refreshToken(input as unknown);
     },
 
     changePassword: async (
@@ -66,7 +66,7 @@ export const authResolvers = {
       context: GraphQLContext,
     ) => {
       const user = requireAuth(context);
-      await changePassword(user.id, input);
+      await changePassword(user.id, input as unknown);
       return true;
     },
 
