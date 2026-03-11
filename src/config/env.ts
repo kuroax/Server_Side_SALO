@@ -38,17 +38,15 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-const data = parsed.data;
-
 export const env = {
-  ...data,
-  IS_PRODUCTION: data.NODE_ENV === 'production',
-  IS_DEVELOPMENT: data.NODE_ENV === 'development',
-  IS_TEST: data.NODE_ENV === 'test',
+  ...parsed.data,
+  IS_PRODUCTION: parsed.data.NODE_ENV === 'production',
+  IS_DEVELOPMENT: parsed.data.NODE_ENV === 'development',
+  IS_TEST: parsed.data.NODE_ENV === 'test',
 } as const;
 
 if (env.IS_PRODUCTION && env.CORS_ORIGIN === '*') {
-  console.warn('⚠️  CORS_ORIGIN is set to wildcard in production');
+  console.warn('⚠️ CORS_ORIGIN is set to wildcard in production');
 }
 
 export const {
