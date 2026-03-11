@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import jwt, { TokenExpiredError, JsonWebTokenError } from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 
 import {
   JWT_SECRET,
@@ -57,8 +57,8 @@ const verifyTokenBase = (token: string, secret: string): JWTPayload => {
     }
     return decoded;
   } catch (error) {
-    if (error instanceof TokenExpiredError) throw new Error('TOKEN_EXPIRED');
-    if (error instanceof JsonWebTokenError) throw new Error('TOKEN_INVALID');
+    if (error instanceof jwt.TokenExpiredError) throw new Error('TOKEN_EXPIRED');
+    if (error instanceof jwt.JsonWebTokenError) throw new Error('TOKEN_INVALID');
     throw error;
   }
 };

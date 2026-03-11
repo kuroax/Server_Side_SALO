@@ -47,9 +47,6 @@ const userSchema = new Schema<IUserDocument>(
   },
 );
 
-userSchema.index({ username: 1 });
-userSchema.index({ email: 1 }, { sparse: true });
-
 export const UserModel: Model<IUserDocument> = mongoose.model<IUserDocument>(
   'User',
   userSchema,

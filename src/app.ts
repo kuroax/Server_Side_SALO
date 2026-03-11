@@ -9,6 +9,7 @@ import { schema } from '#/graphql/schema/index.js';
 import { createGraphQLContext } from '#/graphql/context.js';
 import { CORS_ORIGIN, IS_DEVELOPMENT } from '#/config/env.js';
 import { logger } from '#/config/logger.js';
+import { AppError } from '#/shared/errors/index.js';
 
 export const createApp = async (): Promise<Application> => {
   const app = express();
@@ -16,7 +17,12 @@ export const createApp = async (): Promise<Application> => {
   app.set('trust proxy', 1);
 
   // Security
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: IS_DEVELOPMENT ? false : undefined,
+      crossOriginEmbedderPolicy: IS_DEVELOPMENT ? false : undefined,
+    }),
+  );
 
   app.use(
     cors({
@@ -50,6 +56,19 @@ export const createApp = async (): Promise<Application> => {
   const server = new ApolloServer({
     schema,
     introspection: IS_DEVELOPMENT,
+    formatError: (formattedError, error) => {
+      const originalError = (error as { originalError?: unknown }).originalError ?? error;
+      if (originalError instanceof AppError) {
+        return {
+          ...formattedError,
+          extensions: {
+            ...formattedError.extensions,
+            code: originalError.code,
+          },
+        };
+      }
+      return formattedError;
+    },
   });
 
   await server.start();
