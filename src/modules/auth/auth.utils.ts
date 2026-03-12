@@ -31,10 +31,7 @@ export const signRefreshToken = (payload: JWTPayload): string => {
   });
 };
 
-export const verifyTokenBase = (
-  token: string,
-  secret: string,
-): JWTPayload => {
+const verifyTokenBase = (token: string, secret: string): JWTPayload => {
   try {
     return jwt.verify(token, secret) as JWTPayload;
   } catch (err) {
@@ -46,6 +43,14 @@ export const verifyTokenBase = (
     }
     throw err;
   }
+};
+
+export const verifyAccessToken = (token: string): JWTPayload => {
+  return verifyTokenBase(token, env.JWT_SECRET);
+};
+
+export const verifyRefreshToken = (token: string): JWTPayload => {
+  return verifyTokenBase(token, env.JWT_REFRESH_SECRET);
 };
 
 export const generateTokens = (payload: JWTPayload) => ({

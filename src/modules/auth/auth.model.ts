@@ -1,18 +1,20 @@
 import mongoose, { Schema, type HydratedDocument, type Model } from 'mongoose';
 import type { IUser } from '#/modules/auth/auth.types.js';
 
+// ─── Timestamp augmentation ───────────────────────────────────────────────────
+
+type IUserWithTimestamps = IUser & {
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 // ─── Document Type ────────────────────────────────────────────────────────────
 
-export type IUserDocument = HydratedDocument<
-  IUser & {
-    createdAt: Date;
-    updatedAt: Date;
-  }
->;
+export type IUserDocument = HydratedDocument<IUserWithTimestamps>;
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
-const userSchema = new Schema<IUser>(
+const userSchema = new Schema<IUserWithTimestamps>(
   {
     username: {
       type: String,
@@ -50,6 +52,6 @@ const userSchema = new Schema<IUser>(
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
-export type UserModelType = Model<IUser>;
+export type UserModelType = Model<IUserWithTimestamps>;
 
-export const UserModel = mongoose.model<IUser>('User', userSchema);
+export const UserModel = mongoose.model<IUserWithTimestamps>('User', userSchema);
