@@ -1,6 +1,5 @@
-export const authTypeDefs = /* GraphQL */ `
-
-  # ─── Enums ───────────────────────────────────────────────────────────────────
+export const authTypeDefs = `
+  # ─── Enums ──────────────────────────────────────────────────────────────────
 
   enum Role {
     owner
@@ -10,7 +9,7 @@ export const authTypeDefs = /* GraphQL */ `
     support
   }
 
-  # ─── Types ───────────────────────────────────────────────────────────────────
+  # ─── Types ──────────────────────────────────────────────────────────────────
 
   type User {
     id: ID!
@@ -32,12 +31,12 @@ export const authTypeDefs = /* GraphQL */ `
     accessToken: String!
   }
 
-  # ─── Inputs ──────────────────────────────────────────────────────────────────
+  # ─── Inputs ─────────────────────────────────────────────────────────────────
 
   input RegisterInput {
     username: String!
-    email: String
     password: String!
+    email: String
     role: Role!
   }
 
@@ -56,13 +55,13 @@ export const authTypeDefs = /* GraphQL */ `
     confirmPassword: String!
   }
 
-  # ─── Queries ─────────────────────────────────────────────────────────────────
+  # ─── Queries ────────────────────────────────────────────────────────────────
 
   extend type Query {
     me: User
   }
 
-  # ─── Mutations ───────────────────────────────────────────────────────────────
+  # ─── Mutations ──────────────────────────────────────────────────────────────
 
   extend type Mutation {
     register(input: RegisterInput!): AuthPayload!
