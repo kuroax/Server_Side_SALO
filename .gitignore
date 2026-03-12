@@ -30,3 +30,7 @@ coverage/
 
 # TypeScript
 *.tsbuildinfo
+
+# Scratch files
+z1
+z2
