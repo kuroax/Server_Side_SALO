@@ -1,4 +1,4 @@
-// ─── Roles ───────────────────────────────────────────────────────────────────
+// ─── Roles ────────────────────────────────────────────────────────────────────
 
 export const ROLES = {
   OWNER: 'owner',
@@ -10,58 +10,40 @@ export const ROLES = {
 
 export type Role = (typeof ROLES)[keyof typeof ROLES];
 
-// ─── User ────────────────────────────────────────────────────────────────────
+// ─── User ─────────────────────────────────────────────────────────────────────
 
-export interface IUser {
-  _id: string;
+export type IUser = {
   username: string;
   email?: string;
   password: string;
   role: Role;
   isActive: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-}
+};
 
-// ─── Safe User (no password, id instead of _id) ───────────────────────────────
-
+// createdAt and updatedAt serialized as ISO strings before returning to client
 export type SafeUser = {
   id: string;
   username: string;
   email?: string;
   role: Role;
   isActive: boolean;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 };
 
-// ─── Auth Payloads ───────────────────────────────────────────────────────────
+// ─── Auth Payloads ────────────────────────────────────────────────────────────
 
-export interface LoginInput {
-  username: string;
-  password: string;
-}
-
-export interface RegisterInput {
-  username: string;
-  email?: string;
-  password: string;
-  role: Role;
-}
-
-export interface AuthPayload {
+export type AuthPayload = {
   accessToken: string;
   refreshToken: string;
   user: SafeUser;
-}
+};
 
-export interface RefreshPayload {
+export type RefreshPayload = {
   accessToken: string;
-}
+};
 
-// ─── JWT ─────────────────────────────────────────────────────────────────────
-
-export interface JWTPayload {
+export type JWTPayload = {
   id: string;
   role: Role;
-}
+};

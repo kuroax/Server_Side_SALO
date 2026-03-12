@@ -8,6 +8,7 @@ import {
 } from '#/modules/auth/auth.service.js';
 import { AuthenticationError, AuthorizationError } from '#/shared/errors/index.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
+import { UserModel } from '#/modules/auth/auth.model.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ const requireRoles = (context: GraphQLContext, roles: Role[]) => {
 
 export const authResolvers = {
   Query: {
-    me: async (_: unknown, __: unknown, context: GraphQLContext) => {
+    me: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
       if (!context.user) return null;
       return getCurrentUser(context.user.id);
     },
@@ -38,41 +39,48 @@ export const authResolvers = {
 
   Mutation: {
     register: async (
-      _: unknown,
+      _parent: unknown,
       { input }: { input: Record<string, unknown> },
       context: GraphQLContext,
     ) => {
+      // Allow registration without auth only if no users exist yet (first owner setup)
+      const userCount = await UserModel.countDocuments();
+      if (userCount === 0) {
+        return register(input);
+      }
+
+      // After first user exists, require owner or admin
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN]);
-      return register(input as unknown);
+      return register(input);
     },
 
     login: async (
-      _: unknown,
+      _parent: unknown,
       { input }: { input: Record<string, unknown> },
     ) => {
-      return login(input as unknown);
+      return login(input);
     },
 
     refreshToken: async (
-      _: unknown,
+      _parent: unknown,
       { input }: { input: Record<string, unknown> },
     ) => {
-      return refreshToken(input as unknown);
+      return refreshToken(input);
     },
 
     changePassword: async (
-      _: unknown,
+      _parent: unknown,
       { input }: { input: Record<string, unknown> },
       context: GraphQLContext,
     ) => {
       const user = requireAuth(context);
-      await changePassword(user.id, input as unknown);
+      await changePassword(user.id, input);
       return true;
     },
 
     logout: async (
-      _: unknown,
-      __: unknown,
+      _parent: unknown,
+      _args: unknown,
       context: GraphQLContext,
     ) => {
       requireAuth(context);

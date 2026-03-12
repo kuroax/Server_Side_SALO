@@ -1,77 +1,59 @@
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-
-import {
-  JWT_SECRET,
-  JWT_EXPIRES_IN,
-  JWT_REFRESH_SECRET,
-  JWT_REFRESH_EXPIRES_IN,
-  BCRYPT_SALT_ROUNDS,
-} from '#/config/env.js';
-import type { JWTPayload, AuthPayload, SafeUser } from '#/modules/auth/auth.types.js';
+import bcrypt from 'bcryptjs';
+import { env } from '#/config/env.js';
+import type { SafeUser, JWTPayload } from '#/modules/auth/auth.types.js';
 import type { IUserDocument } from '#/modules/auth/auth.model.js';
 
-// ─── Password Helpers ─────────────────────────────────────────────────────────
+// ─── Password ─────────────────────────────────────────────────────────────────
 
-export const hashPassword = async (plainPassword: string): Promise<string> => {
-  return bcrypt.hash(plainPassword, BCRYPT_SALT_ROUNDS);
+export const hashPassword = (password: string): Promise<string> => {
+  return bcrypt.hash(password, 12);
 };
 
-export const comparePassword = async (
-  plainPassword: string,
-  hashedPassword: string,
+export const comparePassword = (
+  password: string,
+  hash: string,
 ): Promise<boolean> => {
-  return bcrypt.compare(plainPassword, hashedPassword);
+  return bcrypt.compare(password, hash);
 };
 
-// ─── JWT Type Guard ───────────────────────────────────────────────────────────
-
-const isJWTPayload = (value: unknown): value is JWTPayload => {
-  if (!value || typeof value !== 'object') return false;
-  const payload = value as Record<string, unknown>;
-  return (
-    typeof payload.id === 'string' &&
-    typeof payload.role === 'string'
-  );
-};
-
-// ─── Token Helpers ────────────────────────────────────────────────────────────
+// ─── Tokens ───────────────────────────────────────────────────────────────────
 
 export const signAccessToken = (payload: JWTPayload): string => {
-  return jwt.sign(payload, JWT_SECRET, {
-    expiresIn: JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+  return jwt.sign(payload, env.JWT_SECRET, {
+    expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
   });
 };
 
 export const signRefreshToken = (payload: JWTPayload): string => {
-  return jwt.sign(payload, JWT_REFRESH_SECRET, {
-    expiresIn: JWT_REFRESH_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+  return jwt.sign(payload, env.JWT_REFRESH_SECRET, {
+    expiresIn: env.JWT_REFRESH_EXPIRES_IN as jwt.SignOptions['expiresIn'],
   });
 };
 
-const verifyTokenBase = (token: string, secret: string): JWTPayload => {
+export const verifyTokenBase = (
+  token: string,
+  secret: string,
+): JWTPayload => {
   try {
-    const decoded = jwt.verify(token, secret);
-    if (!isJWTPayload(decoded)) {
-      throw new Error('MALFORMED_PAYLOAD');
+    return jwt.verify(token, secret) as JWTPayload;
+  } catch (err) {
+    if (err instanceof jwt.TokenExpiredError) {
+      throw new Error('Token expired');
     }
-    return decoded;
-  } catch (error) {
-    if (error instanceof jwt.TokenExpiredError) throw new Error('TOKEN_EXPIRED');
-    if (error instanceof jwt.JsonWebTokenError) throw new Error('TOKEN_INVALID');
-    throw error;
+    if (err instanceof jwt.JsonWebTokenError) {
+      throw new Error('Invalid token');
+    }
+    throw err;
   }
 };
 
-export const verifyAccessToken = (token: string): JWTPayload => {
-  return verifyTokenBase(token, JWT_SECRET);
-};
+export const generateTokens = (payload: JWTPayload) => ({
+  accessToken: signAccessToken(payload),
+  refreshToken: signRefreshToken(payload),
+});
 
-export const verifyRefreshToken = (token: string): JWTPayload => {
-  return verifyTokenBase(token, JWT_REFRESH_SECRET);
-};
-
-// ─── User Mapper ──────────────────────────────────────────────────────────────
+// ─── Mapper ───────────────────────────────────────────────────────────────────
 
 export const toAuthUser = (user: IUserDocument): SafeUser => ({
   id: user._id.toString(),
@@ -79,15 +61,10 @@ export const toAuthUser = (user: IUserDocument): SafeUser => ({
   email: user.email,
   role: user.role,
   isActive: user.isActive,
-  createdAt: user.createdAt,
-  updatedAt: user.updatedAt,
-});
-
-// ─── Token Pair ───────────────────────────────────────────────────────────────
-
-export const generateTokens = (
-  payload: JWTPayload,
-): Pick<AuthPayload, 'accessToken' | 'refreshToken'> => ({
-  accessToken: signAccessToken(payload),
-  refreshToken: signRefreshToken(payload),
+  createdAt: user.createdAt instanceof Date
+    ? user.createdAt.toISOString()
+    : new Date(user.createdAt).toISOString(),
+  updatedAt: user.updatedAt instanceof Date
+    ? user.updatedAt.toISOString()
+    : new Date(user.updatedAt).toISOString(),
 });

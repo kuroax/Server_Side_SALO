@@ -28,8 +28,8 @@ type ProductLike = {
   images: string[];
   status: ProductResponse['status'];
   variants: ProductResponse['variants'];
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: Date | string;
+  updatedAt: Date | string;
 };
 
 // ─── Slug Generator ───────────────────────────────────────────────────────────
@@ -91,8 +91,12 @@ const toProductResponse = (product: ProductLike): ProductResponse => ({
   images: product.images,
   status: product.status,
   variants: product.variants,
-  createdAt: product.createdAt,
-  updatedAt: product.updatedAt,
+  createdAt: product.createdAt instanceof Date
+    ? product.createdAt.toISOString()
+    : new Date(product.createdAt).toISOString(),
+  updatedAt: product.updatedAt instanceof Date
+    ? product.updatedAt.toISOString()
+    : new Date(product.updatedAt).toISOString(),
 });
 
 // ─── Create ───────────────────────────────────────────────────────────────────

@@ -1,13 +1,9 @@
-import type { Types } from 'mongoose';
-
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
 export const GENDERS = {
   MEN: 'men',
   WOMEN: 'women',
 } as const;
-
-export type Gender = (typeof GENDERS)[keyof typeof GENDERS];
 
 export const SIZES = {
   XS: 'XS',
@@ -18,25 +14,23 @@ export const SIZES = {
   XXL: 'XXL',
 } as const;
 
-export type Size = (typeof SIZES)[keyof typeof SIZES];
-
 export const PRODUCT_STATUS = {
   ACTIVE: 'active',
   INACTIVE: 'inactive',
 } as const;
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export type Gender = (typeof GENDERS)[keyof typeof GENDERS];
+export type Size = (typeof SIZES)[keyof typeof SIZES];
 export type ProductStatus = (typeof PRODUCT_STATUS)[keyof typeof PRODUCT_STATUS];
 
-// ─── Variant ──────────────────────────────────────────────────────────────────
-
-export interface ProductVariant {
+export type ProductVariant = {
   size: Size;
   color: string;
-}
+};
 
-// ─── Shared Product Fields ────────────────────────────────────────────────────
-
-export interface ProductBase {
+export type ProductBase = {
   name: string;
   slug: string;
   description: string;
@@ -48,23 +42,20 @@ export interface ProductBase {
   images: string[];
   status: ProductStatus;
   variants: ProductVariant[];
-}
+};
 
-// ─── Persisted Product ────────────────────────────────────────────────────────
-
-export interface ProductEntity extends ProductBase {
-  _id: Types.ObjectId;
+export type ProductEntity = ProductBase & {
+  _id: string;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-// ─── Inputs ───────────────────────────────────────────────────────────────────
+export type CreateProductInput = Omit<ProductBase, 'slug'>;
+export type UpdateProductInput = Partial<Omit<ProductBase, 'slug'>>;
 
-// slug is auto-generated from name in the service — owner never provides it
-export interface CreateProductInput extends Omit<ProductBase, 'slug'> {}
-
-export interface UpdateProductInput extends Partial<Omit<ProductBase, 'slug'>> {}
-
-// ─── API Response ─────────────────────────────────────────────────────────────
-
-export type ProductResponse = Omit<ProductEntity, '_id'> & { id: string };
+// createdAt and updatedAt are strings — serialized via toISOString() before returning
+export type ProductResponse = Omit<ProductEntity, '_id' | 'createdAt' | 'updatedAt'> & {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+};

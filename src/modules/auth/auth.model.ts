@@ -1,40 +1,41 @@
-import mongoose, { type Document, type Model, Schema } from 'mongoose';
-import { ROLES, type IUser } from '#/modules/auth/auth.types.js';
+import mongoose, { Schema, type HydratedDocument, type Model } from 'mongoose';
+import type { IUser } from '#/modules/auth/auth.types.js';
 
-export interface IUserDocument extends Omit<IUser, '_id'>, Document {}
+// ─── Document Type ────────────────────────────────────────────────────────────
 
-const userSchema = new Schema<IUserDocument>(
+export type IUserDocument = HydratedDocument<
+  IUser & {
+    createdAt: Date;
+    updatedAt: Date;
+  }
+>;
+
+// ─── Schema ───────────────────────────────────────────────────────────────────
+
+const userSchema = new Schema<IUser>(
   {
     username: {
       type: String,
-      required: [true, 'Username is required'],
+      required: true,
       unique: true,
       trim: true,
       lowercase: true,
-      minlength: [3, 'Username must be at least 3 characters'],
-      maxlength: [30, 'Username must be at most 30 characters'],
     },
     email: {
       type: String,
       trim: true,
       lowercase: true,
-      unique: true,
       sparse: true,
-      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address'],
     },
     password: {
       type: String,
-      required: [true, 'Password is required'],
-      minlength: [8, 'Password must be at least 8 characters'],
+      required: true,
       select: false,
     },
     role: {
       type: String,
-      enum: {
-        values: Object.values(ROLES),
-        message: '{VALUE} is not a valid role',
-      },
-      required: [true, 'Role is required'],
+      required: true,
+      enum: ['owner', 'admin', 'sales', 'inventory', 'support'],
     },
     isActive: {
       type: Boolean,
@@ -47,7 +48,8 @@ const userSchema = new Schema<IUserDocument>(
   },
 );
 
-export const UserModel: Model<IUserDocument> = mongoose.model<IUserDocument>(
-  'User',
-  userSchema,
-);
+// ─── Model ────────────────────────────────────────────────────────────────────
+
+export type UserModelType = Model<IUser>;
+
+export const UserModel = mongoose.model<IUser>('User', userSchema);
