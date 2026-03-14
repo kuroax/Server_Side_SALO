@@ -7,25 +7,8 @@ import {
   updateProduct,
   deleteProduct,
 } from '#/modules/products/product.service.js';
-import { AuthenticationError, AuthorizationError } from '#/shared/errors/index.js';
+import { requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const requireAuth = (context: GraphQLContext) => {
-  if (!context.user) {
-    throw new AuthenticationError('You must be logged in');
-  }
-  return context.user;
-};
-
-const requireRoles = (context: GraphQLContext, roles: Role[]) => {
-  const user = requireAuth(context);
-  if (!roles.includes(user.role as Role)) {
-    throw new AuthorizationError();
-  }
-  return user;
-};
 
 // ─── Resolvers ────────────────────────────────────────────────────────────────
 
@@ -59,7 +42,7 @@ export const productResolvers = {
       { input }: { input: Record<string, unknown> },
       context: GraphQLContext,
     ) => {
-      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN, ROLES.INVENTORY]);
+      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN, ROLES.INVENTORY] as Role[]);
       return createProduct(input);
     },
 
@@ -68,7 +51,7 @@ export const productResolvers = {
       { id, input }: { id: string; input: Record<string, unknown> },
       context: GraphQLContext,
     ) => {
-      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN, ROLES.INVENTORY]);
+      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN, ROLES.INVENTORY] as Role[]);
       return updateProduct(id, input);
     },
 
@@ -77,7 +60,7 @@ export const productResolvers = {
       { id }: { id: string },
       context: GraphQLContext,
     ) => {
-      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN]);
+      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
       return deleteProduct({ id });
     },
   },

@@ -9,29 +9,12 @@ import {
 } from '#/modules/customers/customer.service.js';
 import type { GraphQLContext } from '#/graphql/context.js';
 import type { Role } from '#/modules/auth/auth.types.js';
-import { AuthorizationError } from '#/shared/errors/index.js';
+import { requireRoles } from '#/shared/utils/auth.guards.js';
 
-// ─── Auth Guards ──────────────────────────────────────────────────────────────
+// ─── Role constants ───────────────────────────────────────────────────────────
 
-const requireAuth = (context: GraphQLContext) => {
-  if (!context.user) {
-    throw new AuthorizationError('You must be logged in');
-  }
-  return context.user;
-};
-
-const requireRoles = (context: GraphQLContext, roles: Role[]) => {
-  const user = requireAuth(context);
-  if (!roles.includes(user.role)) {
-    throw new AuthorizationError('You do not have permission to perform this action');
-  }
-  return user;
-};
-
-// ─── Role Constants ───────────────────────────────────────────────────────────
-
-const CUSTOMER_READERS: Role[] = ['owner', 'admin', 'sales'];
-const CUSTOMER_WRITERS: Role[] = ['owner', 'admin', 'sales'];
+const CUSTOMER_READERS:  Role[] = ['owner', 'admin', 'sales'];
+const CUSTOMER_WRITERS:  Role[] = ['owner', 'admin', 'sales'];
 const CUSTOMER_MANAGERS: Role[] = ['owner', 'admin'];
 
 // ─── Resolvers ────────────────────────────────────────────────────────────────

@@ -7,24 +7,9 @@ import {
 } from '#/modules/inventory/inventory.service.js';
 import type { GraphQLContext } from '#/graphql/context.js';
 import type { Role } from '#/modules/auth/auth.types.js';
-import { AuthorizationError } from '#/shared/errors/index.js';
+import { requireRoles } from '#/shared/utils/auth.guards.js';
 
-// ─── Auth Guards ──────────────────────────────────────────────────────────────
-
-const requireAuth = (context: GraphQLContext) => {
-  if (!context.user) {
-    throw new AuthorizationError('You must be logged in');
-  }
-  return context.user;
-};
-
-const requireRoles = (context: GraphQLContext, roles: Role[]) => {
-  const user = requireAuth(context);
-  if (!roles.includes(user.role)) {
-    throw new AuthorizationError('You do not have permission to perform this action');
-  }
-  return user;
-};
+// ─── Role constants ───────────────────────────────────────────────────────────
 
 const STOCK_MANAGERS: Role[] = ['owner', 'admin', 'inventory'];
 

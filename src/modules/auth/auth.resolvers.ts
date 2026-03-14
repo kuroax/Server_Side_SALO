@@ -6,26 +6,9 @@ import {
   changePassword,
   getCurrentUser,
 } from '#/modules/auth/auth.service.js';
-import { AuthenticationError, AuthorizationError } from '#/shared/errors/index.js';
+import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
 import { UserModel } from '#/modules/auth/auth.model.js';
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const requireAuth = (context: GraphQLContext) => {
-  if (!context.user) {
-    throw new AuthenticationError('You must be logged in');
-  }
-  return context.user;
-};
-
-const requireRoles = (context: GraphQLContext, roles: Role[]) => {
-  const user = requireAuth(context);
-  if (!roles.includes(user.role as Role)) {
-    throw new AuthorizationError();
-  }
-  return user;
-};
 
 // ─── Resolvers ────────────────────────────────────────────────────────────────
 
@@ -50,7 +33,7 @@ export const authResolvers = {
       }
 
       // After first user exists, require owner or admin
-      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN]);
+      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
       return register(input);
     },
 
@@ -73,8 +56,8 @@ export const authResolvers = {
       { input }: { input: Record<string, unknown> },
       context: GraphQLContext,
     ) => {
-      const user = requireAuth(context);
-      await changePassword(user.id, input);
+      requireAuth(context);
+      await changePassword(context.user!.id, input);
       return true;
     },
 

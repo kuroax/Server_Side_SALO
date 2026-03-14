@@ -1,6 +1,6 @@
 import type { GraphQLContext } from '#/graphql/context.js';
-import { AuthenticationError, AuthorizationError } from '#/shared/errors/index.js';
 import type { Role } from '#/modules/auth/auth.types.js';
+import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import {
   addOrderNote,
   assignCustomerToOrder,
@@ -13,22 +13,6 @@ import {
   updateOrderStatus,
   updatePaymentStatus,
 } from '#/modules/orders/order.service.js';
-
-// ─── Auth guards ──────────────────────────────────────────────────────────────
-// TODO: extract to src/shared/utils/auth.guards.ts after all modules are built
-
-function requireAuth(context: GraphQLContext): void {
-  if (!context.user) {
-    throw new AuthenticationError('Authentication required.');
-  }
-}
-
-function requireRoles(context: GraphQLContext, allowedRoles: Role[]): void {
-  requireAuth(context);
-  if (!allowedRoles.includes(context.user!.role)) {
-    throw new AuthorizationError('You do not have permission to perform this action.');
-  }
-}
 
 // ─── Role sets ────────────────────────────────────────────────────────────────
 // Named constants — role changes are a single-line edit, not a grep-and-replace.
