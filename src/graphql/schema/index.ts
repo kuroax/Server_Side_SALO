@@ -10,6 +10,9 @@ import { productResolvers } from '#/modules/products/product.resolvers.js';
 import { inventoryTypeDefs } from '#/modules/inventory/inventory.typeDefs.js';
 import { inventoryResolvers } from '#/modules/inventory/inventory.resolvers.js';
 
+import { customerTypeDefs } from '#/modules/customers/customer.typeDefs.js';
+import { customerResolvers } from '#/modules/customers/customer.resolvers.js';
+
 // ─── Root Types ───────────────────────────────────────────────────────────────
 
 const rootTypeDefs = `#graphql
@@ -25,10 +28,12 @@ export const schema = makeExecutableSchema({
     authTypeDefs,
     productTypeDefs,
     inventoryTypeDefs,
+    customerTypeDefs,
   ]),
   resolvers: mergeResolvers([
     authResolvers,
     productResolvers,
     inventoryResolvers,
+    customerResolvers,
   ]),
 });
