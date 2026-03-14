@@ -26,15 +26,18 @@ export const authResolvers = {
       { input }: { input: Record<string, unknown> },
       context: GraphQLContext,
     ) => {
-      // Allow registration without auth only if no users exist yet (first owner setup)
       const userCount = await UserModel.countDocuments();
+
       if (userCount === 0) {
-        return register(input);
+        // Bootstrap — first owner, no auth required.
+        // callerRole null signals bootstrap path to the service.
+        return register(input, null);
       }
 
-      // After first user exists, require owner or admin
+      // All subsequent registrations require owner or admin at the resolver layer.
+      // The service enforces this independently as a second layer of defence.
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
-      return register(input);
+      return register(input, context.user!.role as Role);
     },
 
     login: async (
@@ -67,7 +70,7 @@ export const authResolvers = {
       context: GraphQLContext,
     ) => {
       requireAuth(context);
-      // Reminder: Implement tokenVersion increment in DB here for true revocation
+      // TODO (Phase B): Increment user.tokenVersion here for full revocation.
       return true;
     },
   },

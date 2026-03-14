@@ -13,19 +13,20 @@ const envSchema = z.object({
 
   // Auth
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
-  JWT_EXPIRES_IN: z.string().default('7d'),
+  JWT_EXPIRES_IN: z.string().default('15m'),           // short-lived — access token
   JWT_REFRESH_SECRET: z
     .string()
     .min(32, 'JWT_REFRESH_SECRET must be at least 32 characters'),
-  JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
+  JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),    // revocable via tokenVersion (Phase B)
 
   // Security
   BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(100),
 
-  // CORS
-  CORS_ORIGIN: z.string().default('*'),
+  // CORS — no default intentionally: must be set explicitly in every environment.
+  // Wildcard is rejected in production at startup.
+  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN is required'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -45,8 +46,11 @@ export const env = {
   IS_TEST: parsed.data.NODE_ENV === 'test',
 } as const;
 
+// Hard fail in production for wildcard CORS — a warning is not enough.
+// A misconfigured origin in production is a security vulnerability, not a warning.
 if (env.IS_PRODUCTION && env.CORS_ORIGIN === '*') {
-  console.warn('⚠️ CORS_ORIGIN is set to wildcard in production');
+  console.error('❌ CORS_ORIGIN cannot be wildcard (*) in production. Set an explicit origin.');
+  process.exit(1);
 }
 
 export const {
