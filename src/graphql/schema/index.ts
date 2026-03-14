@@ -1,39 +1,40 @@
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { mergeTypeDefs, mergeResolvers } from '@graphql-tools/merge';
 
-import { authTypeDefs } from '#/modules/auth/auth.typeDefs.js';
-import { authResolvers } from '#/modules/auth/auth.resolvers.js';
+import { authTypeDefs }      from '#/modules/auth/auth.typeDefs.js';
+import { authResolvers }     from '#/modules/auth/auth.resolvers.js';
 
-import { productTypeDefs } from '#/modules/products/product.typeDefs.js';
-import { productResolvers } from '#/modules/products/product.resolvers.js';
+import { productTypeDefs }   from '#/modules/products/product.typeDefs.js';
+import { productResolvers }  from '#/modules/products/product.resolvers.js';
 
-import { inventoryTypeDefs } from '#/modules/inventory/inventory.typeDefs.js';
+import { inventoryTypeDefs }  from '#/modules/inventory/inventory.typeDefs.js';
 import { inventoryResolvers } from '#/modules/inventory/inventory.resolvers.js';
 
-import { customerTypeDefs } from '#/modules/customers/customer.typeDefs.js';
+import { customerTypeDefs }  from '#/modules/customers/customer.typeDefs.js';
 import { customerResolvers } from '#/modules/customers/customer.resolvers.js';
 
-// ─── Root Types ───────────────────────────────────────────────────────────────
+import { orderTypeDefs }     from '#/modules/orders/order.typeDefs.js';
+import { orderResolvers }    from '#/modules/orders/order.resolvers.js';
 
-const rootTypeDefs = `#graphql
+// Root types — every module extends these via `extend type Query / Mutation`
+const rootTypeDefs = /* #graphql */ `
   type Query
   type Mutation
 `;
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
-
 export const schema = makeExecutableSchema({
-  typeDefs: mergeTypeDefs([
+  typeDefs: [
     rootTypeDefs,
     authTypeDefs,
     productTypeDefs,
     inventoryTypeDefs,
     customerTypeDefs,
-  ]),
-  resolvers: mergeResolvers([
+    orderTypeDefs,
+  ],
+  resolvers: [
     authResolvers,
     productResolvers,
     inventoryResolvers,
     customerResolvers,
-  ]),
+    orderResolvers,
+  ],
 });
