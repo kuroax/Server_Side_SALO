@@ -1,20 +1,11 @@
-import { Types } from 'mongoose';
 import { z } from 'zod';
+import { objectIdSchema } from '#/shared/validation/common.validation.js';
 import {
   ORDER_CHANNELS,
   ORDER_NOTE_KINDS,
   ORDER_STATUSES,
   PAYMENT_STATUSES,
 } from '#/modules/orders/order.types.js';
-
-// ─── Shared primitives ────────────────────────────────────────────────────────
-
-// Validates format at the boundary — prevents malformed IDs from travelling
-// into the service layer and causing Mongoose CastErrors.
-const objectIdSchema = z
-  .string({ error: 'Must be a string' })
-  .trim()
-  .refine(v => Types.ObjectId.isValid(v), { error: 'Invalid ID' });
 
 // ─── Item input ───────────────────────────────────────────────────────────────
 // Client supplies variant identity and pricing only.
