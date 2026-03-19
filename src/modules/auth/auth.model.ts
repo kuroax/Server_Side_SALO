@@ -17,31 +17,38 @@ export type IUserDocument = HydratedDocument<IUserWithTimestamps>;
 const userSchema = new Schema<IUserWithTimestamps>(
   {
     username: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
+      type:      String,
+      required:  true,
+      unique:    true,
+      trim:      true,
       lowercase: true,
     },
     email: {
-      type: String,
-      trim: true,
+      type:      String,
+      trim:      true,
       lowercase: true,
-      sparse: true,
+      sparse:    true,
     },
     password: {
-      type: String,
+      type:     String,
       required: true,
-      select: false,
+      select:   false,
     },
     role: {
-      type: String,
+      type:     String,
       required: true,
-      enum: ['owner', 'admin', 'sales', 'inventory', 'support'],
+      enum:     ['owner', 'admin', 'sales', 'inventory', 'support'],
     },
     isActive: {
-      type: Boolean,
+      type:    Boolean,
       default: true,
+    },
+    // Incremented on logout and password change.
+    // select: false — never returned to clients in any query.
+    tokenVersion: {
+      type:    Number,
+      default: 0,
+      select:  false,
     },
   },
   {

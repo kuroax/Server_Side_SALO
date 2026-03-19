@@ -20,12 +20,16 @@ export const comparePassword = (
 // ─── Tokens ───────────────────────────────────────────────────────────────────
 
 export const signAccessToken = (payload: JWTPayload): string => {
-  return jwt.sign(payload, env.JWT_SECRET, {
+  // Access tokens do not include tokenVersion — they are short-lived (15m)
+  // and revocation is handled via refresh token invalidation.
+  const { tokenVersion: _, ...accessPayload } = payload;
+  return jwt.sign(accessPayload, env.JWT_SECRET, {
     expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
   });
 };
 
 export const signRefreshToken = (payload: JWTPayload): string => {
+  // Refresh tokens include tokenVersion for server-side revocation.
   return jwt.sign(payload, env.JWT_REFRESH_SECRET, {
     expiresIn: env.JWT_REFRESH_EXPIRES_IN as jwt.SignOptions['expiresIn'],
   });
@@ -54,18 +58,18 @@ export const verifyRefreshToken = (token: string): JWTPayload => {
 };
 
 export const generateTokens = (payload: JWTPayload) => ({
-  accessToken: signAccessToken(payload),
+  accessToken:  signAccessToken(payload),
   refreshToken: signRefreshToken(payload),
 });
 
 // ─── Mapper ───────────────────────────────────────────────────────────────────
 
 export const toAuthUser = (user: IUserDocument): SafeUser => ({
-  id: user._id.toString(),
-  username: user.username,
-  email: user.email,
-  role: user.role,
-  isActive: user.isActive,
+  id:        user._id.toString(),
+  username:  user.username,
+  email:     user.email,
+  role:      user.role,
+  isActive:  user.isActive,
   createdAt: user.createdAt instanceof Date
     ? user.createdAt.toISOString()
     : new Date(user.createdAt).toISOString(),

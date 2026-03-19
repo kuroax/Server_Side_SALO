@@ -5,6 +5,7 @@ import {
   refreshToken,
   changePassword,
   getCurrentUser,
+  logoutUser,
 } from '#/modules/auth/auth.service.js';
 import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
@@ -29,13 +30,9 @@ export const authResolvers = {
       const userCount = await UserModel.countDocuments();
 
       if (userCount === 0) {
-        // Bootstrap — first owner, no auth required.
-        // callerRole null signals bootstrap path to the service.
         return register(input, null);
       }
 
-      // All subsequent registrations require owner or admin at the resolver layer.
-      // The service enforces this independently as a second layer of defence.
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
       return register(input, context.user!.role as Role);
     },
@@ -70,7 +67,8 @@ export const authResolvers = {
       context: GraphQLContext,
     ) => {
       requireAuth(context);
-      // TODO (Phase B): Increment user.tokenVersion here for full revocation.
+      // Increment tokenVersion — invalidates all outstanding refresh tokens.
+      await logoutUser(context.user!.id);
       return true;
     },
   },
