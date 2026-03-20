@@ -16,6 +16,7 @@ import {
 } from '#/config/env.js';
 import { logger } from '#/config/logger.js';
 import { AppError } from '#/shared/errors/index.js';
+import { whatsappWebhookRouter } from '#/integrations/whatsapp/webhook.router.js';
 
 export const createApp = async (): Promise<Application> => {
   const app = express();
@@ -25,7 +26,7 @@ export const createApp = async (): Promise<Application> => {
   // ─── Security headers ─────────────────────────────────────────────────────────
   app.use(
     helmet({
-      contentSecurityPolicy:    IS_DEVELOPMENT ? false : undefined,
+      contentSecurityPolicy:     IS_DEVELOPMENT ? false : undefined,
       crossOriginEmbedderPolicy: IS_DEVELOPMENT ? false : undefined,
     }),
   );
@@ -39,17 +40,14 @@ export const createApp = async (): Promise<Application> => {
   );
 
   // ─── Rate limiting ────────────────────────────────────────────────────────────
-  // Applied globally before any route handler.
-  // Window and max are driven by env vars so they can be tuned per environment
-  // without a code change. Defaults: 100 requests per 15 minutes.
   app.use(
     rateLimit({
-      windowMs:         RATE_LIMIT_WINDOW_MS,
-      max:              RATE_LIMIT_MAX_REQUESTS,
-      standardHeaders:  true,  // Return rate limit info in RateLimit-* headers
-      legacyHeaders:    false, // Disable X-RateLimit-* headers
-      message:          { success: false, message: 'Too many requests — please try again later.' },
-      skip:             () => IS_DEVELOPMENT, // Skip rate limiting in development
+      windowMs:        RATE_LIMIT_WINDOW_MS,
+      max:             RATE_LIMIT_MAX_REQUESTS,
+      standardHeaders: true,
+      legacyHeaders:   false,
+      message:         { success: false, message: 'Too many requests — please try again later.' },
+      skip:            () => IS_DEVELOPMENT,
     }),
   );
 
@@ -103,6 +101,13 @@ export const createApp = async (): Promise<Application> => {
   );
 
   logger.info('Apollo middleware mounted at /api/graphql');
+
+  // ─── Webhooks ─────────────────────────────────────────────────────────────────
+  // Mounted after Apollo — webhook endpoints are REST, not GraphQL.
+  // Secret validation is handled inside the controller.
+  app.use('/api/webhooks/whatsapp', whatsappWebhookRouter);
+
+  logger.info('WhatsApp webhook mounted at /api/webhooks/whatsapp');
 
   // ─── 404 ──────────────────────────────────────────────────────────────────────
   app.use((_req: Request, res: Response) => {

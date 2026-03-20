@@ -13,11 +13,11 @@ const envSchema = z.object({
 
   // Auth
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
-  JWT_EXPIRES_IN: z.string().default('15m'),           // short-lived — access token
+  JWT_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_SECRET: z
     .string()
     .min(32, 'JWT_REFRESH_SECRET must be at least 32 characters'),
-  JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),    // revocable via tokenVersion (Phase B)
+  JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
 
   // Security
   BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
@@ -27,6 +27,14 @@ const envSchema = z.object({
   // CORS — no default intentionally: must be set explicitly in every environment.
   // Wildcard is rejected in production at startup.
   CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN is required'),
+
+  // Integrations
+  // Required for WhatsApp bot — Claude API key from console.anthropic.com.
+  ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY is required'),
+
+  // Shared secret sent by n8n in X-Webhook-Secret header.
+  // Must match the value configured in the n8n HTTP Request node.
+  WEBHOOK_SECRET: z.string().min(16, 'WEBHOOK_SECRET must be at least 16 characters'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -41,13 +49,12 @@ if (!parsed.success) {
 
 export const env = {
   ...parsed.data,
-  IS_PRODUCTION: parsed.data.NODE_ENV === 'production',
+  IS_PRODUCTION:  parsed.data.NODE_ENV === 'production',
   IS_DEVELOPMENT: parsed.data.NODE_ENV === 'development',
-  IS_TEST: parsed.data.NODE_ENV === 'test',
+  IS_TEST:        parsed.data.NODE_ENV === 'test',
 } as const;
 
-// Hard fail in production for wildcard CORS — a warning is not enough.
-// A misconfigured origin in production is a security vulnerability, not a warning.
+// Hard fail in production for wildcard CORS.
 if (env.IS_PRODUCTION && env.CORS_ORIGIN === '*') {
   console.error('❌ CORS_ORIGIN cannot be wildcard (*) in production. Set an explicit origin.');
   process.exit(1);
@@ -65,6 +72,8 @@ export const {
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
   CORS_ORIGIN,
+  ANTHROPIC_API_KEY,
+  WEBHOOK_SECRET,
   IS_PRODUCTION,
   IS_DEVELOPMENT,
   IS_TEST,
