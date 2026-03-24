@@ -11,6 +11,19 @@ export type WebhookResult = {
   reply: string;
 };
 
+// ─── Business info ────────────────────────────────────────────────────────────
+// Single source of truth for facts the AI uses when answering customers.
+// Update here when anything changes — never hardcode these in the system prompt.
+
+const BUSINESS_INFO = {
+  showroomAddress: 'Av. Guadalupe 1390, Chapalita Oriente, Guadalajara, Jalisco',
+  businessHours:   'Lunes a Viernes 10:00am–8:30pm · Sábados 11:00am–7:00pm · Domingos cerrado',
+  shippingPrice:   179,
+  paymentMethods:  'Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.',
+  depositPercent:  30,
+  paymentDays:     20,
+} as const;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // Fuzzy match a product name hint against the catalog.
@@ -56,7 +69,7 @@ export const handleIncomingMessage = async (
     .sort({ createdAt: -1 })
     .lean();
 
-  // ── 3. Fetch active product catalog ─────────────────────────────────────
+  // ── 3. Fetch active product catalog ──────────────────────────────────────
   const products = await ProductModel.find({ status: 'active' })
     .select('id name price brand')
     .lean();
@@ -68,7 +81,7 @@ export const handleIncomingMessage = async (
     brand: p.brand,
   }));
 
-  // ── 4. Call Claude — intent detection + response generation ─────────────
+  // ── 4. Call Claude — intent detection + response generation ──────────────
   const result = await processMessage({
     customerName:    customer.name !== `WhatsApp ${from}` ? customer.name : null,
     recentOrder:     recentOrder
@@ -80,9 +93,10 @@ export const handleIncomingMessage = async (
       : null,
     catalog,
     incomingMessage: message,
+    businessInfo:    BUSINESS_INFO,
   });
 
-  // ── 5. Handle create_order intent ────────────────────────────────────────
+  // ── 5. Handle create_order intent ─────────────────────────────────────────
   // orderHints from Claude are treated as unverified hints only.
   // All product data (id, name, price) is resolved from our own catalog.
   if (result.intent === 'create_order' && result.orderHints?.length) {

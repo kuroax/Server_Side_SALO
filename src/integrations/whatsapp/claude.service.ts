@@ -29,8 +29,8 @@ export type ClaudeResult = {
 };
 
 export type ClaudeContext = {
-  customerName:    string | null;
-  recentOrder:     {
+  customerName: string | null;
+  recentOrder: {
     orderNumber: string;
     status:      string;
     total:       number;
@@ -42,11 +42,24 @@ export type ClaudeContext = {
     brand: string;
   }[];
   incomingMessage: string;
+  // ── Dynamic business facts ─────────────────────────────────────────────────
+  // Passed at call time so they never go stale inside the system prompt.
+  businessInfo: {
+    showroomAddress: string;
+    businessHours:   string;
+    shippingPrice:   number;
+    paymentMethods:  string;
+    depositPercent:  number;
+    paymentDays:     number;
+  };
 };
 
 // ─── Output schema ────────────────────────────────────────────────────────────
-// Validates Claude's JSON response at runtime. Rejects invalid shapes instead
-// of trusting TypeScript casts. Server-side source of truth for all business data.
+// FIX 1: Bidirectional orderHints contract via z.union().
+//   create_order  → orderHints required, non-empty
+//   all others    → orderHints must be absent (undefined)
+// Previously a one-way .refine() allowed non-create_order intents to
+// silently carry orderHints, which was inconsistent with the contract.
 
 const orderHintSchema = z.object({
   productNameHint: z.string().min(1),
@@ -55,25 +68,22 @@ const orderHintSchema = z.object({
   quantity:        z.number().int().positive().max(100),
 });
 
-const claudeResultSchema = z.object({
-  intent: z.enum([
-    'catalog_query',
-    'price_query',
-    'create_order',
-    'order_status',
-    'general',
-  ]),
-  response:   z.string().min(1).max(2000),
-  orderHints: z.array(orderHintSchema).optional(),
-}).refine(
-  // orderHints must only appear on create_order intent.
-  (data) => data.intent !== 'create_order' || (data.orderHints && data.orderHints.length > 0),
-  { message: 'create_order intent requires at least one orderHint' }
-);
+const claudeResultSchema = z.union([
+  // Branch 1: create_order — orderHints required and non-empty
+  z.object({
+    intent:     z.literal('create_order'),
+    response:   z.string().min(1).max(2000),
+    orderHints: z.array(orderHintSchema).min(1),
+  }),
+  // Branch 2: all other intents — orderHints must be absent
+  z.object({
+    intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'general']),
+    response:   z.string().min(1).max(2000),
+    orderHints: z.undefined().optional(),
+  }),
+]);
 
 // ─── Safe fallback ────────────────────────────────────────────────────────────
-// Used when Claude returns invalid JSON or a schema-invalid response.
-// Never pass raw model output to users on failure.
 
 const SAFE_FALLBACK: ClaudeResult = {
   intent:   'general',
@@ -84,36 +94,78 @@ const SAFE_FALLBACK: ClaudeResult = {
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// Model name in a constant — easier to rotate across environments.
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_TOKENS   = 512; // JSON-only response — 1024 is excessive for this use case.
+const MAX_TOKENS   = 512;
+
+// FIX 3: Timeout — WhatsApp webhooks must respond quickly.
+// If Claude hangs past this threshold Meta will retry the webhook,
+// causing duplicate messages. 8s leaves margin before typical proxy limits.
+const REQUEST_TIMEOUT_MS = 8_000;
 
 // ─── System prompt ────────────────────────────────────────────────────────────
+// Persona/tone instructions are kept here (stable, brand-driven).
+// Unstable business facts (address, hours, pricing) are injected at call
+// time via userContent so they never go stale inside this constant.
 
-const SYSTEM_PROMPT = `Eres el asistente virtual de SALO, una tienda de ropa.
-Respondes ÚNICAMENTE en español, de forma amigable y concisa.
+const SYSTEM_PROMPT = `Eres el asistente virtual de SALO shop, una tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga, Lululemon y Wiskii.
 
-Tu trabajo es:
-1. Detectar la intención del mensaje del cliente
-2. Responder de forma natural y útil
+Respondes ÚNICAMENTE en español, imitando exactamente el estilo de comunicación del dueño Luis. Eres cálido, entusiasta, personal y cercano.
 
-INTENCIONES POSIBLES:
-- catalog_query: el cliente pregunta por productos disponibles
-- price_query: el cliente pregunta por el precio de algo
-- create_order: el cliente quiere hacer un pedido (menciona producto + talla + color)
-- order_status: el cliente pregunta por su pedido
-- general: saludos, preguntas generales, o mensajes que no encajan en lo anterior
+─── ESTILO DE COMUNICACIÓN ────────────────────────────────────────────────────
 
-REGLAS:
-- Nunca inventes productos que no estén en el catálogo
+SALUDOS:
+- "Hola buen día!", "Hello!", "Hola bonita buen día!🙌🏼", "Hola bella!"
+- "¡Que gusto saludarte!", "¡Que gusto volverte a saludar!"
+
+AFIRMACIONES:
+- "Vaaaa!", "Sipi!", "Padrísimo!🙌🏼", "Perfecto!", "Super!", "Con mil gusto!"
+
+APODOS (úsalos naturalmente):
+- "bonita", "bella", "corazón", "linda", "amiga", "bb"
+
+DISPONIBILIDAD:
+- "Disponible!", "Disponible Talla M!🙌🏼"
+- "Se me agotó🥹", "Lo manejo sobre pedido"
+
+AL PRESENTAR PRODUCTOS Y PEDIDOS (siempre con ⭐️ por ítem):
+- "⭐️Bra Alo color negro Talla S $2,190\n⭐️Legging Alo color negro Talla S $3,690\nTotal $5,880"
+
+CUANDO EL CLIENTE CONFIRMA PAGO:
+- "Mil Gracias!!! Que se te multiplique 70 mil veces 7!💫"
+- "Sigo en súper contacto contigo para la entrega!🙏🏻"
+
+CUANDO HAY DEMORA O PROBLEMA:
+- "Disculpa la demora!", "Ntp corazón!", "Sigo en súper contacto contigo🙏🏻"
+
+CIERRE:
+- "Es un gusto atenderte🫶🏼", "Sigo a tus órdenes!", "A tiii!🙏🏻"
+
+EMOJIS DE LUIS (úsalos con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨
+
+─── INTENCIONES POSIBLES ──────────────────────────────────────────────────────
+
+- catalog_query : el cliente pregunta qué productos hay disponibles
+- price_query   : el cliente pregunta por el precio de algo específico
+- create_order  : el cliente quiere hacer un pedido (necesitas producto + talla + color)
+- order_status  : el cliente pregunta por el estado de su pedido
+- general       : saludos, preguntas generales, o mensajes que no encajan en lo anterior
+
+─── REGLAS DE NEGOCIO ─────────────────────────────────────────────────────────
+
+- Nunca inventes productos que no estén en el catálogo provisto
 - Nunca inventes precios — el sistema los asigna internamente
-- Si falta información para un pedido (producto, talla o color), usa intent "general" y pide los datos faltantes
-- Los orderHints son SOLO referencias de lo que el cliente mencionó, NO precios reales
+- Si falta producto, talla o color para un pedido, usa intent "general" y pide los datos faltantes
+- Los orderHints son SOLO lo que el cliente mencionó, NO datos de precio reales
+- En Lululemon: talla M equivale a talla 8, talla S a talla 6, etc.
 
-FORMATO DE RESPUESTA — JSON estricto, sin markdown, sin texto extra:
+─── CONTRATO DE RESPUESTA — JSON ESTRICTO ─────────────────────────────────────
+
+Sin markdown. Sin texto antes o después del JSON. Sin comentarios.
+
+Para intent create_order (orderHints OBLIGATORIO y no vacío):
 {
-  "intent": "catalog_query" | "price_query" | "create_order" | "order_status" | "general",
-  "response": "tu respuesta en español aquí",
+  "intent": "create_order",
+  "response": "tu respuesta aquí",
   "orderHints": [
     {
       "productNameHint": "nombre aproximado del producto mencionado",
@@ -124,53 +176,78 @@ FORMATO DE RESPUESTA — JSON estricto, sin markdown, sin texto extra:
   ]
 }
 
-orderHints SOLO se incluye cuando intent === "create_order" y tienes todos los datos necesarios.`;
+Para cualquier otro intent (orderHints PROHIBIDO — no incluir el campo):
+{
+  "intent": "catalog_query" | "price_query" | "order_status" | "general",
+  "response": "tu respuesta aquí"
+}`;
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const processMessage = async (
   context: ClaudeContext,
 ): Promise<ClaudeResult> => {
-  const { customerName, recentOrder, catalog, incomingMessage } = context;
+  const { customerName, recentOrder, catalog, incomingMessage, businessInfo } = context;
 
-  const userContent = `CLIENTE: ${customerName ? `"${customerName}"` : 'Cliente nuevo'}
+  // FIX 4: Business facts injected dynamically — never hardcoded in the prompt.
+  // If address, hours, or pricing change, only the caller needs updating.
+  const userContent = `CLIENTE: ${customerName ? `"${customerName}"` : 'Cliente nueva'}
 
-CATÁLOGO:
+CATÁLOGO DISPONIBLE:
 ${catalog.length === 0
-    ? 'Sin productos disponibles.'
+    ? 'Sin productos disponibles en este momento.'
     : catalog.map((p) => `- ${p.name} (${p.brand}) — $${p.price} MXN`).join('\n')
   }
 
-PEDIDO RECIENTE:
+PEDIDO RECIENTE DEL CLIENTE:
 ${recentOrder
     ? `${recentOrder.orderNumber} — ${recentOrder.status} — $${recentOrder.total} MXN`
     : 'Sin pedidos previos.'
   }
 
-MENSAJE: "${incomingMessage}"`;
+INFORMACIÓN DEL NEGOCIO (usa estos datos exactos al responder):
+- Showroom: ${businessInfo.showroomAddress}
+- Horarios: ${businessInfo.businessHours}
+- Envío nacional express: $${businessInfo.shippingPrice} MXN
+- Formas de pago: ${businessInfo.paymentMethods}
+- Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días
+
+MENSAJE DEL CLIENTE: "${incomingMessage}"`;
 
   logger.info(
     { catalogSize: catalog.length, hasRecentOrder: !!recentOrder },
     'Calling Claude API',
   );
 
-  // ── API call with try/catch — provider failures return safe fallback ───────
+  // ── API call with timeout + try/catch ─────────────────────────────────────
+  // FIX 3: AbortSignal.timeout() cancels the request if Claude doesn't respond
+  // within REQUEST_TIMEOUT_MS, preventing duplicate WhatsApp messages from
+  // Meta's webhook retries on slow responses.
   let rawText: string;
 
   try {
-    const message = await client.messages.create({
-      model:    CLAUDE_MODEL,
-      max_tokens: MAX_TOKENS,
-      system:   SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userContent }],
-    });
+    const message = await client.messages.create(
+      {
+        model:      CLAUDE_MODEL,
+        max_tokens: MAX_TOKENS,
+        system:     SYSTEM_PROMPT,
+        messages:   [{ role: 'user', content: userContent }],
+      },
+      { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+    );
 
     rawText = message.content
       .filter((block) => block.type === 'text')
       .map((block) => (block as { type: 'text'; text: string }).text)
       .join('');
   } catch (err) {
-    logger.error({ err }, 'Claude API call failed — returning safe fallback');
+    const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+    logger.error(
+      { err, isTimeout },
+      isTimeout
+        ? 'Claude API timed out — returning safe fallback'
+        : 'Claude API call failed — returning safe fallback',
+    );
     return SAFE_FALLBACK;
   }
 
@@ -180,11 +257,11 @@ MENSAJE: "${incomingMessage}"`;
   try {
     parsed = JSON.parse(rawText);
   } catch {
-    logger.warn('Claude returned non-JSON — returning safe fallback');
+    logger.warn({ rawText }, 'Claude returned non-JSON — returning safe fallback');
     return SAFE_FALLBACK;
   }
 
-  // ── Schema validation — reject invalid shapes ─────────────────────────────
+  // ── Schema validation ─────────────────────────────────────────────────────
   const validated = claudeResultSchema.safeParse(parsed);
 
   if (!validated.success) {
@@ -197,5 +274,8 @@ MENSAJE: "${incomingMessage}"`;
 
   logger.info({ intent: validated.data.intent }, 'Claude response validated successfully');
 
-  return validated.data as ClaudeResult;
+  // FIX 2: Removed unnecessary `as ClaudeResult` cast.
+  // z.union() infers the correct type — the cast was a code smell
+  // suggesting distrust of the validator. Zod's output is already typed.
+  return validated.data;
 };
