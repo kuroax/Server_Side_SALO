@@ -1,6 +1,10 @@
 import { CustomerModel } from '#/modules/customers/customer.model.js';
 import { OrderModel } from '#/modules/orders/order.model.js';
 import { ProductModel } from '#/modules/products/product.model.js';
+import {
+  ConversationModel,
+  MAX_CONVERSATION_TURNS,
+} from '#/modules/conversations/conversation.model.js';
 import { processMessage } from '#/integrations/whatsapp/claude.service.js';
 import { logger } from '#/config/logger.js';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
@@ -64,12 +68,28 @@ export const handleIncomingMessage = async (
     logger.info({ phone: from }, 'New customer created from WhatsApp');
   }
 
-  // ── 2. Fetch most recent order for context ───────────────────────────────
-  const recentOrder = await OrderModel.findOne({ customerId: customer._id.toString() })
+  const customerId = customer._id.toString();
+
+  // ── 2. Load conversation history ─────────────────────────────────────────
+  // Find or initialize the conversation document for this customer+channel.
+  // We use findOne here (not findOneAndUpdate) because we need the existing
+  // turns to pass to Claude before we know what to append.
+  const conversation = await ConversationModel.findOne({
+    customerId,
+    channel: 'whatsapp',
+  }).lean();
+
+  const conversationHistory = (conversation?.turns ?? []).map((t) => ({
+    role:    t.role as 'user' | 'assistant',
+    content: t.content,
+  }));
+
+  // ── 3. Fetch most recent order for context ───────────────────────────────
+  const recentOrder = await OrderModel.findOne({ customerId })
     .sort({ createdAt: -1 })
     .lean();
 
-  // ── 3. Fetch active product catalog ──────────────────────────────────────
+  // ── 4. Fetch active product catalog ──────────────────────────────────────
   const products = await ProductModel.find({ status: 'active' })
     .select('id name price brand')
     .lean();
@@ -81,7 +101,7 @@ export const handleIncomingMessage = async (
     brand: p.brand,
   }));
 
-  // ── 4. Call Claude — intent detection + response generation ──────────────
+  // ── 5. Call Claude ────────────────────────────────────────────────────────
   const result = await processMessage({
     customerName:    customer.name !== `WhatsApp ${from}` ? customer.name : null,
     recentOrder:     recentOrder
@@ -92,18 +112,47 @@ export const handleIncomingMessage = async (
         }
       : null,
     catalog,
-    incomingMessage: message,
-    businessInfo:    BUSINESS_INFO,
+    incomingMessage:     message,
+    conversationHistory,
+    businessInfo:        BUSINESS_INFO,
   });
 
-  // ── 5. Handle create_order intent ─────────────────────────────────────────
+  // ── 6. Persist conversation turn ─────────────────────────────────────────
+  // Append the new user message + assistant reply, then trim to the rolling
+  // window so the document never grows unboundedly.
+  const newTurns = [
+    { role: 'user'      as const, content: message,          createdAt: new Date() },
+    { role: 'assistant' as const, content: result.response,  createdAt: new Date() },
+  ];
+
+  await ConversationModel.findOneAndUpdate(
+    { customerId, channel: 'whatsapp' },
+    {
+      $push: {
+        turns: {
+          $each:  newTurns,
+          // Keep only the last MAX_CONVERSATION_TURNS turns.
+          // $slice with a negative value keeps the tail of the array.
+          $slice: -MAX_CONVERSATION_TURNS,
+        },
+      },
+      $set: { lastMessageAt: new Date() },
+    },
+    { upsert: true, new: true },
+  );
+
+  logger.info(
+    { customerId, historyTurns: conversationHistory.length },
+    'Conversation turn persisted',
+  );
+
+  // ── 7. Handle create_order intent ─────────────────────────────────────────
   // orderHints from Claude are treated as unverified hints only.
   // All product data (id, name, price) is resolved from our own catalog.
   if (result.intent === 'create_order' && result.orderHints?.length) {
     try {
       const resolvedItems = result.orderHints
         .map((hint) => {
-          // Resolve product from catalog — never trust Claude's price or ID.
           const product = findProductByHint(hint.productNameHint, catalog);
 
           if (!product) {
@@ -121,7 +170,7 @@ export const handleIncomingMessage = async (
             size:        hint.size,
             color:       hint.color,
             quantity:    hint.quantity,
-            unitPrice:   product.price,           // from catalog, not Claude
+            unitPrice:   product.price,
             lineTotal:   hint.quantity * product.price,
           };
         })
@@ -136,7 +185,7 @@ export const handleIncomingMessage = async (
 
         await OrderModel.create({
           orderNumber,
-          customerId:    customer._id.toString(),
+          customerId,
           channel:       'whatsapp',
           status:        'pending',
           paymentStatus: 'unpaid',
@@ -150,7 +199,7 @@ export const handleIncomingMessage = async (
           }],
         });
 
-        logger.info({ orderNumber, customerId: customer._id }, 'Order created from WhatsApp');
+        logger.info({ orderNumber, customerId }, 'Order created from WhatsApp');
       } else {
         logger.warn(
           { hints: result.orderHints },

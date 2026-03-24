@@ -28,6 +28,12 @@ export type ClaudeResult = {
   orderHints?: ClaudeOrderHint[];
 };
 
+// A single turn in the conversation history passed from webhook.service.ts.
+export type ConversationTurnInput = {
+  role:    'user' | 'assistant';
+  content: string;
+};
+
 export type ClaudeContext = {
   customerName: string | null;
   recentOrder: {
@@ -41,9 +47,11 @@ export type ClaudeContext = {
     price: number;
     brand: string;
   }[];
-  incomingMessage: string;
-  // ── Dynamic business facts ─────────────────────────────────────────────────
-  // Passed at call time so they never go stale inside the system prompt.
+  incomingMessage:     string;
+  // Conversation history — last N turns before the current message.
+  // Empty array on first contact.
+  conversationHistory: ConversationTurnInput[];
+  // Dynamic business facts — never hardcoded in system prompt.
   businessInfo: {
     showroomAddress: string;
     businessHours:   string;
@@ -55,11 +63,9 @@ export type ClaudeContext = {
 };
 
 // ─── Output schema ────────────────────────────────────────────────────────────
-// FIX 1: Bidirectional orderHints contract via z.union().
+// Bidirectional orderHints contract via z.union():
 //   create_order  → orderHints required, non-empty
-//   all others    → orderHints must be absent (undefined)
-// Previously a one-way .refine() allowed non-create_order intents to
-// silently carry orderHints, which was inconsistent with the contract.
+//   all others    → orderHints must be absent
 
 const orderHintSchema = z.object({
   productNameHint: z.string().min(1),
@@ -69,13 +75,11 @@ const orderHintSchema = z.object({
 });
 
 const claudeResultSchema = z.union([
-  // Branch 1: create_order — orderHints required and non-empty
   z.object({
     intent:     z.literal('create_order'),
     response:   z.string().min(1).max(2000),
     orderHints: z.array(orderHintSchema).min(1),
   }),
-  // Branch 2: all other intents — orderHints must be absent
   z.object({
     intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'general']),
     response:   z.string().min(1).max(2000),
@@ -94,28 +98,31 @@ const SAFE_FALLBACK: ClaudeResult = {
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_TOKENS   = 512;
-
-// FIX 3: Timeout — WhatsApp webhooks must respond quickly.
-// If Claude hangs past this threshold Meta will retry the webhook,
-// causing duplicate messages. 8s leaves margin before typical proxy limits.
+const CLAUDE_MODEL       = 'claude-sonnet-4-20250514';
+const MAX_TOKENS         = 512;
 const REQUEST_TIMEOUT_MS = 8_000;
 
 // ─── System prompt ────────────────────────────────────────────────────────────
-// Persona/tone instructions are kept here (stable, brand-driven).
-// Unstable business facts (address, hours, pricing) are injected at call
-// time via userContent so they never go stale inside this constant.
+// Persona and tone only — unstable business facts injected dynamically
+// in the context block at call time.
 
 const SYSTEM_PROMPT = `Eres el asistente virtual de SALO shop, una tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga, Lululemon y Wiskii.
 
 Respondes ÚNICAMENTE en español, imitando exactamente el estilo de comunicación del dueño Luis. Eres cálido, entusiasta, personal y cercano.
 
+─── MUY IMPORTANTE — CONTINUIDAD DE CONVERSACIÓN ─────────────────────────────
+
+Recibirás el historial de mensajes anteriores. DEBES usarlo para dar continuidad:
+- Si ya saludaste antes, NO repitas "Hola bonita buen día" — continúa naturalmente
+- Si el cliente ya preguntó algo, recuerda su contexto y no lo repitas
+- Si ya mostraste el catálogo, no lo repitas completo — referencia lo que ya compartiste
+- Adapta tu tono al punto de la conversación en que estás
+
 ─── ESTILO DE COMUNICACIÓN ────────────────────────────────────────────────────
 
-SALUDOS:
-- "Hola buen día!", "Hello!", "Hola bonita buen día!🙌🏼", "Hola bella!"
-- "¡Que gusto saludarte!", "¡Que gusto volverte a saludar!"
+SALUDOS (solo en el primer mensaje, nunca después):
+- "Hola buen día!", "Hola bonita buen día!🙌🏼", "Hola bella!"
+- "¡Que gusto saludarte!"
 
 AFIRMACIONES:
 - "Vaaaa!", "Sipi!", "Padrísimo!🙌🏼", "Perfecto!", "Super!", "Con mil gusto!"
@@ -127,20 +134,17 @@ DISPONIBILIDAD:
 - "Disponible!", "Disponible Talla M!🙌🏼"
 - "Se me agotó🥹", "Lo manejo sobre pedido"
 
-AL PRESENTAR PRODUCTOS Y PEDIDOS (siempre con ⭐️ por ítem):
+AL PRESENTAR PRODUCTOS (siempre con ⭐️ por ítem):
 - "⭐️Bra Alo color negro Talla S $2,190\n⭐️Legging Alo color negro Talla S $3,690\nTotal $5,880"
 
 CUANDO EL CLIENTE CONFIRMA PAGO:
 - "Mil Gracias!!! Que se te multiplique 70 mil veces 7!💫"
 - "Sigo en súper contacto contigo para la entrega!🙏🏻"
 
-CUANDO HAY DEMORA O PROBLEMA:
-- "Disculpa la demora!", "Ntp corazón!", "Sigo en súper contacto contigo🙏🏻"
-
 CIERRE:
 - "Es un gusto atenderte🫶🏼", "Sigo a tus órdenes!", "A tiii!🙏🏻"
 
-EMOJIS DE LUIS (úsalos con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨
+EMOJIS (úsalos con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨
 
 ─── INTENCIONES POSIBLES ──────────────────────────────────────────────────────
 
@@ -156,7 +160,7 @@ EMOJIS DE LUIS (úsalos con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️
 - Nunca inventes precios — el sistema los asigna internamente
 - Si falta producto, talla o color para un pedido, usa intent "general" y pide los datos faltantes
 - Los orderHints son SOLO lo que el cliente mencionó, NO datos de precio reales
-- En Lululemon: talla M equivale a talla 8, talla S a talla 6, etc.
+- En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4
 
 ─── CONTRATO DE RESPUESTA — JSON ESTRICTO ─────────────────────────────────────
 
@@ -187,11 +191,20 @@ Para cualquier otro intent (orderHints PROHIBIDO — no incluir el campo):
 export const processMessage = async (
   context: ClaudeContext,
 ): Promise<ClaudeResult> => {
-  const { customerName, recentOrder, catalog, incomingMessage, businessInfo } = context;
+  const {
+    customerName,
+    recentOrder,
+    catalog,
+    incomingMessage,
+    conversationHistory,
+    businessInfo,
+  } = context;
 
-  // FIX 4: Business facts injected dynamically — never hardcoded in the prompt.
-  // If address, hours, or pricing change, only the caller needs updating.
-  const userContent = `CLIENTE: ${customerName ? `"${customerName}"` : 'Cliente nueva'}
+  // ── Context block (injected as first user turn) ──────────────────────────
+  // Business facts live here — not in the system prompt — so they never
+  // go stale. Updated at call time on every request.
+  const contextBlock = `[CONTEXTO DEL SISTEMA — no mostrar al cliente]
+CLIENTE: ${customerName ?? 'Cliente nueva'}
 
 CATÁLOGO DISPONIBLE:
 ${catalog.length === 0
@@ -205,24 +218,38 @@ ${recentOrder
     : 'Sin pedidos previos.'
   }
 
-INFORMACIÓN DEL NEGOCIO (usa estos datos exactos al responder):
+INFORMACIÓN DEL NEGOCIO:
 - Showroom: ${businessInfo.showroomAddress}
 - Horarios: ${businessInfo.businessHours}
 - Envío nacional express: $${businessInfo.shippingPrice} MXN
 - Formas de pago: ${businessInfo.paymentMethods}
 - Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días
+[FIN CONTEXTO]`;
 
-MENSAJE DEL CLIENTE: "${incomingMessage}"`;
+  // ── Build messages array ─────────────────────────────────────────────────
+  // The Anthropic API requires strictly alternating user/assistant roles.
+  // Structure:
+  //   [user]      context block   — grounding data
+  //   [assistant] synthetic ack   — satisfies alternation constraint
+  //   [...turns]  history         — previous conversation turns (already alternating)
+  //   [user]      current message — what the customer just sent
+  const messages: { role: 'user' | 'assistant'; content: string }[] = [
+    { role: 'user',      content: contextBlock },
+    { role: 'assistant', content: 'Entendido. Listo para atender al cliente.' },
+    ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
+    { role: 'user',      content: incomingMessage },
+  ];
 
   logger.info(
-    { catalogSize: catalog.length, hasRecentOrder: !!recentOrder },
+    {
+      catalogSize:    catalog.length,
+      hasRecentOrder: !!recentOrder,
+      historyTurns:   conversationHistory.length,
+    },
     'Calling Claude API',
   );
 
-  // ── API call with timeout + try/catch ─────────────────────────────────────
-  // FIX 3: AbortSignal.timeout() cancels the request if Claude doesn't respond
-  // within REQUEST_TIMEOUT_MS, preventing duplicate WhatsApp messages from
-  // Meta's webhook retries on slow responses.
+  // ── API call with timeout ────────────────────────────────────────────────
   let rawText: string;
 
   try {
@@ -231,7 +258,7 @@ MENSAJE DEL CLIENTE: "${incomingMessage}"`;
         model:      CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
         system:     SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: userContent }],
+        messages,
       },
       { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
     );
@@ -274,8 +301,5 @@ MENSAJE DEL CLIENTE: "${incomingMessage}"`;
 
   logger.info({ intent: validated.data.intent }, 'Claude response validated successfully');
 
-  // FIX 2: Removed unnecessary `as ClaudeResult` cast.
-  // z.union() infers the correct type — the cast was a code smell
-  // suggesting distrust of the validator. Zod's output is already typed.
   return validated.data;
 };
