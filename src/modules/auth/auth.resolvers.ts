@@ -5,6 +5,8 @@ import {
   refreshToken,
   changePassword,
   getCurrentUser,
+  listUsers,
+  deactivateUser,
 } from '#/modules/auth/auth.service.js';
 import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
@@ -17,6 +19,16 @@ export const authResolvers = {
     me: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
       if (!context.user) return null;
       return getCurrentUser(context.user.id);
+    },
+
+    listUsers: async (
+      _parent: unknown,
+      _args: unknown,
+      context: GraphQLContext,
+    ) => {
+      // Owner and admin only — helpers cannot see the team list
+      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
+      return listUsers(context.user!.id);
     },
   },
 
@@ -72,6 +84,16 @@ export const authResolvers = {
       requireAuth(context);
       // TODO (Phase B): Increment user.tokenVersion here for full revocation.
       return true;
+    },
+
+    deactivateUser: async (
+      _parent: unknown,
+      { id }: { id: string },
+      context: GraphQLContext,
+    ) => {
+      // Owner and admin only
+      requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
+      return deactivateUser(id, context.user!.id);
     },
   },
 };

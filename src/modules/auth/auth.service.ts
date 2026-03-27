@@ -24,6 +24,7 @@ import {
 import { logger } from '#/config/logger.js';
 import {
   AuthenticationError,
+  AuthorizationError,
   ValidationError,
 } from '#/shared/errors/index.js';
 
@@ -220,4 +221,63 @@ export const getCurrentUser = async (
   }
 
   return toAuthUser(user);
+};
+
+// ─── List Users ───────────────────────────────────────────────────────────────
+// Returns all active users except the caller themselves.
+// Owner and admin only — enforced at both resolver and service layers.
+
+export const listUsers = async (
+  callerId: string,
+): Promise<SafeUser[]> => {
+  const users = await UserModel.find({
+    isActive: true,
+    _id: { $ne: callerId }, // exclude the caller from the list
+  })
+    .sort({ createdAt: 1 })
+    .lean<{ _id: { toString(): string }; username: string; email?: string; role: Role; isActive: boolean; createdAt: Date; updatedAt: Date }[]>();
+
+  return users.map((u) => ({
+    id:        u._id.toString(),
+    username:  u.username,
+    email:     u.email ?? undefined,
+    role:      u.role,
+    isActive:  u.isActive,
+    createdAt: u.createdAt.toISOString(),
+    updatedAt: u.updatedAt.toISOString(),
+  }));
+};
+
+// ─── Deactivate User ──────────────────────────────────────────────────────────
+// Soft-deletes a team member by setting isActive: false.
+// Guards:
+//   - Cannot deactivate yourself
+//   - Cannot deactivate the owner account
+//   - Only owner or admin can call this
+
+export const deactivateUser = async (
+  targetId: string,
+  callerId: string,
+): Promise<boolean> => {
+  // Cannot deactivate yourself
+  if (targetId === callerId) {
+    throw new ValidationError('You cannot deactivate your own account');
+  }
+
+  const target = await UserModel.findById(targetId);
+
+  if (!target || !target.isActive) {
+    throw new ValidationError('User not found or already inactive');
+  }
+
+  // Cannot deactivate the owner account — there must always be one owner
+  if (target.role === ROLES.OWNER) {
+    throw new AuthorizationError('The owner account cannot be deactivated');
+  }
+
+  await UserModel.findByIdAndUpdate(targetId, { isActive: false });
+
+  logger.info({ targetId, callerId }, 'User deactivated');
+
+  return true;
 };
