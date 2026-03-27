@@ -59,6 +59,8 @@ export const authTypeDefs = `
 
   extend type Query {
     me: User
+    # Returns all active team members. Owner and admin only.
+    listUsers: [User!]!
   }
 
   # ─── Mutations ──────────────────────────────────────────────────────────────
@@ -69,5 +71,8 @@ export const authTypeDefs = `
     refreshToken(input: RefreshTokenInput!): RefreshPayload!
     changePassword(input: ChangePasswordInput!): Boolean!
     logout: Boolean!
+    # Soft-deletes a team member (sets isActive: false). Owner and admin only.
+    # Cannot deactivate yourself or the owner account.
+    deactivateUser(id: ID!): Boolean!
   }
 `;
