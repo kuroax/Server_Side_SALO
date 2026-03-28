@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '#/shared/errors/index.js';
 import { OrderModel } from '#/modules/orders/order.model.js';
 import { ProductModel } from '#/modules/products/product.model.js';
 import { CustomerModel } from '#/modules/customers/customer.model.js';
+import { InventoryModel } from '#/modules/inventory/inventory.model.js';
 import { ORDER_NUMBER_PREFIX } from '#/modules/orders/order.types.js';
 import type {
   OrderChannel,
@@ -358,9 +359,6 @@ export async function createOrder(
 
   logger.info({ orderId: order._id.toString(), orderNumber }, 'Order created');
 
-  // TODO (V2): RESERVE inventory for each item once the reservation system lands.
-  // Set inventoryApplied = true after successful reservation.
-
   return mapOrder(order.toObject() as OrderLike);
 }
 
@@ -371,6 +369,51 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
   if (!order) throw new NotFoundError('Order not found');
 
   assertValidTransition(order.status as OrderStatus, status);
+
+  // ── Deduct inventory when order is confirmed ──────────────────────────────
+  // Only runs once — guard: inventoryApplied must be false before proceeding.
+  // Uses atomic $gte filter in findOneAndUpdate so it fails safely if stock
+  // is insufficient rather than going negative.
+  if (status === 'confirmed' && !order.inventoryApplied) {
+    const insufficientItems: string[] = [];
+
+    for (const item of order.items) {
+      const result = await InventoryModel.findOneAndUpdate(
+        {
+          productId: item.productId,
+          size:      item.size,
+          color:     item.color,
+          quantity:  { $gte: item.quantity },
+        },
+        { $inc: { quantity: -item.quantity } },
+        { new: true },
+      ).lean();
+
+      if (!result) {
+        // Check if record exists to give a clearer error message
+        const current = await InventoryModel.findOne({
+          productId: item.productId,
+          size:      item.size,
+          color:     item.color,
+        }).select('quantity').lean<{ quantity: number } | null>();
+
+        const available = current?.quantity ?? 0;
+        insufficientItems.push(
+          `${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
+        );
+      }
+    }
+
+    if (insufficientItems.length > 0) {
+      throw new BadRequestError(
+        `Insufficient stock for: ${insufficientItems.join('; ')}`,
+      );
+    }
+
+    order.inventoryApplied = true;
+    order.notes.push(makeSystemNote('Inventory deducted on order confirmation.'));
+    logger.info({ orderId, items: order.items.length }, 'Inventory deducted on confirm');
+  }
 
   order.status = status;
   order.notes.push(makeSystemNote(`Order status changed to '${status}'.`));
@@ -410,12 +453,26 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
 
   order.status = 'cancelled';
   order.notes.push(makeSystemNote('Order cancelled.'));
+
+  // ── Restore inventory if it was previously deducted ───────────────────────
+  // Only restore if inventoryApplied is true — prevents double-restore on
+  // orders cancelled before reaching confirmed status.
+  if (order.inventoryApplied) {
+    for (const item of order.items) {
+      await InventoryModel.findOneAndUpdate(
+        { productId: item.productId, size: item.size, color: item.color },
+        { $inc: { quantity: item.quantity } },
+        { new: true },
+      ).lean();
+    }
+    order.inventoryApplied = false;
+    order.notes.push(makeSystemNote('Inventory restored on cancellation.'));
+    logger.info({ orderId, items: order.items.length }, 'Inventory restored on cancel');
+  }
+
   await order.save();
 
   logger.info({ orderId }, 'Order cancelled');
-
-  // TODO (V2): RELEASE reserved inventory for each item.
-  // Set inventoryApplied = false after successful release.
 
   return mapOrder(order.toObject() as OrderLike);
 }
