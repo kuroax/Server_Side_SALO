@@ -31,7 +31,7 @@ export const whatsappWebhookHandler = async (
     const result = await handleIncomingMessage(parsed.data);
 
     // n8n reads the reply field and sends it back to WhatsApp.
-    res.status(200).json({ reply: result.reply });
+    res.status(200).json({ reply: result.reply, escalate: result.escalate, customerPhone: result.customerPhone, customerName: result.customerName });
   } catch (err) {
     logger.error({ err }, 'Webhook handler error');
     res.status(500).json({ error: 'Internal server error' });
