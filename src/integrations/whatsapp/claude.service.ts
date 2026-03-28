@@ -10,12 +10,10 @@ export type ClaudeIntent =
   | 'price_query'
   | 'create_order'
   | 'order_status'
+  | 'needs_human'
   | 'general';
 
 export type ClaudeOrderHint = {
-  // These are HINTS from the model — treated as unverified user input.
-  // webhook.service.ts reconciles them against the real catalog before
-  // creating any order. Never trust price or productId from this object.
   productNameHint: string;
   size:            string;
   color:           string;
@@ -28,7 +26,6 @@ export type ClaudeResult = {
   orderHints?: ClaudeOrderHint[];
 };
 
-// A single turn in the conversation history passed from webhook.service.ts.
 export type ConversationTurnInput = {
   role:    'user' | 'assistant';
   content: string;
@@ -48,10 +45,7 @@ export type ClaudeContext = {
     brand: string;
   }[];
   incomingMessage:     string;
-  // Conversation history — last N turns before the current message.
-  // Empty array on first contact.
   conversationHistory: ConversationTurnInput[];
-  // Dynamic business facts — never hardcoded in system prompt.
   businessInfo: {
     showroomAddress: string;
     businessHours:   string;
@@ -63,9 +57,6 @@ export type ClaudeContext = {
 };
 
 // ─── Output schema ────────────────────────────────────────────────────────────
-// Bidirectional orderHints contract via z.union():
-//   create_order  → orderHints required, non-empty
-//   all others    → orderHints must be absent
 
 const orderHintSchema = z.object({
   productNameHint: z.string().min(1),
@@ -81,17 +72,19 @@ const claudeResultSchema = z.union([
     orderHints: z.array(orderHintSchema).min(1),
   }),
   z.object({
-    intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'general']),
+    intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'needs_human', 'general']),
     response:   z.string().min(1).max(2000),
     orderHints: z.undefined().optional(),
   }),
 ]);
 
-// ─── Safe fallback ────────────────────────────────────────────────────────────
+// ─── Safe fallback — stays in character ──────────────────────────────────────
+// Used when Claude times out or returns invalid JSON.
+// Never expose a robotic error message to the customer.
 
 const SAFE_FALLBACK: ClaudeResult = {
-  intent:   'general',
-  response: 'Disculpa, no pude procesar tu mensaje. ¿Puedes reformularlo?',
+  intent:   'needs_human',
+  response: 'Ahorita te confirmo eso bonita, dame un momento 🙏🏻',
 };
 
 // ─── Client ───────────────────────────────────────────────────────────────────
@@ -103,8 +96,6 @@ const MAX_TOKENS         = 512;
 const REQUEST_TIMEOUT_MS = 8_000;
 
 // ─── System prompt ────────────────────────────────────────────────────────────
-// Persona and tone only — unstable business facts injected dynamically
-// in the context block at call time.
 
 const SYSTEM_PROMPT = `Eres el asistente virtual de SALO shop, una tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga, Lululemon y Wiskii.
 
@@ -146,13 +137,29 @@ CIERRE:
 
 EMOJIS (úsalos con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨
 
+─── CATÁLOGO VACÍO ────────────────────────────────────────────────────────────
+
+Si el catálogo está vacío o no tienes información suficiente para responder con certeza:
+- NUNCA digas "no tengo información" ni rompas el personaje
+- USA el intent "needs_human" y responde algo natural como:
+  "Ahorita te confirmo eso bonita, dame un momento 🙏🏻"
+  "Déjame verificar eso para ti corazón, ya te digo 🙌🏼"
+  "Permíteme un segundito bella que te confirmo disponibilidad ✨"
+
 ─── INTENCIONES POSIBLES ──────────────────────────────────────────────────────
 
-- catalog_query : el cliente pregunta qué productos hay disponibles
-- price_query   : el cliente pregunta por el precio de algo específico
-- create_order  : el cliente quiere hacer un pedido (necesitas producto + talla + color)
-- order_status  : el cliente pregunta por el estado de su pedido
-- general       : saludos, preguntas generales, o mensajes que no encajan en lo anterior
+- catalog_query  : el cliente pregunta qué productos hay disponibles
+- price_query    : el cliente pregunta por el precio de algo específico
+- create_order   : el cliente quiere hacer un pedido (necesitas producto + talla + color)
+- order_status   : el cliente pregunta por el estado de su pedido
+- needs_human    : no tienes suficiente información para responder con certeza — el dueño debe revisar
+- general        : saludos, preguntas generales, o mensajes que no encajan en lo anterior
+
+USA needs_human cuando:
+- El catálogo está vacío y el cliente pregunta por productos o precios
+- El cliente pregunta por algo muy específico que no está en el catálogo
+- La pregunta requiere decisión humana (negociaciones, devoluciones, problemas)
+- No estás seguro de la respuesta correcta
 
 ─── REGLAS DE NEGOCIO ─────────────────────────────────────────────────────────
 
@@ -182,7 +189,7 @@ Para intent create_order (orderHints OBLIGATORIO y no vacío):
 
 Para cualquier otro intent (orderHints PROHIBIDO — no incluir el campo):
 {
-  "intent": "catalog_query" | "price_query" | "order_status" | "general",
+  "intent": "catalog_query" | "price_query" | "order_status" | "needs_human" | "general",
   "response": "tu respuesta aquí"
 }`;
 
@@ -200,15 +207,12 @@ export const processMessage = async (
     businessInfo,
   } = context;
 
-  // ── Context block (injected as first user turn) ──────────────────────────
-  // Business facts live here — not in the system prompt — so they never
-  // go stale. Updated at call time on every request.
   const contextBlock = `[CONTEXTO DEL SISTEMA — no mostrar al cliente]
 CLIENTE: ${customerName ?? 'Cliente nueva'}
 
 CATÁLOGO DISPONIBLE:
 ${catalog.length === 0
-    ? 'Sin productos disponibles en este momento.'
+    ? 'CATÁLOGO VACÍO — el dueño aún no ha cargado productos. Usa intent needs_human y responde de forma natural sin revelar esto.'
     : catalog.map((p) => `- ${p.name} (${p.brand}) — $${p.price} MXN`).join('\n')
   }
 
@@ -226,13 +230,6 @@ INFORMACIÓN DEL NEGOCIO:
 - Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días
 [FIN CONTEXTO]`;
 
-  // ── Build messages array ─────────────────────────────────────────────────
-  // The Anthropic API requires strictly alternating user/assistant roles.
-  // Structure:
-  //   [user]      context block   — grounding data
-  //   [assistant] synthetic ack   — satisfies alternation constraint
-  //   [...turns]  history         — previous conversation turns (already alternating)
-  //   [user]      current message — what the customer just sent
   const messages: { role: 'user' | 'assistant'; content: string }[] = [
     { role: 'user',      content: contextBlock },
     { role: 'assistant', content: 'Entendido. Listo para atender al cliente.' },
@@ -249,7 +246,6 @@ INFORMACIÓN DEL NEGOCIO:
     'Calling Claude API',
   );
 
-  // ── API call with timeout ────────────────────────────────────────────────
   let rawText: string;
 
   try {
@@ -278,7 +274,6 @@ INFORMACIÓN DEL NEGOCIO:
     return SAFE_FALLBACK;
   }
 
-  // ── JSON parse ────────────────────────────────────────────────────────────
   let parsed: unknown;
 
   try {
@@ -288,7 +283,6 @@ INFORMACIÓN DEL NEGOCIO:
     return SAFE_FALLBACK;
   }
 
-  // ── Schema validation ─────────────────────────────────────────────────────
   const validated = claudeResultSchema.safeParse(parsed);
 
   if (!validated.success) {

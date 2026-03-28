@@ -12,12 +12,16 @@ import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type WebhookResult = {
-  reply: string;
+  reply:    string;
+  // When true, n8n should send an owner alert via WhatsApp.
+  // n8n already has the Meta credentials — no need to duplicate them here.
+  escalate: boolean;
+  // Passed through so n8n can include it in the owner alert message.
+  customerPhone: string;
+  customerName:  string | null;
 };
 
 // ─── Business info ────────────────────────────────────────────────────────────
-// Single source of truth for facts the AI uses when answering customers.
-// Update here when anything changes — never hardcode these in the system prompt.
 
 const BUSINESS_INFO = {
   showroomAddress: 'Av. Guadalupe 1390, Chapalita Oriente, Guadalajara, Jalisco',
@@ -30,10 +34,8 @@ const BUSINESS_INFO = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Fuzzy match a product name hint against the catalog.
-// Claude may return slightly different capitalization or wording.
 function findProductByHint(
-  hint: string,
+  hint:    string,
   catalog: { id: string; name: string; price: number }[],
 ): { id: string; name: string; price: number } | null {
   const normalized = hint.toLowerCase().trim();
@@ -68,12 +70,10 @@ export const handleIncomingMessage = async (
     logger.info({ phone: from }, 'New customer created from WhatsApp');
   }
 
-  const customerId = customer._id.toString();
+  const customerId   = customer._id.toString();
+  const customerName = customer.name !== `WhatsApp ${from}` ? customer.name : null;
 
   // ── 2. Load conversation history ─────────────────────────────────────────
-  // Find or initialize the conversation document for this customer+channel.
-  // We use findOne here (not findOneAndUpdate) because we need the existing
-  // turns to pass to Claude before we know what to append.
   const conversation = await ConversationModel.findOne({
     customerId,
     channel: 'whatsapp',
@@ -103,8 +103,8 @@ export const handleIncomingMessage = async (
 
   // ── 5. Call Claude ────────────────────────────────────────────────────────
   const result = await processMessage({
-    customerName:    customer.name !== `WhatsApp ${from}` ? customer.name : null,
-    recentOrder:     recentOrder
+    customerName,
+    recentOrder: recentOrder
       ? {
           orderNumber: recentOrder.orderNumber,
           status:      recentOrder.status,
@@ -118,11 +118,9 @@ export const handleIncomingMessage = async (
   });
 
   // ── 6. Persist conversation turn ─────────────────────────────────────────
-  // Append the new user message + assistant reply, then trim to the rolling
-  // window so the document never grows unboundedly.
   const newTurns = [
-    { role: 'user'      as const, content: message,          createdAt: new Date() },
-    { role: 'assistant' as const, content: result.response,  createdAt: new Date() },
+    { role: 'user'      as const, content: message,         createdAt: new Date() },
+    { role: 'assistant' as const, content: result.response, createdAt: new Date() },
   ];
 
   await ConversationModel.findOneAndUpdate(
@@ -131,8 +129,6 @@ export const handleIncomingMessage = async (
       $push: {
         turns: {
           $each:  newTurns,
-          // Keep only the last MAX_CONVERSATION_TURNS turns.
-          // $slice with a negative value keeps the tail of the array.
           $slice: -MAX_CONVERSATION_TURNS,
         },
       },
@@ -142,13 +138,11 @@ export const handleIncomingMessage = async (
   );
 
   logger.info(
-    { customerId, historyTurns: conversationHistory.length },
+    { customerId, intent: result.intent, historyTurns: conversationHistory.length },
     'Conversation turn persisted',
   );
 
-  // ── 7. Handle create_order intent ─────────────────────────────────────────
-  // orderHints from Claude are treated as unverified hints only.
-  // All product data (id, name, price) is resolved from our own catalog.
+  // ── 7. Handle create_order intent ────────────────────────────────────────
   if (result.intent === 'create_order' && result.orderHints?.length) {
     try {
       const resolvedItems = result.orderHints
@@ -200,17 +194,23 @@ export const handleIncomingMessage = async (
         });
 
         logger.info({ orderNumber, customerId }, 'Order created from WhatsApp');
-      } else {
-        logger.warn(
-          { hints: result.orderHints },
-          'No catalog products matched — order not created',
-        );
       }
     } catch (err) {
       logger.error({ err }, 'Failed to create order from WhatsApp message');
-      // Don't throw — return Claude's response anyway.
     }
   }
 
-  return { reply: result.response };
+  // ── 8. Return result — escalate flag tells n8n to notify the owner ───────
+  const escalate = result.intent === 'needs_human';
+
+  if (escalate) {
+    logger.info({ customerId, from }, 'needs_human intent — escalate flag set for n8n');
+  }
+
+  return {
+    reply:         result.response,
+    escalate,
+    customerPhone: from,
+    customerName,
+  };
 };
