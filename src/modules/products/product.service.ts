@@ -11,6 +11,8 @@ import {
   NotFoundError,
   BadRequestError,
 } from '#/shared/errors/index.js';
+import { InventoryModel } from '#/modules/inventory/inventory.model.js';
+import { DEFAULT_LOW_STOCK_THRESHOLD } from '#/modules/inventory/inventory.constants.js';
 
 // ─── ProductLike ──────────────────────────────────────────────────────────────
 
@@ -99,6 +101,49 @@ const toProductResponse = (product: ProductLike): ProductResponse => ({
     : new Date(product.updatedAt).toISOString(),
 });
 
+// ─── Inventory Sync Helper ───────────────────────────────────────────────────
+
+/**
+ * Creates inventory records (quantity 0) for each variant that doesn't
+ * already have one. Uses ordered: false so existing duplicates are
+ * silently skipped via the unique compound index.
+ */
+const syncInventoryForVariants = async (
+  productId: { toString(): string },
+  variants: { size: string; color: string }[],
+): Promise<void> => {
+  if (!variants || variants.length === 0) return;
+
+  const inventoryDocs = variants.map((variant) => ({
+    productId,
+    size: variant.size,
+    color: variant.color,
+    quantity: 0,
+    lowStockThreshold: DEFAULT_LOW_STOCK_THRESHOLD,
+  }));
+
+  try {
+    await InventoryModel.insertMany(inventoryDocs, { ordered: false });
+    logger.info(
+      { productId: productId.toString(), variantCount: inventoryDocs.length },
+      'Inventory records created for product variants',
+    );
+  } catch (err: unknown) {
+    // With ordered: false, duplicate key errors are expected for existing
+    // variants — only log if there are non-duplicate failures
+    const bulkErr = err as { writeErrors?: { code: number }[] };
+    const nonDuplicateErrors = (bulkErr.writeErrors ?? []).filter(
+      (e) => e.code !== 11000,
+    );
+    if (nonDuplicateErrors.length > 0) {
+      logger.warn(
+        { productId: productId.toString(), error: err },
+        'Failed to auto-create some inventory records',
+      );
+    }
+  }
+};
+
 // ─── Create ───────────────────────────────────────────────────────────────────
 
 export const createProduct = async (input: unknown): Promise<ProductResponse> => {
@@ -106,6 +151,9 @@ export const createProduct = async (input: unknown): Promise<ProductResponse> =>
   const slug = await buildUniqueSlug(validated.name);
 
   const product = await ProductModel.create({ ...validated, slug });
+
+  // Auto-create inventory records (quantity 0) for each variant
+  await syncInventoryForVariants(product._id, validated.variants ?? []);
 
   logger.info({ productId: product._id, slug }, 'Product created');
 
@@ -222,6 +270,11 @@ export const updateProduct = async (
     throw new NotFoundError('Product not found');
   }
 
+  // If variants were updated, sync inventory for any new ones
+  if (validated.variants) {
+    await syncInventoryForVariants(product._id, validated.variants);
+  }
+
   logger.info({ productId, updatedFields: Object.keys(validated) }, 'Product updated');
 
   return toProductResponse(product);
@@ -237,6 +290,11 @@ export const deleteProduct = async (input: unknown): Promise<boolean> => {
   if (!product) {
     throw new NotFoundError('Product not found');
   }
+
+  // Clean up inventory records for the deleted product
+  await InventoryModel.deleteMany({ productId: id }).catch((err) => {
+    logger.warn({ productId: id, error: err }, 'Failed to clean up inventory records');
+  });
 
   logger.info({ productId: id }, 'Product deleted');
 
