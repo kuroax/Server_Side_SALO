@@ -528,3 +528,32 @@ export async function assignCustomerToOrder(input: unknown): Promise<SafeOrder> 
   logger.info({ orderId, customerId }, 'Customer assigned to order');
   return mapOrder(order.toObject() as OrderLike);
 }
+
+// ─── Delete Order ─────────────────────────────────────────────────────────────
+// Hard delete — permanently removes the order from the database.
+// Restores inventory if it was previously applied (same logic as cancelOrder).
+// Owner-only operation — enforced at the resolver level.
+
+export async function deleteOrder(input: unknown): Promise<boolean> {
+  const { orderId } = cancelOrderSchema.parse(input); // reuses same shape { orderId }
+
+  const order = await OrderModel.findById(orderId);
+  if (!order) throw new NotFoundError('Order not found');
+
+  // Restore inventory if it was deducted — prevents phantom stock reduction.
+  if (order.inventoryApplied) {
+    for (const item of order.items) {
+      await InventoryModel.findOneAndUpdate(
+        { productId: item.productId, size: item.size, color: item.color },
+        { $inc: { quantity: item.quantity } },
+        { new: true },
+      ).lean();
+    }
+    logger.info({ orderId, items: order.items.length }, 'Inventory restored on delete');
+  }
+
+  await OrderModel.findByIdAndDelete(orderId);
+
+  logger.info({ orderId, orderNumber: order.orderNumber }, 'Order hard-deleted');
+  return true;
+}

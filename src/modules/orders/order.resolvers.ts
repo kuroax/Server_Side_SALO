@@ -12,6 +12,7 @@ import {
   listOrders,
   updateOrderStatus,
   updatePaymentStatus,
+  deleteOrder,
 } from '#/modules/orders/order.service.js';
 
 // ─── Role sets ────────────────────────────────────────────────────────────────
@@ -21,6 +22,7 @@ import {
 const ORDER_READ_ROLES:   Role[] = ['owner', 'admin', 'sales'];
 const ORDER_WRITE_ROLES:  Role[] = ['owner', 'admin', 'sales'];
 const ORDER_CANCEL_ROLES: Role[] = ['owner', 'admin'];
+const ORDER_DELETE_ROLES: Role[] = ['owner'];
 
 // ─── Resolvers ────────────────────────────────────────────────────────────────
 
@@ -116,6 +118,15 @@ export const orderResolvers = {
     ) {
       requireRoles(context, ORDER_WRITE_ROLES);
       return assignCustomerToOrder(args.input);
+    },
+
+    async deleteOrder(
+      _: unknown,
+      args: { input: unknown },
+      context: GraphQLContext,
+    ) {
+      requireRoles(context, ORDER_DELETE_ROLES);
+      return deleteOrder(args.input);
     },
   },
 };

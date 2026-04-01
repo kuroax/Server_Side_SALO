@@ -107,6 +107,10 @@ export const orderTypeDefs = /* #graphql */ `
     orderId: ID!
   }
 
+  input DeleteOrderInput {
+    orderId: ID!
+  }
+
   input AssignCustomerToOrderInput {
     orderId:    ID!
     customerId: ID!
@@ -157,5 +161,8 @@ export const orderTypeDefs = /* #graphql */ `
 
     "Resolve a null customerId to a confirmed customer record (bot post-identification flow). Requires owner / admin / sales."
     assignCustomerToOrder(input: AssignCustomerToOrderInput!): Order!
+
+    "Permanently delete an order from the database. Restores inventory if applied. Owner only."
+    deleteOrder(input: DeleteOrderInput!): Boolean!
   }
 `;
