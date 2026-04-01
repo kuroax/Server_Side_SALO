@@ -2,6 +2,7 @@ import { Types } from 'mongoose';
 import { logger } from '#/config/logger.js';
 import { BadRequestError, NotFoundError } from '#/shared/errors/index.js';
 import { OrderModel } from '#/modules/orders/order.model.js';
+import { CounterModel } from '#/shared/models/counter.model.js';
 import { ProductModel } from '#/modules/products/product.model.js';
 import { CustomerModel } from '#/modules/customers/customer.model.js';
 import { InventoryModel } from '#/modules/inventory/inventory.model.js';
@@ -185,27 +186,27 @@ function mapDuplicateOrderError(err: unknown): never {
 }
 
 // ─── Order number generation ──────────────────────────────────────────────────
-// Format: ORD-YYYYMMDD-XXXX  (XXXX = zero-padded daily counter)
+// Format: SALO-100001  (globally sequential, atomic, collision-safe)
+//
+// Uses a dedicated counters collection with MongoDB's atomic findOneAndUpdate
+// + $inc. This guarantees uniqueness under any concurrency — no race conditions,
+// no daily resets, no timezone edge cases.
+//
+// Counter document: { _id: "orderNumber", seq: 100000 }
+// First order generated: SALO-100001
+// Seed the counter before first use:
+//   db.counters.insertOne({ _id: "orderNumber", seq: 100000 })
 
 async function buildUniqueOrderNumber(): Promise<string> {
-  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const base    = `${ORDER_NUMBER_PREFIX}-${dateStr}`;
-  const prefix  = new RegExp(`^${base}-`);
+  const counter = await CounterModel.findOneAndUpdate(
+    { _id: 'orderNumber' },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true },
+  ).lean<{ seq: number } | null>();
 
-  const count     = await OrderModel.countDocuments({ orderNumber: prefix });
-  const candidate = `${base}-${String(count + 1).padStart(4, '0')}`;
+  if (!counter) throw new Error('Failed to generate order number');
 
-  const exists = await OrderModel.exists({ orderNumber: candidate });
-  if (!exists) return candidate;
-
-  // Rare collision path (concurrent inserts) — walk forward until a slot is free
-  let i = count + 2;
-  for (;;) {
-    const next       = `${base}-${String(i).padStart(4, '0')}`;
-    const nextExists = await OrderModel.exists({ orderNumber: next });
-    if (!nextExists) return next;
-    i++;
-  }
+  return `SALO-${counter.seq}`;
 }
 
 // ─── Product snapshot helper ──────────────────────────────────────────────────
