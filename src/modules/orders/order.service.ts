@@ -581,19 +581,19 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
     orderCount: number;
   }>([
     {
-      : {
-        createdAt: { : from },
-        status:    { : 'cancelled' },
+      $match: {
+        createdAt: { $gte: from },
+        status:    { $ne: 'cancelled' },
       },
     },
     {
-      : {
-        _id:        { year: { : '' }, month: { : '' } },
-        revenue:    { : '' },
-        orderCount: { : 1 },
+      $group: {
+        _id:        { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
+        revenue:    { $sum: '$total' },
+        orderCount: { $sum: 1 },
       },
     },
-    { : { '_id.year': 1, '_id.month': 1 } },
+    { $sort: { '_id.year': 1, '_id.month': 1 } },
   ]);
 
   // Build a full series — fill zeroes for months with no orders.
