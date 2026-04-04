@@ -9,6 +9,7 @@ import {
   getCustomerOrders,
   getOrderById,
   getOrderByOrderNumber,
+  getRevenueStats,
   listOrders,
   updateOrderStatus,
   updatePaymentStatus,
@@ -62,6 +63,15 @@ export const orderResolvers = {
     ) {
       requireRoles(context, ORDER_READ_ROLES);
       return getCustomerOrders({ customerId: args.customerId });
+    },
+
+    async revenueStats(
+      _: unknown,
+      args: { months?: number },
+      context: GraphQLContext,
+    ) {
+      requireAuth(context);
+      return getRevenueStats(args.months ?? 3);
     },
   },
 

@@ -557,3 +557,60 @@ export async function deleteOrder(input: unknown): Promise<boolean> {
   logger.info({ orderId, orderNumber: order.orderNumber }, 'Order hard-deleted');
   return true;
 }
+
+// ─── Revenue stats ────────────────────────────────────────────────────────────
+// Aggregates revenue per calendar month for the last N months.
+// Excludes cancelled orders — cancelled orders never contribute to revenue.
+// Fills in months with zero revenue so the frontend always gets a full series.
+
+type MonthRevenue = {
+  year:       number;
+  month:      number;
+  label:      string;
+  revenue:    number;
+  orderCount: number;
+};
+
+export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
+  const now  = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+
+  const raw = await OrderModel.aggregate<{
+    _id: { year: number; month: number };
+    revenue:    number;
+    orderCount: number;
+  }>([
+    {
+      : {
+        createdAt: { : from },
+        status:    { : 'cancelled' },
+      },
+    },
+    {
+      : {
+        _id:        { year: { : '' }, month: { : '' } },
+        revenue:    { : '' },
+        orderCount: { : 1 },
+      },
+    },
+    { : { '_id.year': 1, '_id.month': 1 } },
+  ]);
+
+  // Build a full series — fill zeroes for months with no orders.
+  const series: MonthRevenue[] = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const d     = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const year  = d.getFullYear();
+    const month = d.getMonth() + 1; // MongoDB  is 1-indexed
+    const found = raw.find(r => r._id.year === year && r._id.month === month);
+    series.push({
+      year,
+      month,
+      label:      d.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' }),
+      revenue:    found?.revenue    ?? 0,
+      orderCount: found?.orderCount ?? 0,
+    });
+  }
+
+  return series;
+}

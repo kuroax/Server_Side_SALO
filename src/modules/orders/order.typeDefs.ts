@@ -125,6 +125,16 @@ export const orderTypeDefs = /* #graphql */ `
     skip:          Int
   }
 
+  # ─── Revenue stats ───────────────────────────────────────────────────────────
+
+  type MonthRevenue {
+    year:       Int!
+    month:      Int!
+    label:      String!
+    revenue:    Float!
+    orderCount: Int!
+  }
+
   # ─── Queries ──────────────────────────────────────────────────────────────────
 
   extend type Query {
@@ -139,6 +149,9 @@ export const orderTypeDefs = /* #graphql */ `
 
     "All orders for a specific customer. Requires authentication."
     customerOrders(customerId: ID!): [Order!]!
+
+    "Monthly revenue aggregation for the last N months (default 3). Excludes cancelled orders. Requires authentication."
+    revenueStats(months: Int): [MonthRevenue!]!
   }
 
   # ─── Mutations ────────────────────────────────────────────────────────────────
