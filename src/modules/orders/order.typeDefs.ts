@@ -135,6 +135,30 @@ export const orderTypeDefs = /* #graphql */ `
     orderCount: Int!
   }
 
+  type BreakdownItem {
+    count:   Int!
+    revenue: Float!
+  }
+
+  type PaymentBreakdown {
+    paid:    BreakdownItem!
+    partial: BreakdownItem!
+    unpaid:  BreakdownItem!
+  }
+
+  type ProductRevenue {
+    productId:   String!
+    productName: String!
+    revenue:     Float!
+    unitsSold:   Int!
+  }
+
+  type RevenueDetail {
+    monthlyStats:     [MonthRevenue!]!
+    paymentBreakdown: PaymentBreakdown!
+    topProducts:      [ProductRevenue!]!
+  }
+
   # ─── Queries ──────────────────────────────────────────────────────────────────
 
   extend type Query {
@@ -152,6 +176,9 @@ export const orderTypeDefs = /* #graphql */ `
 
     "Monthly revenue aggregation for the last N months (default 3). Excludes cancelled orders. Requires authentication."
     revenueStats(months: Int): [MonthRevenue!]!
+
+    "Detailed revenue breakdown: monthly stats, payment status, top products. Requires authentication."
+    revenueDetail(months: Int, topProductsLimit: Int): RevenueDetail!
   }
 
   # ─── Mutations ────────────────────────────────────────────────────────────────

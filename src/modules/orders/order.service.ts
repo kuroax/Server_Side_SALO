@@ -614,3 +614,128 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
 
   return series;
 }
+// ─── Revenue detail ───────────────────────────────────────────────────────────
+// Returns three datasets in one call for the revenue detail screen:
+//   1. Monthly stats for the last N months (reuses MonthRevenue type)
+//   2. Payment status breakdown (paid / partial / unpaid)
+//   3. Top products by revenue (across all non-cancelled orders)
+
+type ProductRevenueResult = {
+  productId:   string;
+  productName: string;
+  revenue:     number;
+  unitsSold:   number;
+};
+
+type RevenueDetailResult = {
+  monthlyStats: MonthRevenue[];
+  paymentBreakdown: {
+    paid:    { count: number; revenue: number };
+    partial: { count: number; revenue: number };
+    unpaid:  { count: number; revenue: number };
+  };
+  topProducts: ProductRevenueResult[];
+};
+
+export async function getRevenueDetail(
+  months = 12,
+  topProductsLimit = 10,
+): Promise<RevenueDetailResult> {
+  const now  = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+
+  // ── 1. Monthly stats ────────────────────────────────────────────────────────
+  const monthlyRaw = await OrderModel.aggregate<{
+    _id: { year: number; month: number };
+    revenue:    number;
+    orderCount: number;
+  }>([
+    {
+      $match: {
+        createdAt: { $gte: from },
+        status:    { $ne: 'cancelled' },
+      },
+    },
+    {
+      $group: {
+        _id:        { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
+        revenue:    { $sum: '$total' },
+        orderCount: { $sum: 1 },
+      },
+    },
+    { $sort: { '_id.year': 1, '_id.month': 1 } },
+  ]);
+
+  const monthlyStats: MonthRevenue[] = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const d     = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const year  = d.getFullYear();
+    const month = d.getMonth() + 1;
+    const found = monthlyRaw.find(r => r._id.year === year && r._id.month === month);
+    monthlyStats.push({
+      year,
+      month,
+      label:      d.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' }),
+      revenue:    found?.revenue    ?? 0,
+      orderCount: found?.orderCount ?? 0,
+    });
+  }
+
+  // ── 2. Payment breakdown ────────────────────────────────────────────────────
+  const paymentRaw = await OrderModel.aggregate<{
+    _id:     string;
+    count:   number;
+    revenue: number;
+  }>([
+    { $match: { status: { $ne: 'cancelled' } } },
+    {
+      $group: {
+        _id:     '$paymentStatus',
+        count:   { $sum: 1 },
+        revenue: { $sum: '$total' },
+      },
+    },
+  ]);
+
+  const getBreakdown = (status: string) => {
+    const found = paymentRaw.find(r => r._id === status);
+    return { count: found?.count ?? 0, revenue: found?.revenue ?? 0 };
+  };
+
+  // ── 3. Top products by revenue ──────────────────────────────────────────────
+  const productsRaw = await OrderModel.aggregate<{
+    _id:      { productId: string; productName: string };
+    revenue:  number;
+    unitsSold: number;
+  }>([
+    { $match: { status: { $ne: 'cancelled' } } },
+    { $unwind: '$items' },
+    {
+      $group: {
+        _id: {
+          productId:   { $toString: '$items.productId' },
+          productName: '$items.productName',
+        },
+        revenue:   { $sum: '$items.lineTotal' },
+        unitsSold: { $sum: '$items.quantity' },
+      },
+    },
+    { $sort: { revenue: -1 } },
+    { $limit: topProductsLimit },
+  ]);
+
+  return {
+    monthlyStats,
+    paymentBreakdown: {
+      paid:    getBreakdown('paid'),
+      partial: getBreakdown('partial'),
+      unpaid:  getBreakdown('unpaid'),
+    },
+    topProducts: productsRaw.map(p => ({
+      productId:   p._id.productId,
+      productName: p._id.productName,
+      revenue:     p.revenue,
+      unitsSold:   p.unitsSold,
+    })),
+  };
+}

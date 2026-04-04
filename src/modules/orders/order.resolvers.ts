@@ -10,6 +10,7 @@ import {
   getOrderById,
   getOrderByOrderNumber,
   getRevenueStats,
+  getRevenueDetail,
   listOrders,
   updateOrderStatus,
   updatePaymentStatus,
@@ -72,6 +73,15 @@ export const orderResolvers = {
     ) {
       requireAuth(context);
       return getRevenueStats(args.months ?? 3);
+    },
+
+    async revenueDetail(
+      _: unknown,
+      args: { months?: number; topProductsLimit?: number },
+      context: GraphQLContext,
+    ) {
+      requireAuth(context);
+      return getRevenueDetail(args.months ?? 12, args.topProductsLimit ?? 10);
     },
   },
 
