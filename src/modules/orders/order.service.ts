@@ -373,10 +373,44 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
 
   // ── Deduct inventory when order is confirmed ──────────────────────────────
   // Only runs once — guard: inventoryApplied must be false before proceeding.
-  // Uses atomic $gte filter in findOneAndUpdate so it fails safely if stock
-  // is insufficient rather than going negative.
+  //
+  // Two-pass strategy:
+  //   Pass 1 — read-only check of all items so we can report every
+  //             insufficient variant in a single error, not just the first.
+  //   Pass 2 — atomic deductions using $gte guard so concurrent orders
+  //             cannot drive stock negative. If a race condition depletes
+  //             stock between passes, we roll back successful deductions
+  //             before throwing so the inventory stays consistent.
   if (status === 'confirmed' && !order.inventoryApplied) {
+    // Pass 1: verify all items have sufficient stock before touching anything.
     const insufficientItems: string[] = [];
+
+    for (const item of order.items) {
+      const current = await InventoryModel.findOne({
+        productId: item.productId,
+        size:      item.size,
+        color:     item.color,
+      }).select('quantity').lean<{ quantity: number } | null>();
+
+      if (!current || current.quantity < item.quantity) {
+        const available = current?.quantity ?? 0;
+        insufficientItems.push(
+          `${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
+        );
+      }
+    }
+
+    if (insufficientItems.length > 0) {
+      throw new BadRequestError(
+        `Insufficient stock for: ${insufficientItems.join('; ')}`,
+      );
+    }
+
+    // Pass 2: deduct inventory — all stock checks passed.
+    // Track each successful deduction so we can roll back on a mid-loop failure
+    // (e.g. a concurrent order claimed the last unit between pass 1 and here).
+    type DeductedItem = { productId: Types.ObjectId; size: string; color: string; quantity: number };
+    const deducted: DeductedItem[] = [];
 
     for (const item of order.items) {
       const result = await InventoryModel.findOneAndUpdate(
@@ -391,7 +425,16 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
       ).lean();
 
       if (!result) {
-        // Check if record exists to give a clearer error message
+        // Concurrent depletion — roll back everything deducted in this pass.
+        for (const d of deducted) {
+          await InventoryModel.findOneAndUpdate(
+            { productId: d.productId, size: d.size, color: d.color },
+            { $inc: { quantity: d.quantity } },
+          ).lean().catch((rollbackErr: unknown) => {
+            logger.error({ rollbackErr, orderId }, 'Inventory rollback failed — manual correction required');
+          });
+        }
+
         const current = await InventoryModel.findOne({
           productId: item.productId,
           size:      item.size,
@@ -399,16 +442,12 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
         }).select('quantity').lean<{ quantity: number } | null>();
 
         const available = current?.quantity ?? 0;
-        insufficientItems.push(
-          `${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
+        throw new BadRequestError(
+          `Insufficient stock for ${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
         );
       }
-    }
 
-    if (insufficientItems.length > 0) {
-      throw new BadRequestError(
-        `Insufficient stock for: ${insufficientItems.join('; ')}`,
-      );
+      deducted.push({ productId: item.productId, size: item.size, color: item.color, quantity: item.quantity });
     }
 
     order.inventoryApplied = true;

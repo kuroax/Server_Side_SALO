@@ -5,6 +5,7 @@ import {
   ConversationModel,
   MAX_CONVERSATION_TURNS,
 } from '#/modules/conversations/conversation.model.js';
+import { createOrder } from '#/modules/orders/order.service.js';
 import { processMessage } from '#/integrations/whatsapp/claude.service.js';
 import { logger } from '#/config/logger.js';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
@@ -171,29 +172,28 @@ export const handleIncomingMessage = async (
         .filter((item): item is NonNullable<typeof item> => item !== null);
 
       if (resolvedItems.length > 0) {
-        const today       = new Date();
-        const datePart    = today.toISOString().slice(0, 10).replace(/-/g, '');
-        const count       = await OrderModel.countDocuments();
-        const orderNumber = `ORD-${datePart}-${String(count + 1).padStart(4, '0')}`;
-        const subtotal    = resolvedItems.reduce((sum, i) => sum + i.lineTotal, 0);
+        // Delegate to the order service — gets the atomic SALO-XXXXXX counter,
+        // Zod validation, product snapshot lookup, and financial computation.
+        const created = await createOrder(
+          {
+            customerId,
+            channel: 'whatsapp',
+            items: resolvedItems.map(item => ({
+              productId: item.productId,
+              size:      item.size,
+              color:     item.color,
+              quantity:  item.quantity,
+              unitPrice: item.unitPrice,
+            })),
+            notes: [{
+              message: 'Pedido creado automáticamente desde WhatsApp.',
+              kind:    'system',
+            }],
+          },
+          null, // no human author — bot-generated order
+        );
 
-        await OrderModel.create({
-          orderNumber,
-          customerId,
-          channel:       'whatsapp',
-          status:        'pending',
-          paymentStatus: 'unpaid',
-          items:         resolvedItems,
-          subtotal,
-          total:         subtotal,
-          notes: [{
-            message:   'Pedido creado automáticamente desde WhatsApp.',
-            kind:      'system',
-            createdAt: new Date().toISOString(),
-          }],
-        });
-
-        logger.info({ orderNumber, customerId }, 'Order created from WhatsApp');
+        logger.info({ orderNumber: created.orderNumber, customerId }, 'Order created from WhatsApp');
       }
     } catch (err) {
       logger.error({ err }, 'Failed to create order from WhatsApp message');

@@ -11,11 +11,10 @@
  */
 
 import mongoose from 'mongoose';
+import { MONGODB_URI } from '#/config/env.js';
 import { ProductModel } from '#/modules/products/product.model.js';
 import { InventoryModel } from '#/modules/inventory/inventory.model.js';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '#/modules/inventory/inventory.constants.js';
-
-const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/salo';
 
 async function backfill() {
   await mongoose.connect(MONGODB_URI);

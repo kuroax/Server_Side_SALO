@@ -5,9 +5,44 @@ import rateLimit from 'express-rate-limit';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@as-integrations/express5';
 import { pinoHttp } from 'pino-http';
+import { GraphQLError, type ValidationRule } from 'graphql';
 
 import { schema } from '#/graphql/schema/index.js';
 import { createGraphQLContext } from '#/graphql/context.js';
+
+// ─── GraphQL depth limit ──────────────────────────────────────────────────────
+// Prevents deeply nested queries from being used as a CPU/memory DoS vector.
+// Depth is counted in selection-set nesting levels, not field count.
+// 10 is generous enough for any legitimate dashboard query.
+
+const MAX_QUERY_DEPTH = 10;
+
+function createDepthLimitRule(maxDepth: number): ValidationRule {
+  return (context) => ({
+    OperationDefinition(operationNode) {
+      const checkDepth = (
+        selectionSet: typeof operationNode.selectionSet | undefined,
+        depth: number,
+      ): void => {
+        if (!selectionSet) return;
+        for (const selection of selectionSet.selections) {
+          if (depth > maxDepth) {
+            context.reportError(
+              new GraphQLError(
+                `Query depth ${depth} exceeds maximum allowed depth of ${maxDepth}.`,
+              ),
+            );
+            return;
+          }
+          if ('selectionSet' in selection && selection.selectionSet) {
+            checkDepth(selection.selectionSet, depth + 1);
+          }
+        }
+      };
+      checkDepth(operationNode.selectionSet, 1);
+    },
+  });
+}
 import {
   CORS_ORIGIN,
   IS_DEVELOPMENT,
@@ -76,6 +111,7 @@ export const createApp = async (): Promise<Application> => {
   const server = new ApolloServer({
     schema,
     introspection: IS_DEVELOPMENT,
+    validationRules: [createDepthLimitRule(MAX_QUERY_DEPTH)],
     formatError: (formattedError, error) => {
       const originalError = (error as { originalError?: unknown }).originalError ?? error;
       if (originalError instanceof AppError) {
