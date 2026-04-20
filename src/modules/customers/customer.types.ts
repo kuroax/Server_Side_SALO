@@ -13,32 +13,35 @@ export const CUSTOMER_TAGS = {
   REGULAR: 'regular',
 } as const;
 
+export const CUSTOMER_GENDERS = {
+  FEMALE: 'female',
+  MALE: 'male',
+  UNKNOWN: 'unknown',
+} as const;
+
 export type CustomerChannel =
   (typeof CUSTOMER_CHANNELS)[keyof typeof CUSTOMER_CHANNELS];
 
 export type CustomerTag =
   (typeof CUSTOMER_TAGS)[keyof typeof CUSTOMER_TAGS];
 
+export type CustomerGender =
+  (typeof CUSTOMER_GENDERS)[keyof typeof CUSTOMER_GENDERS];
+
 // ─── Base ─────────────────────────────────────────────────────────────────────
 
 export type CustomerBase = {
   name: string;
-  // Stored as received — no normalization in V1
-  // V2: enforce canonical format, add unique sparse index
   phone?: string;
-  // Stored without @ prefix — normalized in validation layer
-  // V2: add unique sparse index
   instagramHandle?: string;
-  // Renamed from channel — makes intent clearer
-  // MVP assumption: BOTH means customer has both phone and instagramHandle
-  // V2: consider channels: CustomerChannel[] for stronger modeling
   contactChannel: CustomerChannel;
   notes?: string;
-  // Tags mix dimensions (status, type, behavior) — acceptable for MVP CRM
-  // V2: consider separate segment and flags fields
   tags: CustomerTag[];
   address?: string;
   isActive: boolean;
+  // Used by Luis to adapt communication style (female/male/unknown)
+  // Defaults to 'unknown' — can be set manually or inferred from name
+  gender: CustomerGender;
 };
 
 // ─── Entity ───────────────────────────────────────────────────────────────────
@@ -62,14 +65,8 @@ export type CustomerResponse = Omit<
 
 // ─── Input Types ──────────────────────────────────────────────────────────────
 
-// tags optional on create — defaults to [] in model
-// channel/contact consistency enforced in validation:
-//   whatsapp → phone required
-//   instagram → instagramHandle required
-//   both → both required
 export type CreateCustomerInput = Omit<CustomerBase, 'isActive' | 'tags'> & {
   tags?: CustomerTag[];
 };
 
-// id handled separately by service layer — consistent with product/auth pattern
 export type UpdateCustomerInput = Partial<Omit<CustomerBase, 'isActive'>>;

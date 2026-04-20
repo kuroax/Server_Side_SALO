@@ -8,6 +8,7 @@ import {
 import { createOrder } from '#/modules/orders/order.service.js';
 import { processMessage } from '#/integrations/whatsapp/claude.service.js';
 import { searchProductsByImage } from '#/integrations/whatsapp/image-search.service.js';
+import { CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 import { logger } from '#/config/logger.js';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
 
@@ -18,8 +19,6 @@ export type WebhookResult = {
   escalate:      boolean;
   customerPhone: string;
   customerName:  string | null;
-  // Cloudinary image URLs to send back to the customer (image search results).
-  // Empty array when the message was text-only.
   productImages: string[];
 };
 
@@ -66,14 +65,16 @@ export const handleIncomingMessage = async (
       name:           `WhatsApp ${from}`,
       phone:          from,
       contactChannel: 'whatsapp',
+      gender:         CUSTOMER_GENDERS.UNKNOWN,
       tags:           [],
     });
 
     logger.info({ phone: from }, 'New customer created from WhatsApp');
   }
 
-  const customerId   = customer._id.toString();
-  const customerName = customer.name !== `WhatsApp ${from}` ? customer.name : null;
+  const customerId      = customer._id.toString();
+  const customerName    = customer.name !== `WhatsApp ${from}` ? customer.name : null;
+  const customerGender  = (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as 'female' | 'male' | 'unknown';
 
   // ── 2. Image message — search inventory by visual similarity ─────────────
   if (messageType === 'image' && payload.imageMediaId) {
@@ -81,7 +82,6 @@ export const handleIncomingMessage = async (
 
     const { reply, productImages } = await searchProductsByImage(payload.imageMediaId);
 
-    // Persist image search turn in conversation history
     const imageTurns = [
       { role: 'user'      as const, content: '[Imagen enviada por el cliente]', createdAt: new Date() },
       { role: 'assistant' as const, content: reply,                             createdAt: new Date() },
@@ -99,7 +99,7 @@ export const handleIncomingMessage = async (
     return { reply, escalate: false, customerPhone: from, customerName, productImages };
   }
 
-  // ── 3. Text message — existing Luis flow ─────────────────────────────────
+  // ── 3. Text message — Luis flow ───────────────────────────────────────────
 
   const message = payload.message;
 
@@ -130,6 +130,7 @@ export const handleIncomingMessage = async (
 
   const result = await processMessage({
     customerName,
+    customerGender,
     recentOrder: recentOrder
       ? { orderNumber: recentOrder.orderNumber, status: recentOrder.status, total: recentOrder.total }
       : null,
@@ -154,7 +155,7 @@ export const handleIncomingMessage = async (
   );
 
   logger.info(
-    { customerId, intent: result.intent, historyTurns: conversationHistory.length },
+    { customerId, intent: result.intent, historyTurns: conversationHistory.length, customerGender },
     'Conversation turn persisted',
   );
 

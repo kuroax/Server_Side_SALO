@@ -32,7 +32,8 @@ export type ConversationTurnInput = {
 };
 
 export type ClaudeContext = {
-  customerName: string | null;
+  customerName:   string | null;
+  customerGender: 'female' | 'male' | 'unknown';
   recentOrder: {
     orderNumber: string;
     status:      string;
@@ -78,9 +79,7 @@ const claudeResultSchema = z.union([
   }),
 ]);
 
-// ─── Safe fallback — stays in character ──────────────────────────────────────
-// Used when Claude times out or returns invalid JSON.
-// Never expose a robotic error message to the customer.
+// ─── Safe fallback ────────────────────────────────────────────────────────────
 
 const SAFE_FALLBACK: ClaudeResult = {
   intent:   'needs_human',
@@ -108,18 +107,32 @@ Recibirás el historial de mensajes anteriores. DEBES usarlo para dar continuida
 - Si el cliente ya preguntó algo, recuerda su contexto y no lo repitas
 - Si ya mostraste el catálogo, no lo repitas completo — referencia lo que ya compartiste
 - Adapta tu tono al punto de la conversación en que estás
+- Si el historial ya establece un estilo de comunicación con este cliente, mantenlo consistente
+
+─── ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────────────────
+
+El género del cliente se indica en el contexto del sistema. Úsalo para adaptar tu tono:
+
+CLIENTE FEMENINO (gender: female) o DESCONOCIDO (gender: unknown — usa femenino por defecto):
+- Apodos: "bonita", "bella", "corazón", "linda", "amiga", "bb"
+- Saludos: "Hola bonita buen día!", "Hola bella!"
+- Tono: cálido, cercano, entusiasta
+
+CLIENTE MASCULINO (gender: male):
+- Apodos: "amigo", "bro" (con confianza establecida) "brocito" (con confianza establecida)
+- Saludos: "Hola buen día!", "Hola amigo!"
+- NUNCA uses "bonita", "bella", "corazón", "linda" con clientes masculinos
+- Tono: directo, entusiasta, igualmente cálido pero más neutral en diminutivos
+- Fallback de género: si el contexto del historial ya indica el género correcto, úsalo
 
 ─── ESTILO DE COMUNICACIÓN ────────────────────────────────────────────────────
 
 SALUDOS (solo en el primer mensaje, nunca después):
-- "Hola buen día!", "Hola bonita buen día!🙌🏼", "Hola bella!"
-- "¡Que gusto saludarte!"
+- Femenino: "Hola buen día!", "Hola bonita buen día!🙌🏼", "Hola bella!"
+- Masculino: "Hola buen día!", "Hola amigo!", "¡Que gusto saludarte!"
 
 AFIRMACIONES:
 - "Vaaaa!", "Sipi!", "Padrísimo!🙌🏼", "Perfecto!", "Super!", "Con mil gusto!"
-
-APODOS (úsalos naturalmente):
-- "bonita", "bella", "corazón", "linda", "amiga", "bb"
 
 DISPONIBILIDAD:
 - "Disponible!", "Disponible Talla M!🙌🏼"
@@ -193,6 +206,20 @@ Para cualquier otro intent (orderHints PROHIBIDO — no incluir el campo):
   "response": "tu respuesta aquí"
 }`;
 
+// ─── Gender context builder ───────────────────────────────────────────────────
+
+function buildGenderContext(gender: 'female' | 'male' | 'unknown'): string {
+  switch (gender) {
+    case 'male':
+      return 'GÉNERO DEL CLIENTE: masculino — usa "amigo", tono directo. NUNCA uses "bonita", "bella", "corazón", "linda".';
+    case 'female':
+      return 'GÉNERO DEL CLIENTE: femenino — usa "bonita", "bella", "corazón", "linda" naturalmente.';
+    case 'unknown':
+    default:
+      return 'GÉNERO DEL CLIENTE: desconocido — usa femenino por defecto ("bonita", "bella") hasta confirmar.';
+  }
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const processMessage = async (
@@ -200,6 +227,7 @@ export const processMessage = async (
 ): Promise<ClaudeResult> => {
   const {
     customerName,
+    customerGender,
     recentOrder,
     catalog,
     incomingMessage,
@@ -209,6 +237,7 @@ export const processMessage = async (
 
   const contextBlock = `[CONTEXTO DEL SISTEMA — no mostrar al cliente]
 CLIENTE: ${customerName ?? 'Cliente nueva'}
+${buildGenderContext(customerGender)}
 
 CATÁLOGO DISPONIBLE:
 ${catalog.length === 0
@@ -242,6 +271,7 @@ INFORMACIÓN DEL NEGOCIO:
       catalogSize:    catalog.length,
       hasRecentOrder: !!recentOrder,
       historyTurns:   conversationHistory.length,
+      customerGender,
     },
     'Calling Claude API',
   );

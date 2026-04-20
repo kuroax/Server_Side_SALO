@@ -2,11 +2,11 @@ import { z } from 'zod';
 import {
   CUSTOMER_CHANNELS,
   CUSTOMER_TAGS,
+  CUSTOMER_GENDERS,
 } from '#/modules/customers/customer.types.js';
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
-// Explicit enum values preserve literal types — avoids Object.values() cast
 const contactChannelEnum = z.enum([
   CUSTOMER_CHANNELS.WHATSAPP,
   CUSTOMER_CHANNELS.INSTAGRAM,
@@ -20,15 +20,19 @@ const customerTagEnum = z.enum([
   CUSTOMER_TAGS.REGULAR,
 ]);
 
+const customerGenderEnum = z.enum([
+  CUSTOMER_GENDERS.FEMALE,
+  CUSTOMER_GENDERS.MALE,
+  CUSTOMER_GENDERS.UNKNOWN,
+]);
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Reusable tag deduplication — used in both create and update transforms
 const dedupeTags = (tags: string[] | undefined): string[] | undefined =>
   tags ? Array.from(new Set(tags)) : undefined;
 
 // ─── Base Schema ──────────────────────────────────────────────────────────────
 
-// Shared base — create and update both derive from this
 const customerBaseSchema = z.object({
   name: z
     .string({ error: 'Name is required' })
@@ -36,7 +40,6 @@ const customerBaseSchema = z.object({
     .min(1, 'Name cannot be empty')
     .max(100, 'Name is too long'),
 
-  // V1: stored as received — no normalization
   phone: z
     .string()
     .trim()
@@ -44,7 +47,6 @@ const customerBaseSchema = z.object({
     .max(20, 'Phone number is too long')
     .optional(),
 
-  // @ prefix stripped and lowercased in transform
   instagramHandle: z
     .string()
     .trim()
@@ -68,11 +70,13 @@ const customerBaseSchema = z.object({
     .trim()
     .max(200, 'Address is too long')
     .optional(),
+
+  // Defaults to 'unknown' — set manually in the app or inferred from conversation
+  gender: customerGenderEnum.default(CUSTOMER_GENDERS.UNKNOWN),
 });
 
 // ─── Channel/Contact Consistency ──────────────────────────────────────────────
 
-// Explicit branching — each channel case handled separately for clarity
 const enforceChannelConsistency = <
   T extends {
     phone?: string;
@@ -133,8 +137,6 @@ export const createCustomerSchema = customerBaseSchema
 
 // ─── Update Customer ──────────────────────────────────────────────────────────
 
-// id handled separately by service layer
-// channel consistency only enforced when contactChannel is present in patch
 export const updateCustomerSchema = customerBaseSchema
   .partial()
   .superRefine((data, ctx) => {
@@ -156,7 +158,6 @@ export const customerIdSchema = z.object({
 
 // ─── Get by Phone ─────────────────────────────────────────────────────────────
 
-// Used by WhatsApp bot to look up customer by incoming phone number
 export const getCustomerByPhoneSchema = z.object({
   phone: z.string().trim().min(1, 'Phone is required'),
 });

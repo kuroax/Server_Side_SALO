@@ -1,5 +1,5 @@
 import { Schema, model, type InferSchemaType, type HydratedDocument, type Model } from 'mongoose';
-import { CUSTOMER_CHANNELS, CUSTOMER_TAGS } from '#/modules/customers/customer.types.js';
+import { CUSTOMER_CHANNELS, CUSTOMER_TAGS, CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -11,8 +11,6 @@ const customerSchema = new Schema(
       trim: true,
     },
 
-    // Stored as received — no normalization in V1
-    // sparse: true allows multiple nulls while enforcing uniqueness on non-null
     phone: {
       type: String,
       trim: true,
@@ -20,8 +18,6 @@ const customerSchema = new Schema(
       sparse: true,
     },
 
-    // @ prefix stripped in validation + pre('save') hook
-    // sparse: true — same uniqueness strategy as phone
     instagramHandle: {
       type: String,
       trim: true,
@@ -41,8 +37,6 @@ const customerSchema = new Schema(
       trim: true,
     },
 
-    // Nested object form — correctly validates each element against enum
-    // Deduplication enforced in validation layer
     tags: {
       type: [{ type: String, enum: Object.values(CUSTOMER_TAGS) }],
       default: [],
@@ -51,6 +45,16 @@ const customerSchema = new Schema(
     address: {
       type: String,
       trim: true,
+    },
+
+    // Used by Luis to adapt communication style
+    // female → "bonita", "bella", "corazón"
+    // male   → "amigo", direct tone, no feminine nicknames
+    // unknown → defaults to female (majority of SALO customers)
+    gender: {
+      type: String,
+      enum: Object.values(CUSTOMER_GENDERS),
+      default: CUSTOMER_GENDERS.UNKNOWN,
     },
 
     isActive: {
@@ -66,21 +70,15 @@ const customerSchema = new Schema(
 
 // ─── Normalization ────────────────────────────────────────────────────────────
 
-// Defensive second layer after Zod — strips @ prefix from instagramHandle
 customerSchema.pre('save', function () {
   if (typeof this.instagramHandle === 'string') {
-    // lowercase: true on schema handles lowercasing
-    // hook only needs to strip @ prefix
     this.instagramHandle = this.instagramHandle.replace(/^@/, '').trim();
   }
 });
 
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
-// Compound index — covers isActive alone (leftmost prefix) and isActive+channel
 customerSchema.index({ isActive: 1, contactChannel: 1 });
-
-// Tag-based filtering for CRM segmentation
 customerSchema.index({ tags: 1 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────

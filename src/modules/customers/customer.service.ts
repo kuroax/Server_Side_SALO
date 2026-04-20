@@ -12,6 +12,7 @@ import type {
   ListCustomersData,
 } from '#/modules/customers/customer.validation.js';
 import type { CustomerResponse } from '#/modules/customers/customer.types.js';
+import { CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 import { logger } from '#/config/logger.js';
 import {
   NotFoundError,
@@ -29,6 +30,7 @@ type CustomerLike = {
   notes?: string;
   tags: string[];
   address?: string;
+  gender: string;
   isActive: boolean;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -45,6 +47,7 @@ const toCustomerResponse = (doc: CustomerLike): CustomerResponse => ({
   notes: doc.notes,
   tags: doc.tags as CustomerResponse['tags'],
   address: doc.address,
+  gender: (doc.gender ?? CUSTOMER_GENDERS.UNKNOWN) as CustomerResponse['gender'],
   isActive: doc.isActive,
   createdAt: doc.createdAt instanceof Date
     ? doc.createdAt.toISOString()
@@ -96,16 +99,18 @@ export const createCustomer = async (input: unknown): Promise<CustomerResponse> 
   try {
     const doc = await CustomerModel.create({
       ...data,
-      tags: data.tags ?? [],
+      tags:     data.tags ?? [],
+      gender:   data.gender ?? CUSTOMER_GENDERS.UNKNOWN,
       isActive: true,
     });
 
     logger.info(
       {
-        customerId: doc._id.toString(),
-        phone: doc.phone,
+        customerId:      doc._id.toString(),
+        phone:           doc.phone,
         instagramHandle: doc.instagramHandle,
-        contactChannel: doc.contactChannel,
+        contactChannel:  doc.contactChannel,
+        gender:          doc.gender,
       },
       'Customer created',
     );
@@ -126,7 +131,6 @@ export const getCustomerById = async (input: unknown): Promise<CustomerResponse>
 
 // ─── Get by Phone ─────────────────────────────────────────────────────────────
 
-// Returns null instead of throwing — "not found" is a normal bot scenario
 export const getCustomerByPhone = async (
   input: unknown,
 ): Promise<CustomerResponse | null> => {
@@ -157,17 +161,14 @@ export const listCustomers = async (input: unknown): Promise<{
 
   if (contactChannel) filter.contactChannel = contactChannel;
   if (typeof isActive === 'boolean') filter.isActive = isActive;
-
-  // $in — customer must have AT LEAST ONE of the specified tags
   if (tags && tags.length > 0) filter.tags = { $in: tags };
 
-  // Search across name, phone, instagramHandle — regex escaped for safety
   if (search) {
     const escapedSearch = escapeRegex(search);
     filter.$or = [
-      { name: { $regex: escapedSearch, $options: 'i' } },
-      { phone: { $regex: escapedSearch, $options: 'i' } },
-      { instagramHandle: { $regex: escapedSearch, $options: 'i' } },
+      { name:             { $regex: escapedSearch, $options: 'i' } },
+      { phone:            { $regex: escapedSearch, $options: 'i' } },
+      { instagramHandle:  { $regex: escapedSearch, $options: 'i' } },
     ];
   }
 
@@ -193,8 +194,6 @@ export const listCustomers = async (input: unknown): Promise<{
 
 // ─── Update ───────────────────────────────────────────────────────────────────
 
-// Fetches existing customer and merges with patch before validating
-// Ensures channel/contact consistency on final merged state
 export const updateCustomer = async (
   id: string,
   input: unknown,
@@ -209,18 +208,17 @@ export const updateCustomer = async (
 
   const existing = await findCustomerByIdOrThrow(id);
 
-  // Merge existing + patch — validates final state, not just the patch
   const merged = {
-    name: patch.name ?? existing.name,
-    phone: patch.phone ?? existing.phone,
+    name:            patch.name            ?? existing.name,
+    phone:           patch.phone           ?? existing.phone,
     instagramHandle: patch.instagramHandle ?? existing.instagramHandle,
-    contactChannel: patch.contactChannel ?? existing.contactChannel,
-    notes: patch.notes ?? existing.notes,
-    tags: patch.tags ?? existing.tags,
-    address: patch.address ?? existing.address,
+    contactChannel:  patch.contactChannel  ?? existing.contactChannel,
+    notes:           patch.notes           ?? existing.notes,
+    tags:            patch.tags            ?? existing.tags,
+    address:         patch.address         ?? existing.address,
+    gender:          patch.gender          ?? existing.gender,
   };
 
-  // validatedCustomer — full merged state, not just the patch
   const validatedCustomer = createCustomerSchema.parse(merged);
 
   try {
@@ -228,13 +226,14 @@ export const updateCustomer = async (
       id,
       {
         $set: {
-          name: validatedCustomer.name,
-          phone: validatedCustomer.phone,
+          name:            validatedCustomer.name,
+          phone:           validatedCustomer.phone,
           instagramHandle: validatedCustomer.instagramHandle,
-          contactChannel: validatedCustomer.contactChannel,
-          notes: validatedCustomer.notes,
-          tags: validatedCustomer.tags,
-          address: validatedCustomer.address,
+          contactChannel:  validatedCustomer.contactChannel,
+          notes:           validatedCustomer.notes,
+          tags:            validatedCustomer.tags,
+          address:         validatedCustomer.address,
+          gender:          validatedCustomer.gender,
         },
       },
       { new: true, runValidators: true },
@@ -242,7 +241,7 @@ export const updateCustomer = async (
 
     if (!doc) throw new NotFoundError('Customer not found');
 
-    logger.info({ customerId: id, contactChannel: doc.contactChannel }, 'Customer updated');
+    logger.info({ customerId: id, contactChannel: doc.contactChannel, gender: doc.gender }, 'Customer updated');
 
     return toCustomerResponse(doc);
   } catch (error) {
@@ -253,7 +252,6 @@ export const updateCustomer = async (
 
 // ─── Deactivate / Activate ────────────────────────────────────────────────────
 
-// Soft deactivation — preferred over hard delete until order references are understood
 export const deactivateCustomer = async (input: unknown): Promise<CustomerResponse> => {
   const { id } = customerIdSchema.parse(input);
 

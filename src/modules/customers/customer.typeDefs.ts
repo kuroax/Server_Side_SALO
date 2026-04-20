@@ -13,6 +13,12 @@ export const customerTypeDefs = `#graphql
     regular
   }
 
+  enum CustomerGender {
+    female
+    male
+    unknown
+  }
+
   type Customer {
     id: ID!
     name: String!
@@ -22,6 +28,7 @@ export const customerTypeDefs = `#graphql
     notes: String
     tags: [CustomerTag!]!
     address: String
+    gender: CustomerGender!
     isActive: Boolean!
     createdAt: String!
     updatedAt: String!
@@ -45,6 +52,7 @@ export const customerTypeDefs = `#graphql
     notes: String
     tags: [CustomerTag!]
     address: String
+    gender: CustomerGender
   }
 
   input UpdateCustomerInput {
@@ -55,6 +63,7 @@ export const customerTypeDefs = `#graphql
     notes: String
     tags: [CustomerTag!]
     address: String
+    gender: CustomerGender
   }
 
   input ListCustomersInput {
@@ -69,13 +78,8 @@ export const customerTypeDefs = `#graphql
   # ─── Queries ──────────────────────────────────────────────────────────────────
 
   extend type Query {
-    # Returns a single customer by ID
     customer(id: ID!): Customer!
-
-    # Returns a customer by phone — null if not found (for bot lookups)
     customerByPhone(phone: String!): Customer
-
-    # Returns paginated customer list with optional filters
     customers(input: ListCustomersInput): CustomerList!
   }
 
@@ -83,12 +87,8 @@ export const customerTypeDefs = `#graphql
 
   extend type Mutation {
     createCustomer(input: CreateCustomerInput!): Customer!
-
     updateCustomer(id: ID!, input: UpdateCustomerInput!): Customer!
-
-    # Soft deactivation — preferred over hard delete
     deactivateCustomer(id: ID!): Customer!
-
     activateCustomer(id: ID!): Customer!
   }
 `;
