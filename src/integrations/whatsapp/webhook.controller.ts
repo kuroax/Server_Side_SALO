@@ -16,8 +16,7 @@ export const whatsappWebhookHandler = async (
   res: Response,
 ): Promise<void> => {
   // ── Validate webhook secret ──────────────────────────────────────────────
-  const rawHeader = req.headers['x-webhook-secret'];
-  // The header can be a string or an array — always use the first value.
+  const rawHeader   = req.headers['x-webhook-secret'];
   const secretValue = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
 
   const isValid = (() => {
@@ -46,8 +45,17 @@ export const whatsappWebhookHandler = async (
   try {
     const result = await handleIncomingMessage(parsed.data);
 
-    // n8n reads the reply field and sends it back to WhatsApp.
-    res.status(200).json({ reply: result.reply, escalate: result.escalate, customerPhone: result.customerPhone, customerName: result.customerName });
+    // n8n reads these fields to:
+    // - send reply text to customer        → reply
+    // - send product images to customer    → productImages
+    // - alert the owner if needed          → escalate
+    res.status(200).json({
+      reply:         result.reply,
+      escalate:      result.escalate,
+      customerPhone: result.customerPhone,
+      customerName:  result.customerName,
+      productImages: result.productImages,
+    });
   } catch (err) {
     logger.error({ err }, 'Webhook handler error');
     res.status(500).json({ error: 'Internal server error' });

@@ -35,6 +35,10 @@ const envSchema = z.object({
   // Shared secret sent by n8n in X-Webhook-Secret header.
   // Must match the value configured in the n8n HTTP Request node.
   WEBHOOK_SECRET: z.string().min(16, 'WEBHOOK_SECRET must be at least 16 characters'),
+
+  // Meta permanent access token — used to download customer-sent images from
+  // WhatsApp media servers for visual inventory search.
+  WHATSAPP_ACCESS_TOKEN: z.string().min(1, 'WHATSAPP_ACCESS_TOKEN is required'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -74,6 +78,7 @@ export const {
   CORS_ORIGIN,
   ANTHROPIC_API_KEY,
   WEBHOOK_SECRET,
+  WHATSAPP_ACCESS_TOKEN,
   IS_PRODUCTION,
   IS_DEVELOPMENT,
   IS_TEST,

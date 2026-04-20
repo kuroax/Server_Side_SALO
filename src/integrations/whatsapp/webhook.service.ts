@@ -7,19 +7,20 @@ import {
 } from '#/modules/conversations/conversation.model.js';
 import { createOrder } from '#/modules/orders/order.service.js';
 import { processMessage } from '#/integrations/whatsapp/claude.service.js';
+import { searchProductsByImage } from '#/integrations/whatsapp/image-search.service.js';
 import { logger } from '#/config/logger.js';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type WebhookResult = {
-  reply:    string;
-  // When true, n8n should send an owner alert via WhatsApp.
-  // n8n already has the Meta credentials — no need to duplicate them here.
-  escalate: boolean;
-  // Passed through so n8n can include it in the owner alert message.
+  reply:         string;
+  escalate:      boolean;
   customerPhone: string;
   customerName:  string | null;
+  // Cloudinary image URLs to send back to the customer (image search results).
+  // Empty array when the message was text-only.
+  productImages: string[];
 };
 
 // ─── Business info ────────────────────────────────────────────────────────────
@@ -52,9 +53,9 @@ function findProductByHint(
 export const handleIncomingMessage = async (
   payload: WebhookPayload,
 ): Promise<WebhookResult> => {
-  const { from, message } = payload;
+  const { from, messageType } = payload;
 
-  // ── 1. Identify customer by phone ────────────────────────────────────────
+  // ── 1. Identify / create customer ────────────────────────────────────────
   let customer = await CustomerModel.findOne({
     phone:    from,
     isActive: true,
@@ -74,7 +75,34 @@ export const handleIncomingMessage = async (
   const customerId   = customer._id.toString();
   const customerName = customer.name !== `WhatsApp ${from}` ? customer.name : null;
 
-  // ── 2. Load conversation history ─────────────────────────────────────────
+  // ── 2. Image message — search inventory by visual similarity ─────────────
+  if (messageType === 'image' && payload.imageMediaId) {
+    logger.info({ customerId, mediaId: payload.imageMediaId }, 'Image message received — running visual search');
+
+    const { reply, productImages } = await searchProductsByImage(payload.imageMediaId);
+
+    // Persist image search turn in conversation history
+    const imageTurns = [
+      { role: 'user'      as const, content: '[Imagen enviada por el cliente]', createdAt: new Date() },
+      { role: 'assistant' as const, content: reply,                             createdAt: new Date() },
+    ];
+
+    await ConversationModel.findOneAndUpdate(
+      { customerId, channel: 'whatsapp' },
+      {
+        $push: { turns: { $each: imageTurns, $slice: -MAX_CONVERSATION_TURNS } },
+        $set:  { lastMessageAt: new Date() },
+      },
+      { upsert: true, new: true },
+    );
+
+    return { reply, escalate: false, customerPhone: from, customerName, productImages };
+  }
+
+  // ── 3. Text message — existing Luis flow ─────────────────────────────────
+
+  const message = payload.message;
+
   const conversation = await ConversationModel.findOne({
     customerId,
     channel: 'whatsapp',
@@ -85,12 +113,10 @@ export const handleIncomingMessage = async (
     content: t.content,
   }));
 
-  // ── 3. Fetch most recent order for context ───────────────────────────────
   const recentOrder = await OrderModel.findOne({ customerId })
     .sort({ createdAt: -1 })
     .lean();
 
-  // ── 4. Fetch active product catalog ──────────────────────────────────────
   const products = await ProductModel.find({ status: 'active' })
     .select('id name price brand')
     .lean();
@@ -102,15 +128,10 @@ export const handleIncomingMessage = async (
     brand: p.brand,
   }));
 
-  // ── 5. Call Claude ────────────────────────────────────────────────────────
   const result = await processMessage({
     customerName,
     recentOrder: recentOrder
-      ? {
-          orderNumber: recentOrder.orderNumber,
-          status:      recentOrder.status,
-          total:       recentOrder.total,
-        }
+      ? { orderNumber: recentOrder.orderNumber, status: recentOrder.status, total: recentOrder.total }
       : null,
     catalog,
     incomingMessage:     message,
@@ -118,7 +139,6 @@ export const handleIncomingMessage = async (
     businessInfo:        BUSINESS_INFO,
   });
 
-  // ── 6. Persist conversation turn ─────────────────────────────────────────
   const newTurns = [
     { role: 'user'      as const, content: message,         createdAt: new Date() },
     { role: 'assistant' as const, content: result.response, createdAt: new Date() },
@@ -127,13 +147,8 @@ export const handleIncomingMessage = async (
   await ConversationModel.findOneAndUpdate(
     { customerId, channel: 'whatsapp' },
     {
-      $push: {
-        turns: {
-          $each:  newTurns,
-          $slice: -MAX_CONVERSATION_TURNS,
-        },
-      },
-      $set: { lastMessageAt: new Date() },
+      $push: { turns: { $each: newTurns, $slice: -MAX_CONVERSATION_TURNS } },
+      $set:  { lastMessageAt: new Date() },
     },
     { upsert: true, new: true },
   );
@@ -143,21 +158,16 @@ export const handleIncomingMessage = async (
     'Conversation turn persisted',
   );
 
-  // ── 7. Handle create_order intent ────────────────────────────────────────
+  // Handle create_order intent
   if (result.intent === 'create_order' && result.orderHints?.length) {
     try {
       const resolvedItems = result.orderHints
         .map((hint) => {
           const product = findProductByHint(hint.productNameHint, catalog);
-
           if (!product) {
-            logger.warn(
-              { hint: hint.productNameHint },
-              'Order hint did not match any catalog product — skipping item',
-            );
+            logger.warn({ hint: hint.productNameHint }, 'Order hint did not match any catalog product — skipping item');
             return null;
           }
-
           return {
             productId:   product.id,
             productName: product.name,
@@ -172,27 +182,21 @@ export const handleIncomingMessage = async (
         .filter((item): item is NonNullable<typeof item> => item !== null);
 
       if (resolvedItems.length > 0) {
-        // Delegate to the order service — gets the atomic SALO-XXXXXX counter,
-        // Zod validation, product snapshot lookup, and financial computation.
         const created = await createOrder(
           {
             customerId,
             channel: 'whatsapp',
-            items: resolvedItems.map(item => ({
+            items: resolvedItems.map((item) => ({
               productId: item.productId,
               size:      item.size,
               color:     item.color,
               quantity:  item.quantity,
               unitPrice: item.unitPrice,
             })),
-            notes: [{
-              message: 'Pedido creado automáticamente desde WhatsApp.',
-              kind:    'system',
-            }],
+            notes: [{ message: 'Pedido creado automáticamente desde WhatsApp.', kind: 'system' }],
           },
-          null, // no human author — bot-generated order
+          null,
         );
-
         logger.info({ orderNumber: created.orderNumber, customerId }, 'Order created from WhatsApp');
       }
     } catch (err) {
@@ -200,17 +204,10 @@ export const handleIncomingMessage = async (
     }
   }
 
-  // ── 8. Return result — escalate flag tells n8n to notify the owner ───────
   const escalate = result.intent === 'needs_human';
-
   if (escalate) {
     logger.info({ customerId, from }, 'needs_human intent — escalate flag set for n8n');
   }
 
-  return {
-    reply:         result.response,
-    escalate,
-    customerPhone: from,
-    customerName,
-  };
+  return { reply: result.response, escalate, customerPhone: from, customerName, productImages: [] };
 };
