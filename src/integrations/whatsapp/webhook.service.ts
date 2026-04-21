@@ -86,6 +86,14 @@ export const handleIncomingMessage = async (
 ): Promise<WebhookResult> => {
   const { from, messageType } = payload;
 
+  // ── 0. Guard — ignore non-message WhatsApp events ──────────────────────────────────────────────
+  // WhatsApp sends status updates, read receipts, and delivery notifications
+  // with an empty from field. These are not customer messages — skip silently.
+  if (!from) {
+    logger.info('Ignoring non-message webhook event — empty from field');
+    return { reply: '', escalate: false, customerPhone: '', customerName: null, productImages: [] };
+  }
+
   // ── 1. Identify / create customer ────────────────────────────────────────
   let customer = await CustomerModel.findOne({
     phone:    from,
