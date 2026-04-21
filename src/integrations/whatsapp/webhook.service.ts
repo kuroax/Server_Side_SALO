@@ -11,6 +11,7 @@ import { searchProductsByImage } from '#/integrations/whatsapp/image-search.serv
 import { CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 import { logger } from '#/config/logger.js';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
+import type { ClaudeSearchHints } from '#/integrations/whatsapp/claude.service.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,37 @@ function findProductByHint(
     catalog.find((p) => normalized.includes(p.name.toLowerCase())) ??
     null
   );
+}
+
+// Filters the full product list using the hints Claude extracted from the
+// customer's message. Matching is intentionally broad — keyword matches
+// against name, brand, categoryGroup, and subcategory so "legging" finds
+// "Ribbed Sea Coast Cropped Legging" even if the customer only said one word.
+function filterProductsBySearchHints(
+  products: { _id: { toString(): string }; name: string; brand: string; gender?: string; categoryGroup?: string; subcategory?: string; images?: string[] }[],
+  hints:    ClaudeSearchHints,
+): string[] {
+  const keyword = hints.keyword.toLowerCase().trim();
+
+  const matched = products.filter((p) => {
+    // Keyword match — at least one field must contain the keyword
+    const fields = [p.name, p.brand, p.categoryGroup ?? '', p.subcategory ?? '']
+      .map((f) => f.toLowerCase());
+    const keywordMatch = fields.some((f) => f.includes(keyword));
+    if (!keywordMatch) return false;
+
+    // Gender match — skip filter if hint is unknown or absent
+    if (hints.gender && hints.gender !== 'unknown' && p.gender) {
+      if (p.gender !== hints.gender) return false;
+    }
+
+    return true;
+  });
+
+  // Extract first image from each matched product, drop empties
+  return matched
+    .map((p) => (p.images as string[] | undefined)?.[0])
+    .filter((url): url is string => Boolean(url));
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -117,10 +149,10 @@ export const handleIncomingMessage = async (
     .sort({ createdAt: -1 })
     .lean();
 
-  // ── Fetch products with images ────────────────────────────────────────────
-  // `images` is not passed to Claude — it stays here for n8n image dispatch.
+  // Fetch products with images — images are not passed to Claude, they are
+  // used here for filtering and dispatching back to n8n.
   const products = await ProductModel.find({ status: 'active' })
-    .select('name price brand images')
+    .select('name price brand gender categoryGroup subcategory images')
     .lean();
 
   const catalog = products.map((p) => ({
@@ -129,12 +161,6 @@ export const handleIncomingMessage = async (
     price: p.price,
     brand: p.brand,
   }));
-
-  // First image of each product, filtered to non-empty — used when the
-  // customer asks what's available and we want to send visual catalog images.
-  const catalogImages = products
-    .map((p) => (p.images as string[] | undefined)?.[0])
-    .filter((url): url is string => Boolean(url));
 
   const result = await processMessage({
     customerName,
@@ -218,10 +244,19 @@ export const handleIncomingMessage = async (
     logger.info({ customerId, from }, 'needs_human intent — escalate flag set for n8n');
   }
 
-  // ── Return product images for catalog queries ─────────────────────────────
-  // On catalog_query, n8n's existing "Has Product Images" → Loop → Send Image
-  // node chain will deliver each product photo to the customer automatically.
-  const productImages = result.intent === 'catalog_query' ? catalogImages : [];
+  // ── Resolve product images to return to n8n ───────────────────────────────
+  // product_search: filter catalog by Claude's searchHints → send matching images
+  // catalog_query:  Luis asked a clarifying question this turn — no images yet
+  // all others:     no images
+  let productImages: string[] = [];
+
+  if (result.intent === 'product_search' && result.searchHints) {
+    productImages = filterProductsBySearchHints(products, result.searchHints);
+    logger.info(
+      { keyword: result.searchHints.keyword, matches: productImages.length },
+      'Product search — returning matched images',
+    );
+  }
 
   return { reply: result.response, escalate, customerPhone: from, customerName, productImages };
 };

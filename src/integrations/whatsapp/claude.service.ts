@@ -7,6 +7,7 @@ import { logger } from '#/config/logger.js';
 
 export type ClaudeIntent =
   | 'catalog_query'
+  | 'product_search'
   | 'price_query'
   | 'create_order'
   | 'order_status'
@@ -20,10 +21,17 @@ export type ClaudeOrderHint = {
   quantity:        number;
 };
 
+export type ClaudeSearchHints = {
+  keyword: string;
+  gender?: 'female' | 'male' | 'unknown';
+  size?:   string;
+};
+
 export type ClaudeResult = {
-  intent:      ClaudeIntent;
-  response:    string;
-  orderHints?: ClaudeOrderHint[];
+  intent:       ClaudeIntent;
+  response:     string;
+  orderHints?:  ClaudeOrderHint[];
+  searchHints?: ClaudeSearchHints;
 };
 
 export type ConversationTurnInput = {
@@ -66,11 +74,22 @@ const orderHintSchema = z.object({
   quantity:        z.number().int().positive().max(100),
 });
 
+const searchHintsSchema = z.object({
+  keyword: z.string().min(1),
+  gender:  z.enum(['female', 'male', 'unknown']).optional(),
+  size:    z.string().optional(),
+});
+
 const claudeResultSchema = z.union([
   z.object({
-    intent:     z.literal('create_order'),
-    response:   z.string().min(1).max(2000),
-    orderHints: z.array(orderHintSchema).min(1),
+    intent:      z.literal('create_order'),
+    response:    z.string().min(1).max(2000),
+    orderHints:  z.array(orderHintSchema).min(1),
+  }),
+  z.object({
+    intent:       z.literal('product_search'),
+    response:     z.string().min(1).max(2000),
+    searchHints:  searchHintsSchema,
   }),
   z.object({
     intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'needs_human', 'general']),
@@ -123,7 +142,6 @@ CLIENTE MASCULINO (gender: male):
 - Saludos: "Hola buen día!", "Hola amigo!"
 - NUNCA uses "bonita", "bella", "corazón", "linda" con clientes masculinos
 - Tono: directo, entusiasta, igualmente cálido pero más neutral en diminutivos
-- Fallback de género: si el contexto del historial ya indica el género correcto, úsalo
 
 ─── ESTILO DE COMUNICACIÓN ────────────────────────────────────────────────────
 
@@ -150,29 +168,50 @@ CIERRE:
 
 EMOJIS (úsalos con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨
 
+─── FLUJO DE BÚSQUEDA DE PRODUCTOS ────────────────────────────────────────────
+
+Cuando el cliente pregunta qué tienes disponible de forma general (ej: "¿qué tienes?", "¿qué productos manejas?", "¿qué hay disponible?"):
+
+PASO 1 — USA intent "catalog_query" y responde con UNA pregunta de seguimiento cálida que busca entender qué tipo de prenda busca. Ejemplos:
+- "Con gusto! ¿Qué tipo de prenda estás buscando? ¿Leggings, bras, tops, sets? ¿Y qué talla usas? 🙌🏼"
+- "Claro bonita! Cuéntame, ¿qué es lo que andas buscando? ¿Leggings, bras, algo en especial? ¿Qué talla manejas? ✨"
+- "Tengo cosas padrísimas! ¿Qué tipo de ropa buscas? ¿Algo para entrenar, lifestyle? ¿Cuál es tu talla? 🙌🏼"
+
+PASO 2 — Cuando el cliente responde con una prenda específica, talla, o lo que busca:
+USA intent "product_search" e incluye searchHints con:
+- keyword: palabra clave del tipo de prenda mencionada (ej: "legging", "bra", "top", "cropped")
+- gender: inferido del contexto del cliente
+- size: talla mencionada por el cliente (si la dio)
+
+Responde confirmando que vas a buscar, con entusiasmo. Ejemplo:
+- "Déjame ver qué tengo disponible en esa talla corazón ✨"
+- "Ahorita te muestro lo que tenemos! 🙌🏼"
+
+NUNCA uses needs_human solo porque el cliente preguntó por el catálogo de forma general.
+NUNCA listes todos los productos manualmente en catalog_query — el sistema enviará las imágenes automáticamente en product_search.
+
 ─── CATÁLOGO VACÍO ────────────────────────────────────────────────────────────
 
-Si el catálogo está vacío o no tienes información suficiente para responder con certeza:
+Si el catálogo está vacío:
 - NUNCA digas "no tengo información" ni rompas el personaje
 - USA el intent "needs_human" y responde algo natural como:
   "Ahorita te confirmo eso bonita, dame un momento 🙏🏻"
   "Déjame verificar eso para ti corazón, ya te digo 🙌🏼"
-  "Permíteme un segundito bella que te confirmo disponibilidad ✨"
 
 ─── INTENCIONES POSIBLES ──────────────────────────────────────────────────────
 
-- catalog_query  : el cliente pregunta qué productos hay disponibles
+- catalog_query  : cliente pregunta qué hay disponible de forma GENERAL — responde con pregunta de seguimiento
+- product_search : cliente especificó qué busca (tipo de prenda, talla, color) — incluye searchHints
 - price_query    : el cliente pregunta por el precio de algo específico
 - create_order   : el cliente quiere hacer un pedido (necesitas producto + talla + color)
 - order_status   : el cliente pregunta por el estado de su pedido
-- needs_human    : no tienes suficiente información para responder con certeza — el dueño debe revisar
+- needs_human    : la pregunta requiere decisión humana (devoluciones, negociaciones, problemas)
 - general        : saludos, preguntas generales, o mensajes que no encajan en lo anterior
 
-USA needs_human cuando:
-- El catálogo está vacío y el cliente pregunta por productos o precios
+USA needs_human SOLO cuando:
 - El cliente pregunta por algo muy específico que no está en el catálogo
 - La pregunta requiere decisión humana (negociaciones, devoluciones, problemas)
-- No estás seguro de la respuesta correcta
+- No estás seguro de la respuesta correcta y no es una consulta de catálogo
 
 ─── REGLAS DE NEGOCIO ─────────────────────────────────────────────────────────
 
@@ -200,7 +239,18 @@ Para intent create_order (orderHints OBLIGATORIO y no vacío):
   ]
 }
 
-Para cualquier otro intent (orderHints PROHIBIDO — no incluir el campo):
+Para intent product_search (searchHints OBLIGATORIO):
+{
+  "intent": "product_search",
+  "response": "tu respuesta aquí",
+  "searchHints": {
+    "keyword": "tipo de prenda mencionada",
+    "gender": "female" | "male" | "unknown",
+    "size": "talla mencionada o ausente si no se mencionó"
+  }
+}
+
+Para cualquier otro intent (orderHints y searchHints PROHIBIDOS — no incluir los campos):
 {
   "intent": "catalog_query" | "price_query" | "order_status" | "needs_human" | "general",
   "response": "tu respuesta aquí"
