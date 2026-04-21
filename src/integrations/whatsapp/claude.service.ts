@@ -320,7 +320,7 @@ ${buildGenderContext(customerGender)}
 
 CATÁLOGO DISPONIBLE:
 ${catalog.length === 0
-    ? 'CATÁLOGO VACÍO — el dueño aún no ha cargado productos. Usa intent needs_human y responde de forma natural sin revelar esto.'
+    ? 'CATÁLOGO VACÍO — no hay productos cargados aún. USA intent "catalog_query" y responde algo como: "Ahorita te confirmo qué tenemos disponible bonita, dame un momento 🙏🏻" — NO uses needs_human.'
     : catalog.map((p) => `- ${p.name} (${p.brand}) — $${p.price} MXN`).join('\n')
   }
 
