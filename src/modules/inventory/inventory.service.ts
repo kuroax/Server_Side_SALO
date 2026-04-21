@@ -1,3 +1,4 @@
+import { Types } from 'mongoose';
 import { InventoryModel } from '#/modules/inventory/inventory.model.js';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '#/modules/inventory/inventory.constants.js';
 import {
@@ -165,22 +166,36 @@ export const getProductInventory = async (
 
 // ─── Get Low Stock ────────────────────────────────────────────────────────────
 
+// Aggregation join against Product — only returns variants whose parent
+// product has status: 'active', preventing inactive products from
+// triggering false low-stock alerts on the dashboard.
 export const getLowStock = async (
   input: unknown,
 ): Promise<InventoryResponse[]> => {
   const { productId } = getLowStockSchema.parse(input);
 
-  const filter: Record<string, unknown> = {
+  const matchStage: Record<string, unknown> = {
     $expr: { $lte: ['$quantity', '$lowStockThreshold'] },
   };
 
   if (productId) {
-    filter.productId = productId;
+    matchStage.productId = new Types.ObjectId(productId);
   }
 
-  const docs = await InventoryModel.find(filter)
-    .sort({ quantity: 1 })
-    .lean<InventoryLike[]>();
+  const docs = await InventoryModel.aggregate([
+    { $match: matchStage },
+    {
+      $lookup: {
+        from: 'products',
+        localField: 'productId',
+        foreignField: '_id',
+        as: 'product',
+      },
+    },
+    { $unwind: '$product' },
+    { $match: { 'product.status': 'active' } },
+    { $sort: { quantity: 1 } },
+  ]) as InventoryLike[];
 
   return docs.map(toInventoryResponse);
 };
