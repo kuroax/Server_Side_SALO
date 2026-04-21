@@ -117,8 +117,10 @@ export const handleIncomingMessage = async (
     .sort({ createdAt: -1 })
     .lean();
 
+  // ── Fetch products with images ────────────────────────────────────────────
+  // `images` is not passed to Claude — it stays here for n8n image dispatch.
   const products = await ProductModel.find({ status: 'active' })
-    .select('id name price brand')
+    .select('name price brand images')
     .lean();
 
   const catalog = products.map((p) => ({
@@ -127,6 +129,12 @@ export const handleIncomingMessage = async (
     price: p.price,
     brand: p.brand,
   }));
+
+  // First image of each product, filtered to non-empty — used when the
+  // customer asks what's available and we want to send visual catalog images.
+  const catalogImages = products
+    .map((p) => (p.images as string[] | undefined)?.[0])
+    .filter((url): url is string => Boolean(url));
 
   const result = await processMessage({
     customerName,
@@ -159,7 +167,7 @@ export const handleIncomingMessage = async (
     'Conversation turn persisted',
   );
 
-  // Handle create_order intent
+  // ── Handle create_order intent ────────────────────────────────────────────
   if (result.intent === 'create_order' && result.orderHints?.length) {
     try {
       const resolvedItems = result.orderHints
@@ -210,5 +218,10 @@ export const handleIncomingMessage = async (
     logger.info({ customerId, from }, 'needs_human intent — escalate flag set for n8n');
   }
 
-  return { reply: result.response, escalate, customerPhone: from, customerName, productImages: [] };
+  // ── Return product images for catalog queries ─────────────────────────────
+  // On catalog_query, n8n's existing "Has Product Images" → Loop → Send Image
+  // node chain will deliver each product photo to the customer automatically.
+  const productImages = result.intent === 'catalog_query' ? catalogImages : [];
+
+  return { reply: result.response, escalate, customerPhone: from, customerName, productImages };
 };
