@@ -10,18 +10,46 @@ import { processMessage } from '#/integrations/whatsapp/claude.service.js';
 import { searchProductsByImage } from '#/integrations/whatsapp/image-search.service.js';
 import { CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 import { logger } from '#/config/logger.js';
+import { z } from 'zod';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
 import type { ClaudeSearchHints } from '#/integrations/whatsapp/claude.service.js';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Response schema ──────────────────────────────────────────────────────────
+// Single source of truth for what this service returns to n8n.
+// Every return path is validated through toSafeResult() — no raw returns.
 
-export type WebhookResult = {
-  reply:         string;
-  escalate:      boolean;
-  customerPhone: string;
-  customerName:  string | null;
-  productImages: string[];
+const webhookResultSchema = z.object({
+  reply:         z.string(),
+  escalate:      z.boolean(),
+  customerPhone: z.string(),
+  customerName:  z.string().nullable(),
+  productImages: z.array(z.string().url()),
+});
+
+export type WebhookResult = z.infer<typeof webhookResultSchema>;
+
+const EMPTY_RESULT: WebhookResult = {
+  reply:         '',
+  escalate:      false,
+  customerPhone: '',
+  customerName:  null,
+  productImages: [],
 };
+
+// Validates the result shape before returning to n8n.
+// If validation fails (should never happen), logs and returns a safe empty
+// result rather than letting a malformed payload reach n8n's IF nodes.
+function toSafeResult(raw: unknown): WebhookResult {
+  const parsed = webhookResultSchema.safeParse(raw);
+  if (!parsed.success) {
+    logger.error(
+      { issues: parsed.error.issues, raw },
+      'WebhookResult failed schema validation — returning empty result',
+    );
+    return EMPTY_RESULT;
+  }
+  return parsed.data;
+}
 
 // ─── Business info ────────────────────────────────────────────────────────────
 
@@ -48,10 +76,6 @@ function findProductByHint(
   );
 }
 
-// Filters the full product list using the hints Claude extracted from the
-// customer's message. Matching is intentionally broad — keyword matches
-// against name, brand, categoryGroup, and subcategory so "legging" finds
-// "Ribbed Sea Coast Cropped Legging" even if the customer only said one word.
 function filterProductsBySearchHints(
   products: { _id: { toString(): string }; name: string; brand: string; gender?: string; categoryGroup?: string; subcategory?: string; images?: string[] }[],
   hints:    ClaudeSearchHints,
@@ -59,13 +83,11 @@ function filterProductsBySearchHints(
   const keyword = hints.keyword.toLowerCase().trim();
 
   const matched = products.filter((p) => {
-    // Keyword match — at least one field must contain the keyword
     const fields = [p.name, p.brand, p.categoryGroup ?? '', p.subcategory ?? '']
       .map((f) => f.toLowerCase());
     const keywordMatch = fields.some((f) => f.includes(keyword));
     if (!keywordMatch) return false;
 
-    // Gender match — skip filter if hint is unknown or absent
     if (hints.gender && hints.gender !== 'unknown' && p.gender) {
       if (p.gender !== hints.gender) return false;
     }
@@ -73,7 +95,6 @@ function filterProductsBySearchHints(
     return true;
   });
 
-  // Extract first image from each matched product, drop empties
   return matched
     .map((p) => (p.images as string[] | undefined)?.[0])
     .filter((url): url is string => Boolean(url));
@@ -86,12 +107,10 @@ export const handleIncomingMessage = async (
 ): Promise<WebhookResult> => {
   const { from, messageType } = payload;
 
-  // ── 0. Guard — ignore non-message WhatsApp events ──────────────────────────────────────────────
-  // WhatsApp sends status updates, read receipts, and delivery notifications
-  // with an empty from field. These are not customer messages — skip silently.
+  // ── 0. Guard — ignore non-message WhatsApp events ────────────────────────
   if (!from) {
     logger.info('Ignoring non-message webhook event — empty from field');
-    return { reply: '', escalate: false, customerPhone: '', customerName: null, productImages: [] };
+    return toSafeResult(EMPTY_RESULT);
   }
 
   // ── 1. Identify / create customer ────────────────────────────────────────
@@ -112,9 +131,9 @@ export const handleIncomingMessage = async (
     logger.info({ phone: from }, 'New customer created from WhatsApp');
   }
 
-  const customerId      = customer._id.toString();
-  const customerName    = customer.name !== `WhatsApp ${from}` ? customer.name : null;
-  const customerGender  = (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as 'female' | 'male' | 'unknown';
+  const customerId     = customer._id.toString();
+  const customerName   = customer.name !== `WhatsApp ${from}` ? customer.name : null;
+  const customerGender = (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as 'female' | 'male' | 'unknown';
 
   // ── 2. Image message — search inventory by visual similarity ─────────────
   if (messageType === 'image' && payload.imageMediaId) {
@@ -136,7 +155,7 @@ export const handleIncomingMessage = async (
       { upsert: true, new: true },
     );
 
-    return { reply, escalate: false, customerPhone: from, customerName, productImages };
+    return toSafeResult({ reply, escalate: false, customerPhone: from, customerName, productImages });
   }
 
   // ── 3. Text message — Luis flow ───────────────────────────────────────────
@@ -157,8 +176,6 @@ export const handleIncomingMessage = async (
     .sort({ createdAt: -1 })
     .lean();
 
-  // Fetch products with images — images are not passed to Claude, they are
-  // used here for filtering and dispatching back to n8n.
   const products = await ProductModel.find({ status: 'active' })
     .select('name price brand gender categoryGroup subcategory images')
     .lean();
@@ -252,10 +269,7 @@ export const handleIncomingMessage = async (
     logger.info({ customerId, from }, 'needs_human intent — escalate flag set for n8n');
   }
 
-  // ── Resolve product images to return to n8n ───────────────────────────────
-  // product_search: filter catalog by Claude's searchHints → send matching images
-  // catalog_query:  Luis asked a clarifying question this turn — no images yet
-  // all others:     no images
+  // ── Resolve product images ────────────────────────────────────────────────
   let productImages: string[] = [];
 
   if (result.intent === 'product_search' && result.searchHints) {
@@ -266,5 +280,5 @@ export const handleIncomingMessage = async (
     );
   }
 
-  return { reply: result.response, escalate, customerPhone: from, customerName, productImages };
+  return toSafeResult({ reply: result.response, escalate, customerPhone: from, customerName, productImages });
 };
