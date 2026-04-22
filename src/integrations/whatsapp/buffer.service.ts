@@ -7,13 +7,25 @@ const ELAPSED_THRESHOLD_MS = 55_000;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export type PushPayload = {
+  from:          string;
+  message:       string;
+  executionId:   string;
+  messageId?:    string;
+  messageType?:  string;
+  imageMediaId?: string | null;
+  imageCaption?: string;
+  contactName?:  string;
+  timestamp?:    string | number | null;
+};
+
 export type PushResult = {
   ok: true;
 };
 
 export type ClaimResult =
   | { skip: true }
-  | { skip: false; mergedMessage: string; messageCount: number };
+  | { skip: false; shouldRespond: true; mergedMessage: string; messageCount: number };
 
 // ─── Push ─────────────────────────────────────────────────────────────────────
 // Called by Accumulate Message node.
@@ -21,21 +33,40 @@ export type ClaimResult =
 // stamps lastSeen, and sets ownerExecutionId to the current execution.
 // The last execution to push always wins ownership.
 
-export const pushToBuffer = async (
-  from:        string,
-  message:     string,
-  executionId: string,
-): Promise<PushResult> => {
+export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> => {
+  const {
+    from,
+    message,
+    executionId,
+    messageId,
+    messageType,
+    imageMediaId,
+    imageCaption,
+    contactName,
+    timestamp,
+  } = payload;
+
   await ConversationBufferModel.findOneAndUpdate(
     { from },
     {
-      $push:  { messages: message },
-      $set:   { lastSeen: new Date(), ownerExecutionId: executionId },
+      $push: {
+        messages: {
+          text:         message,
+          messageId:    messageId    ?? null,
+          messageType:  messageType  ?? 'text',
+          imageMediaId: imageMediaId ?? null,
+          imageCaption: imageCaption ?? '',
+          contactName:  contactName  ?? 'Cliente',
+          timestamp:    timestamp    ?? null,
+          executionId,
+        },
+      },
+      $set: { lastSeen: new Date(), ownerExecutionId: executionId },
     },
     { upsert: true, new: true },
   );
 
-  logger.info({ from, executionId }, 'Buffer push — message appended');
+  logger.info({ from, executionId, messageId, messageType }, 'Buffer push — message appended');
 
   return { ok: true };
 };
@@ -71,8 +102,8 @@ export const claimBuffer = async (
     return { skip: true };
   }
 
-  const messages    = buffer.messages;
-  const merged      = messages.join('\n').trim();
+  const messages = buffer.messages as { text: string }[];
+  const merged   = messages.map((m) => m.text).join('\n').trim();
 
   if (!merged) {
     logger.info({ from, executionId }, 'Claim — buffer empty after merge, skip');
@@ -80,7 +111,6 @@ export const claimBuffer = async (
     return { skip: true };
   }
 
-  // Atomically delete — only this execution reaches this point
   await ConversationBufferModel.deleteOne({ from });
 
   logger.info(
@@ -88,5 +118,5 @@ export const claimBuffer = async (
     'Claim — buffer claimed and cleared',
   );
 
-  return { skip: false, mergedMessage: merged, messageCount: messages.length };
+  return { skip: false, shouldRespond: true, mergedMessage: merged, messageCount: messages.length };
 };
