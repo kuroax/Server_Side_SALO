@@ -30,8 +30,6 @@ import {
 } from '#/modules/orders/order.validation.js';
 
 // ─── State machine ────────────────────────────────────────────────────────────
-// Only explicitly listed transitions are permitted.
-// Terminal states (delivered, cancelled) have empty arrays — no exit.
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   pending:    ['confirmed', 'cancelled'],
@@ -51,8 +49,6 @@ function assertValidTransition(from: OrderStatus, to: OrderStatus): void {
 }
 
 // ─── System note helper ───────────────────────────────────────────────────────
-// Builds a structured audit note from service-level events.
-// createdBy is always null — system events have no human author.
 
 function makeSystemNote(message: string): {
   message:   string;
@@ -64,8 +60,6 @@ function makeSystemNote(message: string): {
 }
 
 // ─── Financial computation ────────────────────────────────────────────────────
-// Single source of truth for all derived numeric fields.
-// Called explicitly before any persistence call — no Mongoose hook dependency.
 
 type EnrichedOrderItem = {
   productId:   string;
@@ -89,7 +83,7 @@ function computeOrderFinancials(items: EnrichedOrderItem[]): {
     lineTotal: item.quantity * item.unitPrice,
   }));
   const subtotal = computed.reduce((sum, item) => sum + item.lineTotal, 0);
-  const total    = subtotal; // V1 — extend here for discounts / tax
+  const total    = subtotal;
   return { items: computed, subtotal, total };
 }
 
@@ -118,6 +112,7 @@ type OrderLike = {
   orderNumber:      string;
   customerId:       Types.ObjectId | null;
   channel:          string;
+  sourceMessageId?: string | null;
   status:           string;
   paymentStatus:    string;
   items:            OrderItemLike[];
@@ -167,35 +162,60 @@ function mapOrder(raw: OrderLike): SafeOrder {
   };
 }
 
-// ─── Duplicate-key error handler ──────────────────────────────────────────────
+// ─── Duplicate-key helpers ────────────────────────────────────────────────────
 
-function mapDuplicateOrderError(err: unknown): never {
-  if (
+function isMongoDuplicateKeyError(
+  err: unknown,
+): err is { code: number; keyPattern?: Record<string, unknown> } {
+  return (
     typeof err === 'object' &&
     err !== null &&
     'code' in err &&
-    (err as { code: unknown }).code === 11000 &&
-    'keyPattern' in err
-  ) {
-    const kp = (err as { keyPattern: Record<string, unknown> }).keyPattern;
-    if (kp['orderNumber']) {
-      throw new BadRequestError('Order number collision — please retry');
-    }
+    (err as { code: unknown }).code === 11000
+  );
+}
+
+async function resolveCreateOrderDuplicate(
+  err: unknown,
+  args: { channel: OrderChannel; sourceMessageId: string | null },
+): Promise<SafeOrder | null> {
+  if (!isMongoDuplicateKeyError(err)) throw err;
+
+  const kp = err.keyPattern ?? {};
+
+  if (kp['orderNumber']) {
+    throw new BadRequestError('Order number collision — please retry');
   }
+
+  // Compound model-level idempotency collision:
+  // return the existing order instead of throwing, making createOrder idempotent.
+  if (args.sourceMessageId && (kp['sourceMessageId'] || (kp['channel'] && kp['sourceMessageId']))) {
+    const existing = await OrderModel.findOne({
+      channel: args.channel,
+      sourceMessageId: args.sourceMessageId,
+    }).lean<OrderLike>();
+
+    if (existing) {
+      logger.warn(
+        {
+          channel: args.channel,
+          sourceMessageId: args.sourceMessageId,
+          orderNumber: existing.orderNumber,
+        },
+        'Duplicate createOrder request resolved by returning existing order',
+      );
+      return mapOrder(existing);
+    }
+
+    throw new BadRequestError(
+      'Duplicate source message detected, but existing order lookup failed',
+    );
+  }
+
   throw err;
 }
 
 // ─── Order number generation ──────────────────────────────────────────────────
-// Format: SALO-100001  (globally sequential, atomic, collision-safe)
-//
-// Uses a dedicated counters collection with MongoDB's atomic findOneAndUpdate
-// + $inc. This guarantees uniqueness under any concurrency — no race conditions,
-// no daily resets, no timezone edge cases.
-//
-// Counter document: { _id: "orderNumber", seq: 100000 }
-// First order generated: SALO-100001
-// Seed the counter before first use:
-//   db.counters.insertOne({ _id: "orderNumber", seq: 100000 })
 
 async function buildUniqueOrderNumber(): Promise<string> {
   const counter = await CounterModel.findOneAndUpdate(
@@ -206,11 +226,10 @@ async function buildUniqueOrderNumber(): Promise<string> {
 
   if (!counter) throw new Error('Failed to generate order number');
 
-  return `SALO-${counter.seq}`;
+  return `${ORDER_NUMBER_PREFIX}-${counter.seq}`;
 }
 
 // ─── Product snapshot helper ──────────────────────────────────────────────────
-// Minimal lean type — only the fields needed for the order snapshot.
 
 type ProductSnapshotLike = {
   _id:  Types.ObjectId;
@@ -218,16 +237,12 @@ type ProductSnapshotLike = {
   slug: string;
 };
 
-// Fetches product name and slug from the products collection.
-// Throws NotFoundError if any productId in the order does not exist.
-// Called once per createOrder — one DB read per unique product in the order.
-
 async function fetchProductSnapshots(
   productIds: string[],
 ): Promise<Map<string, { name: string; slug: string }>> {
-  const uniqueIds    = [...new Set(productIds)];
-  const objectIds    = uniqueIds.map(id => new Types.ObjectId(id));
-  const products     = await ProductModel
+  const uniqueIds = [...new Set(productIds)];
+  const objectIds = uniqueIds.map(id => new Types.ObjectId(id));
+  const products  = await ProductModel
     .find({ _id: { $in: objectIds } })
     .select('name slug')
     .lean<ProductSnapshotLike[]>();
@@ -291,25 +306,29 @@ export async function getCustomerOrders(input: unknown): Promise<SafeOrder[]> {
 
 // ─── Mutations ────────────────────────────────────────────────────────────────
 
-// createdBy is the authenticated user's ID — passed from the resolver,
-// never from client-supplied input.
+// createdBy       — authenticated user ID from resolver context, never from input
+// sourceMessageId — inbound WhatsApp / channel message ID for idempotent bot flows.
+//                   null for manual / non-message-driven orders.
 export async function createOrder(
   input: unknown,
   createdBy: string | null,
+  sourceMessageId: string | null = null,
 ): Promise<SafeOrder> {
   const data = createOrderSchema.parse(input);
 
-  // Verify customer exists before creating a reference — prevents dangling ObjectIds.
+  const normalizedSourceMessageId =
+    typeof sourceMessageId === 'string' && sourceMessageId.trim()
+      ? sourceMessageId.trim()
+      : null;
+
   if (data.customerId) {
     const customerExists = await CustomerModel.exists({ _id: new Types.ObjectId(data.customerId) });
     if (!customerExists) throw new NotFoundError('Customer not found');
   }
 
-  // Fetch product snapshots — service owns this data, not the client.
   const productIds = data.items.map(item => item.productId);
   const snapshots  = await fetchProductSnapshots(productIds);
 
-  // Enrich items with snapshot fields before computing financials.
   const enrichedItems = data.items.map(item => ({
     ...item,
     productName: snapshots.get(item.productId)!.name,
@@ -320,8 +339,6 @@ export async function createOrder(
 
   const orderNumber = await buildUniqueOrderNumber();
 
-  // Map any creation-time notes — createdBy comes from auth context.
-  // System note appended last so 'Order created.' is always the final entry.
   const initialNotes = [
     ...data.notes.map(note => ({
       message:   note.message,
@@ -334,9 +351,10 @@ export async function createOrder(
 
   const order = new OrderModel({
     orderNumber,
-    customerId: data.customerId ? new Types.ObjectId(data.customerId) : null,
-    channel:    data.channel,
-    notes:      initialNotes,
+    customerId:      data.customerId ? new Types.ObjectId(data.customerId) : null,
+    channel:         data.channel,
+    sourceMessageId: normalizedSourceMessageId,
+    notes:           initialNotes,
     subtotal,
     total,
     items: computedItems.map(item => ({
@@ -349,16 +367,29 @@ export async function createOrder(
       unitPrice:   item.unitPrice,
       lineTotal:   item.lineTotal,
     })),
-    // status → 'pending', paymentStatus → 'unpaid', inventoryApplied → false (schema defaults)
   });
 
   try {
     await order.save();
   } catch (err) {
-    return mapDuplicateOrderError(err);
+    const recovered = await resolveCreateOrderDuplicate(err, {
+      channel: data.channel,
+      sourceMessageId: normalizedSourceMessageId,
+    });
+
+    if (recovered) return recovered;
+    throw err;
   }
 
-  logger.info({ orderId: order._id.toString(), orderNumber }, 'Order created');
+  logger.info(
+    {
+      orderId: order._id.toString(),
+      orderNumber,
+      channel: data.channel,
+      sourceMessageId: normalizedSourceMessageId,
+    },
+    'Order created',
+  );
 
   return mapOrder(order.toObject() as OrderLike);
 }
@@ -371,18 +402,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
 
   assertValidTransition(order.status as OrderStatus, status);
 
-  // ── Deduct inventory when order is confirmed ──────────────────────────────
-  // Only runs once — guard: inventoryApplied must be false before proceeding.
-  //
-  // Two-pass strategy:
-  //   Pass 1 — read-only check of all items so we can report every
-  //             insufficient variant in a single error, not just the first.
-  //   Pass 2 — atomic deductions using $gte guard so concurrent orders
-  //             cannot drive stock negative. If a race condition depletes
-  //             stock between passes, we roll back successful deductions
-  //             before throwing so the inventory stays consistent.
   if (status === 'confirmed' && !order.inventoryApplied) {
-    // Pass 1: verify all items have sufficient stock before touching anything.
     const insufficientItems: string[] = [];
 
     for (const item of order.items) {
@@ -406,9 +426,6 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
       );
     }
 
-    // Pass 2: deduct inventory — all stock checks passed.
-    // Track each successful deduction so we can roll back on a mid-loop failure
-    // (e.g. a concurrent order claimed the last unit between pass 1 and here).
     type DeductedItem = { productId: Types.ObjectId; size: string; color: string; quantity: number };
     const deducted: DeductedItem[] = [];
 
@@ -425,7 +442,6 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
       ).lean();
 
       if (!result) {
-        // Concurrent depletion — roll back everything deducted in this pass.
         for (const d of deducted) {
           await InventoryModel.findOneAndUpdate(
             { productId: d.productId, size: d.size, color: d.color },
@@ -447,7 +463,12 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
         );
       }
 
-      deducted.push({ productId: item.productId, size: item.size, color: item.color, quantity: item.quantity });
+      deducted.push({
+        productId: item.productId,
+        size: item.size,
+        color: item.color,
+        quantity: item.quantity,
+      });
     }
 
     order.inventoryApplied = true;
@@ -487,16 +508,11 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
   const order = await OrderModel.findById(orderId);
   if (!order) throw new NotFoundError('Order not found');
 
-  // Reuses the transition map — 'delivered' and 'cancelled' have no exit,
-  // both are rejected automatically without extra ad-hoc guards.
   assertValidTransition(order.status as OrderStatus, 'cancelled');
 
   order.status = 'cancelled';
   order.notes.push(makeSystemNote('Order cancelled.'));
 
-  // ── Restore inventory if it was previously deducted ───────────────────────
-  // Only restore if inventoryApplied is true — prevents double-restore on
-  // orders cancelled before reaching confirmed status.
   if (order.inventoryApplied) {
     for (const item of order.items) {
       await InventoryModel.findOneAndUpdate(
@@ -513,12 +529,9 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
   await order.save();
 
   logger.info({ orderId }, 'Order cancelled');
-
   return mapOrder(order.toObject() as OrderLike);
 }
 
-// createdBy comes from auth context in the resolver — trusted value,
-// not part of the user-supplied input object.
 export async function addOrderNote(
   input: unknown,
   createdBy: string | null,
@@ -544,12 +557,9 @@ export async function addOrderNote(
   return mapOrder(order);
 }
 
-// Resolves a null customerId to a confirmed customer record.
-// Called by the bot after it successfully identifies or creates a customer.
 export async function assignCustomerToOrder(input: unknown): Promise<SafeOrder> {
   const { orderId, customerId } = assignCustomerSchema.parse(input);
 
-  // Verify the customer exists before creating a reference — prevents dangling ObjectIds.
   const customerExists = await CustomerModel.exists({ _id: new Types.ObjectId(customerId) });
   if (!customerExists) throw new NotFoundError('Customer not found');
 
@@ -568,18 +578,12 @@ export async function assignCustomerToOrder(input: unknown): Promise<SafeOrder> 
   return mapOrder(order.toObject() as OrderLike);
 }
 
-// ─── Delete Order ─────────────────────────────────────────────────────────────
-// Hard delete — permanently removes the order from the database.
-// Restores inventory if it was previously applied (same logic as cancelOrder).
-// Owner-only operation — enforced at the resolver level.
-
 export async function deleteOrder(input: unknown): Promise<boolean> {
-  const { orderId } = cancelOrderSchema.parse(input); // reuses same shape { orderId }
+  const { orderId } = cancelOrderSchema.parse(input);
 
   const order = await OrderModel.findById(orderId);
   if (!order) throw new NotFoundError('Order not found');
 
-  // Restore inventory if it was deducted — prevents phantom stock reduction.
   if (order.inventoryApplied) {
     for (const item of order.items) {
       await InventoryModel.findOneAndUpdate(
@@ -598,9 +602,6 @@ export async function deleteOrder(input: unknown): Promise<boolean> {
 }
 
 // ─── Revenue stats ────────────────────────────────────────────────────────────
-// Aggregates revenue per calendar month for the last N months.
-// Excludes cancelled orders — cancelled orders never contribute to revenue.
-// Fills in months with zero revenue so the frontend always gets a full series.
 
 type MonthRevenue = {
   year:       number;
@@ -635,12 +636,11 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
     { $sort: { '_id.year': 1, '_id.month': 1 } },
   ]);
 
-  // Build a full series — fill zeroes for months with no orders.
   const series: MonthRevenue[] = [];
   for (let i = months - 1; i >= 0; i--) {
     const d     = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const year  = d.getFullYear();
-    const month = d.getMonth() + 1; // MongoDB  is 1-indexed
+    const month = d.getMonth() + 1;
     const found = raw.find(r => r._id.year === year && r._id.month === month);
     series.push({
       year,
@@ -653,11 +653,8 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
 
   return series;
 }
+
 // ─── Revenue detail ───────────────────────────────────────────────────────────
-// Returns three datasets in one call for the revenue detail screen:
-//   1. Monthly stats for the last N months (reuses MonthRevenue type)
-//   2. Payment status breakdown (paid / partial / unpaid)
-//   3. Top products by revenue (across all non-cancelled orders)
 
 type ProductRevenueResult = {
   productId:   string;
@@ -683,7 +680,6 @@ export async function getRevenueDetail(
   const now  = new Date();
   const from = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
 
-  // ── 1. Monthly stats ────────────────────────────────────────────────────────
   const monthlyRaw = await OrderModel.aggregate<{
     _id: { year: number; month: number };
     revenue:    number;
@@ -720,7 +716,6 @@ export async function getRevenueDetail(
     });
   }
 
-  // ── 2. Payment breakdown ────────────────────────────────────────────────────
   const paymentRaw = await OrderModel.aggregate<{
     _id:     string;
     count:   number;
@@ -741,10 +736,9 @@ export async function getRevenueDetail(
     return { count: found?.count ?? 0, revenue: found?.revenue ?? 0 };
   };
 
-  // ── 3. Top products by revenue ──────────────────────────────────────────────
   const productsRaw = await OrderModel.aggregate<{
-    _id:      { productId: string; productName: string };
-    revenue:  number;
+    _id:       { productId: string; productName: string };
+    revenue:   number;
     unitsSold: number;
   }>([
     { $match: { status: { $ne: 'cancelled' } } },
