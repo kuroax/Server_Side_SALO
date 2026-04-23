@@ -43,14 +43,17 @@ const conversationBufferSchema = new Schema<IConversationBuffer>(
     lastSeen:         { type: Date,   required: true               },
     ownerExecutionId: { type: String, required: true               },
   },
-  { timestamps: true },
+  { timestamps: true, autoIndex: true },
 );
 
 // Auto-delete buffer documents 24 hours after lastSeen —
 // prevents stale buffers accumulating from abandoned conversations.
-// IMPORTANT: verify this index exists in MongoDB Atlas after first deploy
-// by running: db.conversationbuffers.getIndexes()
-conversationBufferSchema.index({ lastSeen: 1 }, { expireAfterSeconds: 86400 });
+// TTL index also created manually in Atlas via:
+// db.conversationbuffers.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 86400, name: 'lastSeen_ttl_24h' })
+conversationBufferSchema.index(
+  { lastSeen: 1 },
+  { expireAfterSeconds: 86400, name: 'lastSeen_ttl_24h' },
+);
 
 export const ConversationBufferModel = mongoose.model<IConversationBuffer>(
   'ConversationBuffer',
