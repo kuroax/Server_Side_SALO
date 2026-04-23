@@ -3,7 +3,27 @@ import { logger } from '#/config/logger.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ELAPSED_THRESHOLD_MS = 55_000;
+const DEFAULT_ELAPSED_THRESHOLD_MS = 55_000;
+
+const parseElapsedThresholdMs = (): number => {
+  const raw = process.env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS;
+
+  if (!raw) return DEFAULT_ELAPSED_THRESHOLD_MS;
+
+  const parsed = Number(raw);
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    logger.warn(
+      { raw, fallback: DEFAULT_ELAPSED_THRESHOLD_MS },
+      'Invalid WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS; using default',
+    );
+    return DEFAULT_ELAPSED_THRESHOLD_MS;
+  }
+
+  return parsed;
+};
+
+const ELAPSED_THRESHOLD_MS = parseElapsedThresholdMs();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -19,19 +39,36 @@ export type PushPayload = {
   timestamp?:    string | number | null;
 };
 
-export type PushResult = {
-  ok: true;
-};
+export type PushResult =
+  | { ok: true; duplicate: false }
+  | { ok: true; duplicate: true };
+
+export type ClaimSkipReason =
+  | 'buffer_not_found'
+  | 'elapsed_too_short'
+  | 'not_owner'
+  | 'empty_merged_message'
+  | 'claim_not_granted';
 
 export type ClaimResult =
-  | { skip: true }
-  | { skip: false; shouldRespond: true; mergedMessage: string; messageCount: number };
+  | { skip: true; reason: ClaimSkipReason }
+  | {
+      skip: false;
+      shouldRespond: true;
+      mergedMessage: string;
+      messageCount: number;
+    };
 
 // ─── Push ─────────────────────────────────────────────────────────────────────
 // Called by Accumulate Message node.
-// Atomically appends the message to this customer's buffer,
-// stamps lastSeen, and sets ownerExecutionId to the current execution.
-// The last execution to push always wins ownership.
+// Appends the message to this customer's buffer, stamps lastSeen,
+// and sets ownerExecutionId to the current execution.
+// The last execution to push wins ownership.
+//
+// NOTE:
+// This adds a practical launch-week duplicate guard using messageId.
+// True hard idempotency is still best enforced with a dedicated
+// unique-message store at the business layer.
 
 export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> => {
   const {
@@ -46,13 +83,36 @@ export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> =>
     timestamp,
   } = payload;
 
+  const normalizedMessageId =
+    typeof messageId === 'string' && messageId.trim()
+      ? messageId.trim()
+      : null;
+
+  // Launch-week duplicate guard:
+  // if the same messageId is already buffered for this sender, no-op safely.
+  if (normalizedMessageId) {
+    const duplicateExists = await ConversationBufferModel.exists({
+      from,
+      'messages.messageId': normalizedMessageId,
+    });
+
+    if (duplicateExists) {
+      logger.info(
+        { from, executionId, messageId: normalizedMessageId },
+        'Buffer push — duplicate messageId ignored',
+      );
+
+      return { ok: true, duplicate: true };
+    }
+  }
+
   await ConversationBufferModel.findOneAndUpdate(
     { from },
     {
       $push: {
         messages: {
           text:         message,
-          messageId:    messageId    ?? null,
+          messageId:    normalizedMessageId,
           messageType:  messageType  ?? 'text',
           imageMediaId: imageMediaId ?? null,
           imageCaption: imageCaption ?? '',
@@ -61,62 +121,110 @@ export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> =>
           executionId,
         },
       },
-      $set: { lastSeen: new Date(), ownerExecutionId: executionId },
+      $set: {
+        lastSeen: new Date(),
+        ownerExecutionId: executionId,
+      },
     },
     { upsert: true, new: true },
   );
 
-  logger.info({ from, executionId, messageId, messageType }, 'Buffer push — message appended');
+  logger.info(
+    { from, executionId, messageId: normalizedMessageId, messageType },
+    'Buffer push — message appended',
+  );
 
-  return { ok: true };
+  return { ok: true, duplicate: false };
 };
 
 // ─── Claim ────────────────────────────────────────────────────────────────────
 // Called by Check & Merge Messages node.
-// Checks elapsed time and execution ownership, then atomically reads
-// and clears the buffer. Returns skip: true if this execution should not respond.
+// Only the current owner may claim, and only after enough idle time has passed.
+//
+// Important:
+// The winning path uses findOneAndDelete(...) so the read + clear action
+// is atomic for the owner/cutoff condition.
 
 export const claimBuffer = async (
   from:        string,
   executionId: string,
 ): Promise<ClaimResult> => {
-  const buffer = await ConversationBufferModel.findOne({ from });
+  const cutoff = new Date(Date.now() - ELAPSED_THRESHOLD_MS);
 
-  if (!buffer) {
-    logger.info({ from, executionId }, 'Claim — no buffer found, skip');
-    return { skip: true };
-  }
+  const claimedBuffer = await ConversationBufferModel.findOneAndDelete({
+    from,
+    ownerExecutionId: executionId,
+    lastSeen: { $lte: cutoff },
+  });
 
-  const elapsed = Date.now() - buffer.lastSeen.getTime();
+  if (!claimedBuffer) {
+    // Diagnostic read only.
+    // This does NOT decide the winner; it only improves skip reason visibility.
+    // Best-effort only: document may already be deleted by another execution.
+    const current = await ConversationBufferModel.findOne({ from })
+      .select({ lastSeen: 1, ownerExecutionId: 1 })
+      .lean();
 
-  if (elapsed < ELAPSED_THRESHOLD_MS) {
-    logger.info({ from, executionId, elapsed }, 'Claim — elapsed too short, skip');
-    return { skip: true };
-  }
+    if (!current) {
+      logger.info({ from, executionId }, 'Claim — no buffer found, skip');
+      return { skip: true, reason: 'buffer_not_found' };
+    }
 
-  if (buffer.ownerExecutionId !== executionId) {
-    logger.info(
-      { from, executionId, owner: buffer.ownerExecutionId },
-      'Claim — not owner, skip',
+    const elapsed = current.lastSeen
+      ? Date.now() - new Date(current.lastSeen).getTime()
+      : null;
+
+    if (typeof elapsed === 'number' && elapsed < ELAPSED_THRESHOLD_MS) {
+      logger.info(
+        { from, executionId, elapsed, threshold: ELAPSED_THRESHOLD_MS },
+        'Claim — elapsed too short, skip',
+      );
+      return { skip: true, reason: 'elapsed_too_short' };
+    }
+
+    if (current.ownerExecutionId !== executionId) {
+      logger.info(
+        { from, executionId, owner: current.ownerExecutionId },
+        'Claim — not owner, skip',
+      );
+      return { skip: true, reason: 'not_owner' };
+    }
+
+    logger.warn(
+      { from, executionId },
+      'Claim — atomic claim not granted despite ownership diagnostics',
     );
-    return { skip: true };
+    return { skip: true, reason: 'claim_not_granted' };
   }
 
-  const messages = buffer.messages as { text: string }[];
-  const merged   = messages.map((m) => m.text).join('\n').trim();
+  const mergedParts = (claimedBuffer.messages ?? [])
+    .map((m) => (typeof m.text === 'string' ? m.text.trim() : ''))
+    .filter(Boolean);
 
-  if (!merged) {
-    logger.info({ from, executionId }, 'Claim — buffer empty after merge, skip');
-    await ConversationBufferModel.deleteOne({ from });
-    return { skip: true };
+  const mergedMessage = mergedParts.join('\n').trim();
+
+  if (!mergedMessage) {
+    logger.info(
+      { from, executionId },
+      'Claim — buffer claimed but merged message was empty, skip',
+    );
+    return { skip: true, reason: 'empty_merged_message' };
   }
-
-  await ConversationBufferModel.deleteOne({ from });
 
   logger.info(
-    { from, executionId, messageCount: messages.length, elapsed },
+    {
+      from,
+      executionId,
+      messageCount: mergedParts.length,
+      threshold: ELAPSED_THRESHOLD_MS,
+    },
     'Claim — buffer claimed and cleared',
   );
 
-  return { skip: false, shouldRespond: true, mergedMessage: merged, messageCount: messages.length };
+  return {
+    skip: false,
+    shouldRespond: true,
+    mergedMessage,
+    messageCount: mergedParts.length,
+  };
 };
