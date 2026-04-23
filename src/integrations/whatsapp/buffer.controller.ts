@@ -1,22 +1,26 @@
 import type { Request, Response } from 'express';
-import { timingSafeEqual } from 'node:crypto';
-
 import { pushToBuffer, claimBuffer } from '#/integrations/whatsapp/buffer.service.js';
 import { logger } from '#/config/logger.js';
 
 // ─── Small helpers ────────────────────────────────────────────────────────────
 
 const asNonEmptyString = (value: unknown): string | null => {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
 };
 
 const asOptionalString = (value: unknown): string | undefined => {
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
 };
 
 const asOptionalNullableString = (value: unknown): string | null | undefined => {
   if (value === null) return null;
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || null;
 };
 
 const asOptionalTimestamp = (value: unknown): string | number | null | undefined => {
@@ -25,65 +29,23 @@ const asOptionalTimestamp = (value: unknown): string | number | null | undefined
   return undefined;
 };
 
-const getHeaderString = (value: string | string[] | undefined): string | null => {
-  if (typeof value === 'string') return value;
-  return null;
-};
+// ─── Message type validation ──────────────────────────────────────────────────
 
-// ─── Secret validation ────────────────────────────────────────────────────────
-// NOTE:
-// For launch week this is acceptable here.
-// Long-term, move this into shared middleware and apply it at the router layer.
+const VALID_MESSAGE_TYPES = ['text', 'image'] as const;
+type ValidMessageType = typeof VALID_MESSAGE_TYPES[number];
 
-const validateSecret = (req: Request, res: Response): boolean => {
-  const incoming = getHeaderString(req.headers['x-webhook-secret']);
-  const expected = process.env.BUFFER_WEBHOOK_SECRET;
-
-  if (!expected) {
-    logger.error(
-      { path: req.path },
-      'BUFFER_WEBHOOK_SECRET is not set — rejecting all buffer requests',
-    );
-    res.status(500).json({ error: 'Server misconfiguration' });
-    return false;
-  }
-
-  if (!incoming) {
-    logger.warn(
-      { from: req.body?.from, path: req.path },
-      'Buffer request rejected — missing x-webhook-secret',
-    );
-    res.status(401).json({ error: 'Unauthorized' });
-    return false;
-  }
-
-  const incomingBuf = Buffer.from(incoming, 'utf8');
-  const expectedBuf = Buffer.from(expected, 'utf8');
-
-  const isValid =
-    incomingBuf.length === expectedBuf.length &&
-    timingSafeEqual(incomingBuf, expectedBuf);
-
-  if (!isValid) {
-    logger.warn(
-      { from: req.body?.from, path: req.path },
-      'Buffer request rejected — invalid x-webhook-secret',
-    );
-    res.status(401).json({ error: 'Unauthorized' });
-    return false;
-  }
-
-  return true;
+const asMessageType = (value: unknown): ValidMessageType | undefined => {
+  return VALID_MESSAGE_TYPES.includes(value as ValidMessageType)
+    ? (value as ValidMessageType)
+    : undefined;
 };
 
 // ─── Push handler ─────────────────────────────────────────────────────────────
 
 export const bufferPushHandler = async (req: Request, res: Response): Promise<void> => {
-  if (!validateSecret(req, res)) return;
-
   const body = req.body ?? {};
 
-  const from = asNonEmptyString(body.from);
+  const from        = asNonEmptyString(body.from);
   const executionId = asNonEmptyString(body.executionId);
 
   if (!from) {
@@ -96,13 +58,13 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
     return;
   }
 
-  const message = asOptionalString(body.message) ?? '';
-  const messageId = asOptionalString(body.messageId);
-  const messageType = asOptionalString(body.messageType);
+  const message      = asOptionalString(body.message)          ?? '';
+  const messageId    = asOptionalString(body.messageId);
+  const messageType  = asMessageType(body.messageType);
   const imageMediaId = asOptionalNullableString(body.imageMediaId) ?? null;
-  const imageCaption = asOptionalString(body.imageCaption) ?? '';
-  const contactName = asOptionalString(body.contactName) ?? 'Cliente';
-  const timestamp = asOptionalTimestamp(body.timestamp) ?? null;
+  const imageCaption = asOptionalString(body.imageCaption)     ?? '';
+  const contactName  = asOptionalString(body.contactName)      ?? 'Cliente';
+  const timestamp    = asOptionalTimestamp(body.timestamp)     ?? null;
 
   logger.info(
     { from, executionId, messageId, messageType },
@@ -122,6 +84,13 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
       timestamp,
     });
 
+    if (result.duplicate) {
+      logger.info(
+        { from, executionId, messageId },
+        'Buffer push — duplicate detected at controller',
+      );
+    }
+
     res.json(result);
   } catch (err) {
     logger.error(
@@ -135,11 +104,9 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
 // ─── Claim handler ────────────────────────────────────────────────────────────
 
 export const bufferClaimHandler = async (req: Request, res: Response): Promise<void> => {
-  if (!validateSecret(req, res)) return;
-
   const body = req.body ?? {};
 
-  const from = asNonEmptyString(body.from);
+  const from        = asNonEmptyString(body.from);
   const executionId = asNonEmptyString(body.executionId);
 
   if (!from) {
@@ -159,6 +126,14 @@ export const bufferClaimHandler = async (req: Request, res: Response): Promise<v
 
   try {
     const result = await claimBuffer(from, executionId);
+
+    if (result.skip) {
+      logger.info(
+        { from, executionId, reason: result.reason },
+        'Buffer claim skipped at controller',
+      );
+    }
+
     res.json(result);
   } catch (err) {
     logger.error(
