@@ -15,8 +15,6 @@ import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.
 import type { ClaudeSearchHints } from '#/integrations/whatsapp/claude.service.js';
 
 // ─── Response schema ──────────────────────────────────────────────────────────
-// Single source of truth for what this service returns to n8n.
-// Every return path is validated through toSafeResult() — no raw returns.
 
 const webhookResultSchema = z.object({
   reply: z.string(),
@@ -62,6 +60,17 @@ const BUSINESS_INFO = {
 } as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function normalizePhoneForLookup(value: unknown): string {
+  if (typeof value !== 'string') return '';
+
+  // Conservative normalization:
+  // - trim
+  // - remove all non-digit characters
+  // - do not rewrite country-specific prefixes here
+  // This keeps WhatsApp sender IDs stable while collapsing formatting variants.
+  return value.trim().replace(/\D+/g, '');
+}
 
 function findProductByHint(
   hint: string,
@@ -142,7 +151,8 @@ function filterProductsBySearchHints(
 export const handleIncomingMessage = async (
   payload: WebhookPayload,
 ): Promise<WebhookResult> => {
-  const from = payload.from;
+  const rawFrom = payload.from;
+  const from = normalizePhoneForLookup(rawFrom);
   const messageType = payload.messageType;
   const message = typeof payload.message === 'string' ? payload.message.trim() : '';
   const messageId =
@@ -154,10 +164,21 @@ export const handleIncomingMessage = async (
 
   if (!from) {
     logger.info(
-      { messageType: payload.messageType, messageId: payload.messageId },
-      'Ignoring non-message webhook event — empty from field',
+      {
+        rawFrom: payload.from,
+        messageType: payload.messageType,
+        messageId: payload.messageId,
+      },
+      'Ignoring non-message webhook event — empty or invalid from field after normalization',
     );
     return toSafeResult(EMPTY_RESULT);
+  }
+
+  if (rawFrom && rawFrom !== from) {
+    logger.info(
+      { rawFrom, normalizedFrom: from, messageId },
+      'Normalized WhatsApp phone number for customer lookup',
+    );
   }
 
   if (messageType && messageType !== 'text' && messageType !== 'image') {
@@ -234,7 +255,11 @@ export const handleIncomingMessage = async (
       );
       const productImages = normalizeProductImages(rawProductImages);
 
-      if (Array.isArray(rawProductImages) && rawProductImages.length > 0 && productImages.length === 0) {
+      if (
+        Array.isArray(rawProductImages) &&
+        rawProductImages.length > 0 &&
+        productImages.length === 0
+      ) {
         logger.warn(
           { customerId, messageId },
           'Image search returned productImages but none were valid absolute URLs',
