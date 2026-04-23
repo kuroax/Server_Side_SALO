@@ -19,26 +19,23 @@ import type { ClaudeSearchHints } from '#/integrations/whatsapp/claude.service.j
 // Every return path is validated through toSafeResult() — no raw returns.
 
 const webhookResultSchema = z.object({
-  reply:         z.string(),
-  escalate:      z.boolean(),
+  reply: z.string(),
+  escalate: z.boolean(),
   customerPhone: z.string(),
-  customerName:  z.string().nullable(),
+  customerName: z.string().nullable(),
   productImages: z.array(z.string().url()),
 });
 
 export type WebhookResult = z.infer<typeof webhookResultSchema>;
 
 const EMPTY_RESULT: WebhookResult = {
-  reply:         '',
-  escalate:      false,
+  reply: '',
+  escalate: false,
   customerPhone: '',
-  customerName:  null,
+  customerName: null,
   productImages: [],
 };
 
-// Validates the result shape before returning to n8n.
-// If validation fails (should never happen), logs and returns a safe empty
-// result rather than letting a malformed payload reach n8n's IF nodes.
 function toSafeResult(raw: unknown): WebhookResult {
   const parsed = webhookResultSchema.safeParse(raw);
   if (!parsed.success) {
@@ -55,11 +52,13 @@ function toSafeResult(raw: unknown): WebhookResult {
 
 const BUSINESS_INFO = {
   showroomAddress: 'Av. Guadalupe 1390, Chapalita Oriente, Guadalajara, Jalisco',
-  businessHours:   'Lunes a Viernes 10:00am–8:30pm · Sábados 11:00am–7:00pm · Domingos cerrado',
-  shippingPrice:   179,
-  paymentMethods:  'Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.',
-  depositPercent:  30,
-  paymentDays:     20,
+  businessHours:
+    'Lunes a Viernes 10:00am–8:30pm · Sábados 11:00am–7:00pm · Domingos cerrado',
+  shippingPrice: 179,
+  paymentMethods:
+    'Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.',
+  depositPercent: 30,
+  paymentDays: 20,
 } as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -90,6 +89,13 @@ function toValidUrl(value: unknown): string | undefined {
   }
 }
 
+function normalizeProductImages(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => toValidUrl(item))
+    .filter((url): url is string => Boolean(url));
+}
+
 // Returns the first valid image URL from each matched product.
 // Only the first image per product is intentional — sending multiple angles
 // per product would flood the customer's chat.
@@ -108,8 +114,9 @@ function filterProductsBySearchHints(
   const keyword = hints.keyword.toLowerCase().trim();
 
   const matched = products.filter((p) => {
-    const fields = [p.name, p.brand, p.categoryGroup ?? '', p.subcategory ?? '']
-      .map((f) => f.toLowerCase());
+    const fields = [p.name, p.brand, p.categoryGroup ?? '', p.subcategory ?? ''].map((f) =>
+      f.toLowerCase(),
+    );
 
     const keywordMatch = fields.some((f) => f.includes(keyword));
     if (!keywordMatch) return false;
@@ -137,16 +144,13 @@ export const handleIncomingMessage = async (
 ): Promise<WebhookResult> => {
   const from = payload.from;
   const messageType = payload.messageType;
-  const message =
-    typeof payload.message === 'string'
-      ? payload.message.trim()
-      : '';
+  const message = typeof payload.message === 'string' ? payload.message.trim() : '';
   const messageId =
     typeof payload.messageId === 'string' && payload.messageId.trim()
       ? payload.messageId.trim()
       : null;
 
-  // ── 0. Guards — ignore non-message / malformed WhatsApp events ────────────
+  // ── 0. Guards — ignore non-message and malformed WhatsApp events ──────────
 
   if (!from) {
     logger.info(
@@ -165,10 +169,7 @@ export const handleIncomingMessage = async (
   }
 
   if (messageType === 'image' && !payload.imageMediaId) {
-    logger.info(
-      { from, messageId },
-      'Ignoring image webhook event without imageMediaId',
-    );
+    logger.info({ from, messageId }, 'Ignoring image webhook event without imageMediaId');
     return toSafeResult(EMPTY_RESULT);
   }
 
@@ -180,32 +181,45 @@ export const handleIncomingMessage = async (
     return toSafeResult(EMPTY_RESULT);
   }
 
-  // ── 1. Identify / create customer ────────────────────────────────────────
-  // Keep current active-customer semantics for now.
-  let customer = await CustomerModel.findOne({
-    phone: from,
-    isActive: true,
-  }).lean();
+  // ── 1. Identify / create customer ─────────────────────────────────────────
+  // Atomic upsert prevents the race where two concurrent executions for a
+  // brand-new customer both attempt create().
+  const customer = await CustomerModel.findOneAndUpdate(
+    { phone: from },
+    {
+      $setOnInsert: {
+        name: payload.contactName ?? `WhatsApp ${from}`,
+        phone: from,
+        contactChannel: 'whatsapp',
+        gender: CUSTOMER_GENDERS.UNKNOWN,
+        isActive: true,
+        tags: [],
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  ).lean();
 
   if (!customer) {
-    customer = await CustomerModel.create({
-      name:           payload.contactName ?? `WhatsApp ${from}`,
-      phone:          from,
-      contactChannel: 'whatsapp',
-      gender:         CUSTOMER_GENDERS.UNKNOWN,
-      tags:           [],
-    });
+    logger.error({ phone: from }, 'Customer upsert returned null — unexpected');
+    return toSafeResult(EMPTY_RESULT);
+  }
 
-    logger.info({ phone: from }, 'New customer created from WhatsApp');
+  if (customer.isActive === false) {
+    logger.warn(
+      { customerId: customer._id.toString(), phone: from },
+      'Inactive customer record reused for WhatsApp message',
+    );
   }
 
   const customerId = customer._id.toString();
-  const customerName =
-    customer.name !== `WhatsApp ${from}` ? customer.name : null;
-  const customerGender =
-    (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as 'female' | 'male' | 'unknown';
+  const customerName = customer.name !== `WhatsApp ${from}` ? customer.name : null;
+  const customerGender = (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as
+    | 'female'
+    | 'male'
+    | 'unknown';
 
   // ── 2. Image message — search inventory by visual similarity ─────────────
+
   if (messageType === 'image') {
     logger.info(
       { customerId, mediaId: payload.imageMediaId, messageId },
@@ -215,7 +229,17 @@ export const handleIncomingMessage = async (
     const fallbackReply = 'Ahorita te confirmo eso bonita, dame un momento 🙏🏻';
 
     try {
-      const { reply, productImages } = await searchProductsByImage(payload.imageMediaId!);
+      const { reply, productImages: rawProductImages } = await searchProductsByImage(
+        payload.imageMediaId!,
+      );
+      const productImages = normalizeProductImages(rawProductImages);
+
+      if (Array.isArray(rawProductImages) && rawProductImages.length > 0 && productImages.length === 0) {
+        logger.warn(
+          { customerId, messageId },
+          'Image search returned productImages but none were valid absolute URLs',
+        );
+      }
 
       const imageTurns = [
         {
@@ -234,7 +258,7 @@ export const handleIncomingMessage = async (
         { customerId, channel: 'whatsapp' },
         {
           $push: { turns: { $each: imageTurns, $slice: -MAX_CONVERSATION_TURNS } },
-          $set:  { lastMessageAt: new Date() },
+          $set: { lastMessageAt: new Date() },
         },
         { upsert: true, new: true },
       );
@@ -269,7 +293,7 @@ export const handleIncomingMessage = async (
         { customerId, channel: 'whatsapp' },
         {
           $push: { turns: { $each: fallbackTurns, $slice: -MAX_CONVERSATION_TURNS } },
-          $set:  { lastMessageAt: new Date() },
+          $set: { lastMessageAt: new Date() },
         },
         { upsert: true, new: true },
       );
@@ -292,21 +316,20 @@ export const handleIncomingMessage = async (
   }).lean();
 
   const conversationHistory = (conversation?.turns ?? []).map((t) => ({
-    role:    t.role as 'user' | 'assistant',
+    role: t.role as 'user' | 'assistant',
     content: t.content,
   }));
 
-  const recentOrder = await OrderModel.findOne({ customerId })
-    .sort({ createdAt: -1 })
-    .lean();
+  const recentOrder = await OrderModel.findOne({ customerId }).sort({ createdAt: -1 }).lean();
 
+  // TODO: add pagination / smarter retrieval if catalog grows significantly.
   const products = await ProductModel.find({ status: 'active' })
     .select('name price brand gender categoryGroup subcategory images')
     .lean();
 
   const catalog = products.map((p) => ({
-    id:    p._id.toString(),
-    name:  p.name,
+    id: p._id.toString(),
+    name: p.name,
     price: p.price,
     brand: p.brand,
   }));
@@ -333,7 +356,6 @@ export const handleIncomingMessage = async (
   // ── Resolve product images ────────────────────────────────────────────────
   if (result.intent === 'product_search' && result.searchHints) {
     productImages = filterProductsBySearchHints(products, result.searchHints);
-
     logger.info(
       { keyword: result.searchHints.keyword, matches: productImages.length },
       'Product search — returning matched images',
@@ -341,111 +363,70 @@ export const handleIncomingMessage = async (
   }
 
   // ── Handle create_order intent ────────────────────────────────────────────
-  if (result.intent === 'create_order' && result.orderHints?.length) {
-    try {
-      const resolvedItems = result.orderHints
-        .map((hint) => {
-          const product = findProductByHint(hint.productNameHint, catalog);
+  // createOrder is idempotent via sourceMessageId — duplicate orders are
+  // resolved transparently inside order.service.ts and do not need a pre-check here.
+  if (result.intent === 'create_order') {
+    if (!result.orderHints?.length) {
+      escalate = true;
+      logger.warn(
+        { customerId, messageId },
+        'create_order intent returned without usable orderHints — escalate forced',
+      );
+    } else {
+      try {
+        const resolvedItems = result.orderHints
+          .map((hint) => {
+            const product = findProductByHint(hint.productNameHint, catalog);
+            if (!product) {
+              logger.warn(
+                { hint: hint.productNameHint, customerId, messageId },
+                'Order hint did not match any catalog product — skipping item',
+              );
+              return null;
+            }
 
-          if (!product) {
-            logger.warn(
-              { hint: hint.productNameHint, customerId, messageId },
-              'Order hint did not match any catalog product — skipping item',
-            );
-            return null;
-          }
-
-          return {
-            productId:   product.id,
-            productName: product.name,
-            productSlug: product.name.toLowerCase().replace(/\s+/g, '-'),
-            size:        hint.size,
-            color:       hint.color,
-            quantity:    hint.quantity,
-            unitPrice:   product.price,
-            lineTotal:   hint.quantity * product.price,
-          };
-        })
-        .filter((item): item is NonNullable<typeof item> => item !== null);
-
-      if (resolvedItems.length > 0) {
-        const messageIdNote = messageId ? `WA_MESSAGE_ID:${messageId}` : null;
-
-        if (messageIdNote) {
-          const existingOrder = await OrderModel.findOne({
-            customerId,
-            'notes.message': messageIdNote,
+            return {
+              productId: product.id,
+              size: hint.size,
+              color: hint.color,
+              quantity: hint.quantity,
+              unitPrice: product.price,
+            };
           })
-            .select('orderNumber')
-            .lean();
+          .filter((item): item is NonNullable<typeof item> => item !== null);
 
-          if (existingOrder) {
-            logger.info(
-              { customerId, messageId, orderNumber: existingOrder.orderNumber },
-              'Duplicate create_order intent detected — order already exists for this WhatsApp message',
-            );
-          } else {
-            const created = await createOrder(
-              {
-                customerId,
-                channel: 'whatsapp',
-                items: resolvedItems.map((item) => ({
-                  productId: item.productId,
-                  size:      item.size,
-                  color:     item.color,
-                  quantity:  item.quantity,
-                  unitPrice: item.unitPrice,
-                })),
-                notes: [
-                  { message: 'Pedido creado automáticamente desde WhatsApp.', kind: 'system' },
-                  { message: messageIdNote, kind: 'system' },
-                ],
-              },
-              null,
-            );
-
-            logger.info(
-              { orderNumber: created.orderNumber, customerId, messageId },
-              'Order created from WhatsApp',
-            );
-          }
+        if (resolvedItems.length === 0) {
+          escalate = true;
+          logger.warn(
+            { customerId, messageId },
+            'create_order intent had no resolvable items — escalate forced',
+          );
         } else {
           const created = await createOrder(
             {
               customerId,
               channel: 'whatsapp',
-              items: resolvedItems.map((item) => ({
-                productId: item.productId,
-                size:      item.size,
-                color:     item.color,
-                quantity:  item.quantity,
-                unitPrice: item.unitPrice,
-              })),
-              notes: [
-                { message: 'Pedido creado automáticamente desde WhatsApp.', kind: 'system' },
-              ],
+              items: resolvedItems,
+              notes: [{ message: 'Pedido creado automáticamente desde WhatsApp.', kind: 'system' }],
             },
             null,
+            messageId,
           );
 
-          logger.warn(
-            { orderNumber: created.orderNumber, customerId },
-            'Order created from WhatsApp without messageId idempotency marker',
+          logger.info(
+            { orderNumber: created.orderNumber, customerId, messageId },
+            messageId
+              ? 'Order created from WhatsApp via sourceMessageId idempotency'
+              : 'Order created from WhatsApp without sourceMessageId',
           );
         }
-      } else {
+      } catch (err) {
         escalate = true;
-        logger.warn(
-          { customerId, messageId },
-          'create_order intent had no resolvable items — escalate forced',
+        logger.error(
+          { err, customerId, from, messageId },
+          'Failed to create order from WhatsApp message — escalate forced',
         );
       }
-    } catch (err) {
-      escalate = true;
-      logger.error(
-        { err, customerId, from, messageId },
-        'Failed to create order from WhatsApp message — escalate forced',
-      );
     }
   }
 
@@ -453,9 +434,9 @@ export const handleIncomingMessage = async (
     logger.info({ customerId, from, messageId }, 'Escalate flag set for n8n');
   }
 
-  // ── Persist conversation after business-side effects are resolved ────────
+  // ── Persist conversation after all business effects are resolved ──────────
   const newTurns = [
-    { role: 'user'      as const, content: message,         createdAt: new Date() },
+    { role: 'user' as const, content: message, createdAt: new Date() },
     { role: 'assistant' as const, content: result.response, createdAt: new Date() },
   ];
 
@@ -463,7 +444,7 @@ export const handleIncomingMessage = async (
     { customerId, channel: 'whatsapp' },
     {
       $push: { turns: { $each: newTurns, $slice: -MAX_CONVERSATION_TURNS } },
-      $set:  { lastMessageAt: new Date() },
+      $set: { lastMessageAt: new Date() },
     },
     { upsert: true, new: true },
   );
