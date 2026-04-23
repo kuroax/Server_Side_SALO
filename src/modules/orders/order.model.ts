@@ -50,6 +50,11 @@ export const orderSchema = new Schema(
 
     channel: { type: String, required: true, enum: ORDER_CHANNELS },
 
+    // First-class source-message idempotency key.
+    // Example: WhatsApp inbound message ID.
+    // Optional because not all orders originate from message-driven flows.
+    sourceMessageId: { type: String, default: null, trim: true },
+
     status: {
       type:     String,
       required: true,
@@ -88,6 +93,20 @@ export const orderSchema = new Schema(
   {
     timestamps: true,
     versionKey: false,
+  },
+);
+
+// Enforce idempotency only when sourceMessageId is present.
+// Compound uniqueness by channel avoids collisions if different channels ever
+// produce similarly-shaped message IDs.
+orderSchema.index(
+  { channel: 1, sourceMessageId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      sourceMessageId: { $type: 'string' },
+    },
+    name: 'channel_sourceMessageId_unique',
   },
 );
 
