@@ -14,7 +14,10 @@ export const PAYMENT_STATUSES = ['unpaid', 'partial', 'paid'] as const;
 // 'manual' covers in-person / phone orders placed directly by staff
 export const ORDER_CHANNELS = ['whatsapp', 'instagram', 'manual'] as const;
 
-export const ORDER_NUMBER_PREFIX = 'ORD';
+// Order number prefix — produces e.g. SALO-100001.
+// Must match the prefix used in existing orders in MongoDB.
+// Do not change without migrating all existing orderNumber values.
+export const ORDER_NUMBER_PREFIX = 'SALO';
 
 export type OrderStatus   = (typeof ORDER_STATUSES)[number];
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
@@ -62,6 +65,9 @@ export interface SafeOrder {
   subtotal:         number;        // sum of lineTotals (pre-discount)
   total:            number;        // post-discount / post-tax (equals subtotal in V1)
   inventoryApplied: boolean;       // guards against double-decrement; gates V2 reservation logic
+  // Idempotency key for bot-created orders — inbound WhatsApp messageId.
+  // null for manually created orders. Enforced unique by compound index in order.model.ts.
+  sourceMessageId:  string | null | undefined;
   createdAt:        string;
   updatedAt:        string;
 }
