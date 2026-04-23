@@ -7,8 +7,7 @@ import { logger } from '#/config/logger.js';
 
 // Pre-encode the expected secret once at module load so timingSafeEqual can
 // compare buffers of equal length. Buffers must be the same length; if the
-// incoming value differs in length we reject immediately (no timing leak since
-// length is not secret).
+// incoming value differs in length we reject immediately.
 const EXPECTED_SECRET_BYTES = Buffer.from(WEBHOOK_SECRET, 'utf8');
 
 export const whatsappWebhookHandler = async (
@@ -16,18 +15,22 @@ export const whatsappWebhookHandler = async (
   res: Response,
 ): Promise<void> => {
   // ── Validate webhook secret ──────────────────────────────────────────────
-  const rawHeader   = req.headers['x-webhook-secret'];
+  const rawHeader = req.headers['x-webhook-secret'];
   const secretValue = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
 
   const isValid = (() => {
     if (!secretValue) return false;
+    if (secretValue.length > 512) return false;
     const incoming = Buffer.from(secretValue, 'utf8');
     if (incoming.length !== EXPECTED_SECRET_BYTES.length) return false;
     return timingSafeEqual(EXPECTED_SECRET_BYTES, incoming);
   })();
 
   if (!isValid) {
-    logger.warn({ ip: req.ip }, 'Webhook secret validation failed');
+    logger.warn(
+      { ip: req.ip, path: req.path },
+      'Webhook secret validation failed',
+    );
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
@@ -36,28 +39,41 @@ export const whatsappWebhookHandler = async (
   const parsed = webhookPayloadSchema.safeParse(req.body);
 
   if (!parsed.success) {
-    logger.warn({ issues: parsed.error.issues }, 'Invalid webhook payload');
+    logger.warn(
+      { issues: parsed.error.issues, path: req.path },
+      'Invalid webhook payload',
+    );
     res.status(400).json({ error: 'Invalid payload', details: parsed.error.issues });
     return;
   }
 
+  const payload = parsed.data;
+
   // ── Process message ──────────────────────────────────────────────────────
   try {
-    const result = await handleIncomingMessage(parsed.data);
+    const result = await handleIncomingMessage(payload);
 
     // n8n reads these fields to:
-    // - send reply text to customer        → reply
-    // - send product images to customer    → productImages
-    // - alert the owner if needed          → escalate
+    // - send reply text to customer     → reply
+    // - send product images to customer → productImages
+    // - alert the owner if needed       → escalate
     res.status(200).json({
-      reply:         result.reply,
-      escalate:      result.escalate,
+      reply: result.reply,
+      escalate: result.escalate,
       customerPhone: result.customerPhone,
-      customerName:  result.customerName,
+      customerName: result.customerName,
       productImages: result.productImages,
     });
   } catch (err) {
-    logger.error({ err }, 'Webhook handler error');
+    logger.error(
+      {
+        err,
+        from: payload.from,
+        messageId: payload.messageId,
+        messageType: payload.messageType,
+      },
+      'Webhook handler error',
+    );
     res.status(500).json({ error: 'Internal server error' });
   }
 };
