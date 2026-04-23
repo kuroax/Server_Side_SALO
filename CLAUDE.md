@@ -34,7 +34,6 @@ npm run start      # node dist/server.js (production)
 npm run typecheck  # tsc --noEmit (no emit, type check only)
 npm run clean      # rm -rf dist
 ```
-````
 
 ---
 
@@ -224,6 +223,8 @@ Enforced via `VALID_TRANSITIONS` map — `assertValidTransition()` throws `BadRe
 
 `SALO-100001` — globally sequential, collision-safe via MongoDB atomic counter.
 
+**`ORDER_NUMBER_PREFIX = 'SALO'` — never change this constant without migrating all existing `orderNumber` values in MongoDB. Changing it creates two incompatible formats in the same collection.**
+
 ### System notes
 
 All service-level events append a system note automatically:
@@ -233,6 +234,25 @@ makeSystemNote("Inventory deducted on order confirmation.");
 // { message, createdBy: null, kind: 'system', createdAt: Date }
 ```
 
+### Order idempotency via `sourceMessageId`
+
+Bot-created orders store the inbound WhatsApp `messageId` as `sourceMessageId` on the order document. A compound unique index enforces at most one order per inbound message per channel:
+
+```ts
+orderSchema.index(
+  { channel: 1, sourceMessageId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { sourceMessageId: { $type: "string" } },
+    name: "channel_sourceMessageId_unique",
+  },
+);
+```
+
+`createOrder()` accepts `sourceMessageId` as an optional third parameter (default `null`). When a duplicate is detected, `resolveCreateOrderDuplicate()` returns the existing order silently — `createOrder()` is idempotent for bot flows. Manual orders leave `sourceMessageId: null` and are never included in the unique index (partial filter excludes non-strings).
+
+**`sourceMessageId` is internal** — not exposed in the GraphQL API and not accepted in `createOrderSchema`. It is passed directly from `webhook.service.ts` to `createOrder()` as a service-layer concern.
+
 ### Revenue stats query
 
 ```graphql
@@ -240,6 +260,44 @@ revenueStats(months: Int): [MonthRevenue!]!
 ```
 
 Uses MongoDB aggregation (`$group` by year/month). Excludes cancelled orders. Fills zeroes for months with no sales. Used by the dashboard for the 3-month revenue bar chart.
+
+---
+
+## Customer module specifics
+
+### Phone normalization
+
+Phone numbers are stored in **digits-only canonical format** — no `+`, spaces, hyphens, or parentheses.
+
+Example: `+52 (332) 820-5715` → `5213328205715`
+
+**Three layers enforce this:**
+
+1. **`customer.model.ts` pre-save hook** — normalizes on `create()` / `save()` calls
+2. **`customer.service.ts`** — `normalizePhoneForLookup()` applied before every query and `findByIdAndUpdate` write (hooks don't run on update calls)
+3. **`webhook.service.ts`** — `normalizePhoneForLookup()` applied to `payload.from` before the customer upsert query
+
+**Rule:** any code that queries or writes `phone` must normalize first. Pre-save hooks are a safety net, not the primary normalization path.
+
+### `isActive` semantics
+
+`isActive` is a soft-delete flag — one canonical document per customer, never replaced. `isActive: false` means the customer was deactivated by the owner. Deactivated customers are excluded from active lookups but their record and history are preserved. If a deactivated customer contacts via WhatsApp, the existing record is reused — reactivation requires manual owner action.
+
+### Customer upsert pattern (WhatsApp)
+
+`webhook.service.ts` uses an atomic upsert to avoid the race condition where two concurrent executions for a brand-new customer both attempt `create()`:
+
+```ts
+const normalizedPhone = from.replace(/\D/g, '');
+
+await CustomerModel.findOneAndUpdate(
+  { phone: normalizedPhone },
+  { $setOnInsert: { name, phone: normalizedPhone, contactChannel: 'whatsapp', ... } },
+  { upsert: true, new: true, setDefaultsOnInsert: true },
+);
+```
+
+`$setOnInsert` only writes on document creation — existing customers are never modified by this operation.
 
 ---
 
@@ -377,15 +435,27 @@ db.conversationbuffers.createIndex(
 );
 ```
 
+### MongoDB indexes on orders
+
+Verify the `sourceMessageId` idempotency index exists after first deploy:
+
+```js
+db.orders.getIndexes();
+// Expected among others:
+// { key: { channel: 1, sourceMessageId: 1 }, unique: true,
+//   partialFilterExpression: { sourceMessageId: { $type: 'string' } },
+//   name: 'channel_sourceMessageId_unique' }
+```
+
 ### Known technical debt
 
-| Item                                                 | Risk                                                                       | Fix                                                          |
-| ---------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Dedup in Extract Message uses n8n static data        | Lost on container restart — Meta retries may reprocess                     | Move to MongoDB with unique messageId index                  |
-| Customer creation uses findOne + create              | Race condition for new customers sending rapid first messages              | Replace with findOneAndUpdate + $setOnInsert                 |
-| Order idempotency check is not atomic                | Two concurrent executions could create duplicate orders for same messageId | Add dedicated processedMessages collection with unique index |
-| Only first product image per item sent               | Customer sees one angle only                                               | Intentional for now — revisit if UX requires it              |
-| Products fetched unconditionally before intent known | Wasteful for general/order_status intents                                  | Add pagination or lazy fetch when catalog exceeds ~500 items |
+| Item                                                 | Risk                                                     | Status                                                                        |
+| ---------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Dedup in Extract Message uses n8n static data        | Lost on container restart — Meta retries may reprocess   | Open — move to MongoDB with unique messageId index                            |
+| Only first product image per item sent               | Customer sees one angle only                             | Intentional — revisit if UX requires it                                       |
+| Products fetched unconditionally before intent known | Wasteful for general/order_status intents                | Open — add pagination or lazy fetch when catalog exceeds ~500 items           |
+| Customer creation race condition                     | Two concurrent executions for new customer could collide | **Resolved** — atomic upsert with `$setOnInsert` in `webhook.service.ts`      |
+| Order idempotency was note-based                     | Non-atomic check, notes overloaded as idempotency keys   | **Resolved** — `sourceMessageId` compound unique index on `orders` collection |
 
 ---
 
@@ -431,3 +501,6 @@ Never access `process.env` directly outside of `env.ts` — always import the va
 - Never add `merge: true` to Apollo cache `Query.fields` on the frontend (caused cache corruption)
 - Never change the buffer elapsed threshold without also updating the n8n Wait node — they must stay in sync with at least 5 seconds of headroom
 - Never remove the `shouldRespond: true` field from the claim success response — n8n depends on it explicitly
+- Never change `ORDER_NUMBER_PREFIX` without migrating all existing `orderNumber` values in MongoDB
+- Never query or write `customer.phone` without normalizing to digits-only first — pre-save hooks do not run on `findByIdAndUpdate` or `findOneAndUpdate`
+- Never add `sourceMessageId` to `createOrderSchema` — it is a service-layer parameter, not a client input field
