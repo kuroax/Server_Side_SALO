@@ -236,11 +236,22 @@ Usa el formato con ⭐️ por ítem solo cuando estés confirmando un pedido o r
 una pregunta de precio específica — NO cuando uses search_products:
 "⭐️Bra Alo color negro Talla S $2,190\n⭐️Legging Alo color negro Talla S $3,690\nTotal $5,880"
 
-CUANDO LLAMES search_products:
-→ NO listes productos manualmente con ⭐️ ni precios.
-→ Di únicamente que vas a mostrárselos: "Ahorita te muestro lo que tengo ✨" o "Sipi! Tengo opciones bonitas, te las muestro 🙌🏼"
-→ El sistema enviará las imágenes automáticamente con nombre y precio.
-→ Nunca dupliques información que el sistema ya enviará.
+CUANDO LLAMES search_products Y ENCUENTRES RESULTADOS:
+→ NO listes productos manualmente con ⭐️.
+→ Anuncia que vienen las imágenes: "Ahorita te muestro lo que tengo ✨" o "Sipi! Te las muestro 🙌🏼"
+→ SIEMPRE menciona el precio y el anticipo en el texto:
+   "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼"
+   (el resultado de la herramienta ya trae el cálculo del anticipo — úsalo)
+→ Si no sabes la talla, pregúntala.
+→ Pregunta preferencia de entrega: "¿Deseas entrega inmediata o te funciona liquidar en 20 días? 🙏🏻"
+→ El sistema enviará las imágenes con nombre y precio — no repitas esa lista.
+
+CUANDO EL CLIENTE PIDE MÚLTIPLES PRODUCTOS (ej: "crop tops y calcetines"):
+→ Llama search_products para CADA producto por separado (una llamada por tipo de prenda).
+→ En tu respuesta de texto maneja cada uno explícitamente:
+   - Lo que encontraste: "Te encontré crop tops disponibles, te los muestro 🙌🏼"
+   - Lo que no encontraste: "Los calcetines los estoy checando para confirmarte disponibilidad exacta"
+→ Nunca digas que algo está agotado — solo que lo estás verificando.
 
 CUANDO EL CLIENTE CONFIRMA PAGO:
 "Mil Gracias!!! Que se te multiplique 70 mil veces 7! 💫"
@@ -560,9 +571,12 @@ async function runAgenticLoop(
             'Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin marca, o categoría más general). ' +
             'Si la búsqueda alternativa también devuelve 0 resultados, responde con catalog_query ofreciendo opciones cercanas y manteniendo la conversación abierta. ' +
             'El dueño ha sido notificado automáticamente para confirmar disponibilidad o reabastecimiento.'
-          : `Encontré ${items.length} producto(s):\n${items
-              .map((p) => `- ${p.name} (${p.brand}) — $${p.price} MXN`)
-              .join('\n')}`;
+          : `Encontré ${items.length} producto(s) [entrega inmediata]:\n${items
+              .map((p) => {
+                const deposit = Math.ceil(p.price * 0.3).toLocaleString('es-MX');
+                return `- ${p.name} (${p.brand}) — $${p.price.toLocaleString('es-MX')} MXN | anticipo 30% = $${deposit}`;
+              })
+              .join('\n')}\n\nINSTRUCCIÓN: En tu respuesta de texto (además de anunciar que las imágenes vienen), incluye el precio y el anticipo del primer producto. Ejemplo real: "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo. NO dupliques la lista de productos — las imágenes ya se envían con nombre y precio.`;
 
       logger.info(
         { hints, matches: items.length, imagesAccumulated: accumulatedImages.length },

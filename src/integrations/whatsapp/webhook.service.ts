@@ -313,7 +313,10 @@ async function searchProductsForClaude(hints: ClaudeSearchHints): Promise<Produc
     const url = toValidUrl(images[0]);
     if (!url) return [];
     // One image per product — multiple angles would flood the chat.
-    const caption = `${p.name} — ${p.brand} $${p.price.toLocaleString('es-MX')}`;
+    // Caption format: price first (matches real Luis sales pattern — price is what
+    // customers act on), then product name and brand for identification context.
+    // WhatsApp renders caption below the image — short and scannable wins.
+    const caption = `$${p.price.toLocaleString('es-MX')} — ${p.name} (${p.brand})`;
     return [{ name: p.name, brand: p.brand, price: p.price, imageUrl: url, imageCaption: caption }];
   });
 }
