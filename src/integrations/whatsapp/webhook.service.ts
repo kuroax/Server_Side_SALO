@@ -75,21 +75,35 @@ function toSafeResult(
 // can silently change return shapes. Catching that here prevents undefined
 // values from propagating into order creation and product search paths.
 
+// Mirror the full ClaudeIntent union from claude.service.ts.
+// All seven intents must be present — missing any causes valid Claude responses
+// to fail validation and incorrectly escalate to the owner.
 const processMessageResultSchema = z.object({
-  intent: z.enum(['product_search', 'create_order', 'needs_human', 'general']),
+  intent: z.enum([
+    'catalog_query',  // gathering info — Luis asks follow-up questions
+    'product_search', // search ready — searchHints present
+    'price_query',    // customer asked about a price
+    'create_order',   // order commit — orderHints present
+    'order_status',   // customer asked about their order
+    'needs_human',    // escalation required
+    'general',        // greetings, confirmations, catch-all
+  ]),
   response: z.string().min(1),
+  // searchHints includes optional size field to match claude.service.ts
   searchHints: z
     .object({
       keyword: z.string().min(1),
       gender: z.enum(['female', 'male', 'unknown']).optional(),
+      size: z.string().optional(),
     })
     .optional(),
+  // size and color are required strings in claude.service.ts orderHintSchema
   orderHints: z
     .array(
       z.object({
         productNameHint: z.string().min(1),
-        size: z.string().optional(),
-        color: z.string().optional(),
+        size: z.string().min(1),
+        color: z.string().min(1),
         quantity: z.number().int().positive(),
       }),
     )
