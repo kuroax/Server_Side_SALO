@@ -80,20 +80,24 @@ const searchHintsSchema = z.object({
   size:    z.string().optional(),
 });
 
+// No character cap on response — truncation is detected via stop_reason instead.
+// A hard character limit is an approximation of the token limit and causes valid
+// long responses to fail schema validation. stop_reason === 'max_tokens' is the
+// authoritative signal from the API and is checked explicitly in processMessage().
 const claudeResultSchema = z.union([
   z.object({
     intent:      z.literal('create_order'),
-    response:    z.string().min(1).max(2000),
+    response:    z.string().min(1),
     orderHints:  z.array(orderHintSchema).min(1),
   }),
   z.object({
     intent:       z.literal('product_search'),
-    response:     z.string().min(1).max(2000),
+    response:     z.string().min(1),
     searchHints:  searchHintsSchema,
   }),
   z.object({
     intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'needs_human', 'general']),
-    response:   z.string().min(1).max(2000),
+    response:   z.string().min(1),
     orderHints: z.undefined().optional(),
   }),
 ]);
@@ -109,9 +113,18 @@ const SAFE_FALLBACK: ClaudeResult = {
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-const CLAUDE_MODEL       = 'claude-sonnet-4-20250514';
-const MAX_TOKENS         = 512;
-const REQUEST_TIMEOUT_MS = 8_000;
+const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+
+// Raised from 512 to 1024. At 512, product lists with prices and a follow-up
+// question routinely exceeded the limit, producing truncated JSON that failed
+// parsing and returned SAFE_FALLBACK — appearing as a false escalation.
+const MAX_TOKENS = 1024;
+
+// Base timeout for short conversations. Extended dynamically per conversation
+// length below — longer history means more input tokens and slower responses.
+const BASE_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS  = 20_000;
+const RETRY_DELAY_MS  = 1_000;
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
@@ -157,8 +170,16 @@ AFIRMACIONES: "Vaaaa!", "Sipi!", "Padrísimo! 🙌🏼", "Perfecto!", "Super!", 
 
 DISPONIBILIDAD: "Disponible!", "Disponible Talla M! 🙌🏼", "Se me agotó 🥹", "Lo manejo sobre pedido"
 
-AL PRESENTAR PRODUCTOS (siempre con ⭐️ por ítem):
+AL CONFIRMAR UN PEDIDO O LISTAR PRECIOS ESPECÍFICOS (create_order, price_query):
+Usa el formato con ⭐️ por ítem solo cuando estés confirmando un pedido o respondiendo
+una pregunta de precio específica — NO cuando uses product_search:
 "⭐️Bra Alo color negro Talla S $2,190\n⭐️Legging Alo color negro Talla S $3,690\nTotal $5,880"
+
+CUANDO USES product_search:
+→ NO listes productos manualmente con ⭐️ ni precios.
+→ Di únicamente que vas a mostrárselos: "Ahorita te muestro lo que tengo ✨" o "Sipi! Tengo opciones bonitas, te las muestro 🙌🏼"
+→ El sistema enviará las imágenes automáticamente con nombre y precio.
+→ Nunca dupliques información que el sistema ya enviará.
 
 CUANDO EL CLIENTE CONFIRMA PAGO:
 "Mil Gracias!!! Que se te multiplique 70 mil veces 7! 💫"
@@ -185,7 +206,7 @@ NUNCA hagas más de 2 preguntas en un mismo mensaje. Escoge las más importantes
 
 CUANDO TENGAS SUFICIENTE INFORMACIÓN para buscar (tipo de prenda + cualquier detalle adicional):
 → USA intent "product_search" con searchHints. El sistema enviará las imágenes automáticamente.
-→ NO listes productos manualmente. Confía en que el sistema los enviará.
+→ NO listes productos manualmente. Tu response solo anuncia que los mostrarás.
 
 CUANDO AÚN FALTE INFORMACIÓN CLAVE (no sabes ni qué tipo de prenda busca):
 → USA intent "catalog_query" y haz UNA o DOS preguntas cálidas para descubrirlo.
@@ -299,6 +320,64 @@ function buildGenderContext(gender: 'female' | 'male' | 'unknown'): string {
   }
 }
 
+// ─── Retry helper ─────────────────────────────────────────────────────────────
+// Retries once on transient non-timeout errors (network failures, 5xx, 429).
+// Timeout errors are not retried — the caller already waited REQUEST_TIMEOUT_MS
+// and adding another attempt would double customer-facing latency.
+
+function isRetryableError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'TimeoutError') return false;
+  if (err instanceof Anthropic.APIError) {
+    // Only retry known transient server-side and rate-limit errors.
+    // Client errors (4xx other than 429) and unknown errors are not retried —
+    // retrying them would not change the outcome and masks real issues.
+    return [429, 500, 502, 503, 529].includes(err.status);
+  }
+  // Do not retry generic Error instances — they may be programming errors
+  // in this codebase, not transient infrastructure failures.
+  return false;
+}
+
+type ClaudeRawResponse = {
+  text:       string;
+  stopReason: string;
+};
+
+async function callClaudeWithRetry(
+  params: Anthropic.MessageCreateParamsNonStreaming,
+  timeoutMs: number,
+): Promise<ClaudeRawResponse> {
+  for (let attempt = 0; attempt <= 1; attempt++) {
+    try {
+      const message: Anthropic.Message = await client.messages.create(
+        params,
+        { signal: AbortSignal.timeout(timeoutMs) },
+      );
+      return {
+        text: message.content
+          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+          .map((block) => block.text)
+          .join(''),
+        stopReason: message.stop_reason ?? 'unknown',
+      };
+    } catch (err) {
+      const isLast = attempt === 1;
+
+      if (isLast || !isRetryableError(err)) {
+        throw err;
+      }
+
+      logger.warn(
+        { err, attempt },
+        'Claude API call failed — retrying after delay',
+      );
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+  }
+  // Unreachable — loop always throws or returns
+  throw new Error('callClaudeWithRetry: unreachable');
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const processMessage = async (
@@ -314,7 +393,23 @@ export const processMessage = async (
     businessInfo,
   } = context;
 
-  const contextBlock = `[CONTEXTO DEL SISTEMA — no mostrar al cliente]
+  // Dynamic timeout: longer conversations have more input tokens and take more
+  // time. Add 1 second per conversation turn, capped at MAX_TIMEOUT_MS.
+  // Without this, returning customers with 15+ turns routinely hit the old
+  // 8 second timeout and received false escalations.
+  const requestTimeoutMs = Math.min(
+    BASE_TIMEOUT_MS + conversationHistory.length * 1_000,
+    MAX_TIMEOUT_MS,
+  );
+
+  // Context is injected into the system prompt rather than as a fake user/
+  // assistant turn. The previous approach (prepending context as messages[0])
+  // worked but caused Claude to model the conversation as starting with a
+  // system-generated exchange, which subtly affected continuity handling.
+  // Putting dynamic context in the system prompt is the correct pattern.
+  const contextSection = `
+─── CONTEXTO ACTUAL ───────────────────────────────────────────────────────────
+
 CLIENTE: ${customerName ?? 'Cliente nueva'}
 ${buildGenderContext(customerGender)}
 
@@ -335,50 +430,63 @@ INFORMACIÓN DEL NEGOCIO:
 - Horarios: ${businessInfo.businessHours}
 - Envío nacional express: $${businessInfo.shippingPrice} MXN
 - Formas de pago: ${businessInfo.paymentMethods}
-- Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días
-[FIN CONTEXTO]`;
+- Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días`;
+
+  const fullSystemPrompt = `${SYSTEM_PROMPT}${contextSection}`;
 
   const messages: { role: 'user' | 'assistant'; content: string }[] = [
-    { role: 'user',      content: contextBlock },
-    { role: 'assistant', content: 'Entendido. Listo para atender al cliente.' },
     ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
-    { role: 'user',      content: incomingMessage },
+    { role: 'user', content: incomingMessage },
   ];
 
   logger.info(
     {
-      catalogSize:    catalog.length,
-      hasRecentOrder: !!recentOrder,
-      historyTurns:   conversationHistory.length,
+      catalogSize:      catalog.length,
+      hasRecentOrder:   !!recentOrder,
+      historyTurns:     conversationHistory.length,
       customerGender,
+      requestTimeoutMs,
     },
     'Calling Claude API',
   );
 
-  let rawText: string;
+  let rawResponse: ClaudeRawResponse;
 
   try {
-    const message = await client.messages.create(
+    rawResponse = await callClaudeWithRetry(
       {
         model:      CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
-        system:     SYSTEM_PROMPT,
+        system:     fullSystemPrompt,
         messages,
       },
-      { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      requestTimeoutMs,
     );
-
-    rawText = message.content
-      .filter((block) => block.type === 'text')
-      .map((block) => (block as { type: 'text'; text: string }).text)
-      .join('');
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+    const failureReason = isTimeout ? 'api_timeout' : 'api_error';
     logger.error(
-      { err, isTimeout },
+      { err, failureReason, historyTurns: conversationHistory.length, requestTimeoutMs },
       isTimeout
-        ? 'Claude API timed out — returning safe fallback'
-        : 'Claude API call failed — returning safe fallback',
+        ? 'Claude API timed out after retry — returning safe fallback'
+        : 'Claude API call failed after retry — returning safe fallback',
+    );
+    return SAFE_FALLBACK;
+  }
+
+  // Truncation check — stop_reason is the authoritative signal from the API.
+  // A truncated response produces partial JSON that fails to parse, but logging
+  // it explicitly makes the root cause visible instead of looking like a random
+  // parse failure. This replaces the old response.max(4000) schema approximation.
+  if (rawResponse.stopReason === 'max_tokens') {
+    logger.warn(
+      {
+        failureReason:    'truncated_response',
+        stopReason:       rawResponse.stopReason,
+        historyTurns:     conversationHistory.length,
+        rawTextPreview:   rawResponse.text.slice(0, 200),
+      },
+      'Claude response was truncated at token limit — increase MAX_TOKENS or reduce prompt size',
     );
     return SAFE_FALLBACK;
   }
@@ -386,9 +494,17 @@ INFORMACIÓN DEL NEGOCIO:
   let parsed: unknown;
 
   try {
-    parsed = JSON.parse(rawText);
+    parsed = JSON.parse(rawResponse.text);
   } catch {
-    logger.warn({ rawText }, 'Claude returned non-JSON — returning safe fallback');
+    // Truncate raw text in logs — it may contain customer message content,
+    // order references, or personal conversation details.
+    const rawTextPreview = rawResponse.text.length > 200
+      ? `${rawResponse.text.slice(0, 200)}…`
+      : rawResponse.text;
+    logger.warn(
+      { failureReason: 'non_json_response', rawTextPreview, rawTextLength: rawResponse.text.length },
+      'Claude returned non-JSON — returning safe fallback',
+    );
     return SAFE_FALLBACK;
   }
 
@@ -396,13 +512,16 @@ INFORMACIÓN DEL NEGOCIO:
 
   if (!validated.success) {
     logger.warn(
-      { issues: validated.error.issues },
+      { failureReason: 'schema_validation_failed', issues: validated.error.issues },
       'Claude output failed schema validation — returning safe fallback',
     );
     return SAFE_FALLBACK;
   }
 
-  logger.info({ intent: validated.data.intent }, 'Claude response validated successfully');
+  logger.info(
+    { intent: validated.data.intent, historyTurns: conversationHistory.length, stopReason: rawResponse.stopReason },
+    'Claude response validated successfully',
+  );
 
   return validated.data;
 };
