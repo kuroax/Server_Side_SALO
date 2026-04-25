@@ -227,7 +227,15 @@ function filterProductsBySearchHints(
     if (!keywordMatch) return false;
 
     if (hints.gender && hints.gender !== 'unknown' && p.gender) {
-      if (p.gender !== hints.gender) return false;
+      // Normalize DB gender values to Claude hint values before comparing.
+      // MongoDB stores 'women'/'men' (Shopify convention) but Claude returns
+      // 'female'/'male'. Without this, every gender-filtered search returns empty.
+      const normalizedProductGender = p.gender === 'women'
+        ? 'female'
+        : p.gender === 'men'
+          ? 'male'
+          : p.gender;
+      if (normalizedProductGender !== hints.gender) return false;
     }
 
     return true;
