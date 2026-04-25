@@ -29,11 +29,16 @@ const productImageSchema = z.object({
 export type ProductImage = z.infer<typeof productImageSchema>;
 
 const webhookResultSchema = z.object({
-  reply:         z.string(),
-  escalate:      z.boolean(),
-  customerPhone: z.string(),
-  customerName:  z.string().nullable(),
-  productImages: z.array(productImageSchema),
+  reply:             z.string(),
+  escalate:          z.boolean(),
+  customerPhone:     z.string(),
+  customerName:      z.string().nullable(),
+  productImages:     z.array(productImageSchema),
+  // Pre-formatted owner alert. Present whenever escalate === true.
+  // Built in the backend where full context is available (customer message,
+  // intent, search results, order hints). n8n Send Escalation Alert node
+  // uses {{ $json.escalationMessage }} — no context building in n8n.
+  escalationMessage: z.string().optional(),
 });
 
 export type WebhookResult = z.infer<typeof webhookResultSchema>;
@@ -61,14 +66,85 @@ function toSafeResult(
       'WebhookResult failed schema validation — escalating instead of silent empty',
     );
     return {
-      reply:         'Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻',
-      escalate:      true,
+      reply:             'Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻',
+      escalate:          true,
       customerPhone,
       customerName,
-      productImages: [],
+      productImages:     [],
+      escalationMessage: buildEscalationMessage({
+        customerPhone,
+        customerName,
+        reason:          'Error interno de validación — el resultado del procesamiento no cumple el esquema esperado.',
+        suggestedAction: 'Revisar logs de Railway para detalles del error. Responder al cliente manualmente.',
+      }),
     };
   }
   return parsed.data;
+}
+
+// ─── Escalation message builder ───────────────────────────────────────────────
+// Builds a rich owner alert from whatever context is available at the point of
+// escalation. All fields are optional — the message always includes at minimum
+// the customer phone, reason, and suggested action.
+
+type EscalationContext = {
+  customerPhone:    string;
+  customerName?:    string | null;
+  customerMessage?: string;
+  intent?:          string;
+  searchHints?:     { keyword?: string; size?: string; gender?: string };
+  orderHints?:      { productNameHint: string; size: string; color: string; quantity: number }[];
+  inventoryResult?: string;
+  reason:           string;
+  suggestedAction:  string;
+};
+
+function buildEscalationMessage(ctx: EscalationContext): string {
+  const lines: string[] = ['⚠️ Nueva solicitud requiere atención manual.', ''];
+
+  lines.push(`Cliente: ${ctx.customerPhone}`);
+
+  if (ctx.customerName) {
+    lines.push(`Nombre: ${ctx.customerName}`);
+  }
+
+  if (ctx.customerMessage) {
+    lines.push(`Mensaje: "${ctx.customerMessage}"`);
+  }
+
+  if (ctx.searchHints?.keyword) {
+    lines.push(`Producto solicitado: ${ctx.searchHints.keyword}`);
+  }
+
+  if (ctx.searchHints?.size) {
+    lines.push(`Talla solicitada: ${ctx.searchHints.size}`);
+  }
+
+  if (ctx.searchHints?.gender && ctx.searchHints.gender !== 'unknown') {
+    const genderLabel = ctx.searchHints.gender === 'female' ? 'mujer' : 'hombre';
+    lines.push(`Género: ${genderLabel}`);
+  }
+
+  if (ctx.orderHints?.length) {
+    const items = ctx.orderHints
+      .map((h) => `${h.productNameHint} talla ${h.size} color ${h.color} x${h.quantity}`)
+      .join(', ');
+    lines.push(`Producto(s) para pedido: ${items}`);
+  }
+
+  if (ctx.inventoryResult) {
+    lines.push(`Resultado de inventario: ${ctx.inventoryResult}`);
+  }
+
+  if (ctx.intent) {
+    lines.push(`Intención detectada: ${ctx.intent}`);
+  }
+
+  lines.push('');
+  lines.push(`Motivo de escalación: ${ctx.reason}`);
+  lines.push(`Acción sugerida: ${ctx.suggestedAction}`);
+
+  return lines.join('\n');
 }
 
 // ─── Integration boundary schemas ─────────────────────────────────────────────
@@ -203,10 +279,6 @@ function normalizeProductImages(value: unknown): ProductImage[] {
 // Called by claude.service.ts only when Claude invokes the search_products tool.
 // Defers the heavy DB query (gender, categoryGroup, subcategory, images) until
 // actually needed — zero cost for messages that don't involve a product search.
-//
-// Returns ProductSearchItem[] so claude.service.ts can:
-//   1. Format name/brand/price as tool result text sent back to Claude.
-//   2. Accumulate imageUrl/imageCaption into productImages for n8n.
 
 async function searchProductsForClaude(hints: ClaudeSearchHints): Promise<ProductSearchItem[]> {
   const products = await ProductModel.find({ status: 'active' })
@@ -251,11 +323,11 @@ async function searchProductsForClaude(hints: ClaudeSearchHints): Promise<Produc
 export const handleIncomingMessage = async (
   payload: WebhookPayload,
 ): Promise<WebhookResult> => {
-  const rawFrom    = payload.from;
-  const from       = normalizePhoneForLookup(rawFrom);
+  const rawFrom     = payload.from;
+  const from        = normalizePhoneForLookup(rawFrom);
   const messageType = payload.messageType;
-  const message    = typeof payload.message === 'string' ? payload.message.trim() : '';
-  const messageId  =
+  const message     = typeof payload.message === 'string' ? payload.message.trim() : '';
+  const messageId   =
     typeof payload.messageId === 'string' && payload.messageId.trim()
       ? payload.messageId.trim()
       : null;
@@ -303,8 +375,6 @@ export const handleIncomingMessage = async (
   }
 
   // ── 1. Identify / create customer ─────────────────────────────────────────
-  // Atomic upsert prevents the race where two concurrent executions for a
-  // brand-new customer both attempt create().
   const customer = await CustomerModel.findOneAndUpdate(
     { phone: from },
     {
@@ -333,11 +403,6 @@ export const handleIncomingMessage = async (
   }
 
   // ── 1a. Refresh placeholder names ─────────────────────────────────────────
-  // $setOnInsert only writes the name on first creation. If a customer was
-  // created without a contactName, their record stays as "WhatsApp {from}"
-  // indefinitely, degrading personalization. This targeted update refreshes the
-  // name only when the stored value is still the system placeholder and a real
-  // name arrives. It will not overwrite a name manually corrected in the CRM.
   if (payload.contactName && customer.name === `WhatsApp ${from}`) {
     await CustomerModel.updateOne(
       { _id: customer._id },
@@ -350,8 +415,8 @@ export const handleIncomingMessage = async (
     );
   }
 
-  const customerId    = customer._id.toString();
-  const customerName  = customer.name !== `WhatsApp ${from}` ? customer.name : null;
+  const customerId     = customer._id.toString();
+  const customerName   = customer.name !== `WhatsApp ${from}` ? customer.name : null;
   const customerGender = (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as
     | 'female'
     | 'male'
@@ -360,11 +425,6 @@ export const handleIncomingMessage = async (
   // ── 2. Image message — search inventory by visual similarity ─────────────
 
   if (messageType === 'image') {
-    // Deduplicate image messages before processing. Meta can deliver the same
-    // webhook event more than once. The text path is protected by the
-    // buffer/claim system. The image path is not — without this guard a
-    // duplicate delivery reruns the image search, appends duplicate turns,
-    // and may send duplicate replies to the customer.
     if (messageId && !trackImageMessageId(messageId)) {
       logger.info(
         { from, messageId, customerId },
@@ -383,7 +443,6 @@ export const handleIncomingMessage = async (
     try {
       const rawSearchResult = await searchProductsByImage(payload.imageMediaId!);
 
-      // Validate the external service response at the boundary before use.
       const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
       if (!searchResult.success) {
         throw new Error(
@@ -402,16 +461,8 @@ export const handleIncomingMessage = async (
       }
 
       const imageTurns = [
-        {
-          role:      'user' as const,
-          content:   '[Imagen enviada por el cliente]',
-          createdAt: new Date(),
-        },
-        {
-          role:      'assistant' as const,
-          content:   reply,
-          createdAt: new Date(),
-        },
+        { role: 'user' as const,      content: '[Imagen enviada por el cliente]', createdAt: new Date() },
+        { role: 'assistant' as const, content: reply,                             createdAt: new Date() },
       ];
 
       await ConversationModel.findOneAndUpdate(
@@ -435,16 +486,8 @@ export const handleIncomingMessage = async (
       );
 
       const fallbackTurns = [
-        {
-          role:      'user' as const,
-          content:   '[Imagen enviada por el cliente]',
-          createdAt: new Date(),
-        },
-        {
-          role:      'assistant' as const,
-          content:   fallbackReply,
-          createdAt: new Date(),
-        },
+        { role: 'user' as const,      content: '[Imagen enviada por el cliente]', createdAt: new Date() },
+        { role: 'assistant' as const, content: fallbackReply,                     createdAt: new Date() },
       ];
 
       await ConversationModel.findOneAndUpdate(
@@ -463,6 +506,13 @@ export const handleIncomingMessage = async (
           customerPhone: from,
           customerName,
           productImages: [],
+          escalationMessage: buildEscalationMessage({
+            customerPhone: from,
+            customerName,
+            customerMessage:  '[Imagen enviada por el cliente]',
+            reason:           'La búsqueda visual por imagen falló con un error interno.',
+            suggestedAction:  'Revisar logs de Railway. Responder al cliente manualmente con productos similares a la imagen enviada.',
+          }),
         },
         from,
         customerName,
@@ -484,12 +534,8 @@ export const handleIncomingMessage = async (
 
   const recentOrder = await OrderModel.findOne({ customerId }).sort({ createdAt: -1 }).lean();
 
-  // Minimal catalog load — only name and price, only for create_order resolution
-  // in findProductByHint below. The heavy product fields (gender, categoryGroup,
-  // subcategory, images) are no longer loaded upfront — they are fetched on
-  // demand inside searchProductsForClaude when Claude calls the search_products
-  // tool. Most messages (greetings, order status, price queries, etc.) never
-  // trigger a product search, so those requests now do zero product DB work.
+  // Minimal catalog load — only name and price, only for create_order resolution.
+  // Heavy product fields are fetched on demand inside searchProductsForClaude.
   const catalogForOrders = await ProductModel.find({ status: 'active' })
     .select('name price')
     .lean();
@@ -510,7 +556,7 @@ export const handleIncomingMessage = async (
           total:       recentOrder.total,
         }
       : null,
-    searchProducts: searchProductsForClaude,
+    searchProducts:  searchProductsForClaude,
     incomingMessage: message,
     conversationHistory,
     businessInfo: BUSINESS_INFO,
@@ -530,6 +576,13 @@ export const handleIncomingMessage = async (
         customerPhone: from,
         customerName,
         productImages: [],
+        escalationMessage: buildEscalationMessage({
+          customerPhone: from,
+          customerName,
+          customerMessage: message,
+          reason:          'Error interno — la respuesta del modelo no cumple el esquema esperado.',
+          suggestedAction: 'Revisar logs de Railway para detalles del error. Responder al cliente manualmente.',
+        }),
       },
       from,
       customerName,
@@ -541,7 +594,6 @@ export const handleIncomingMessage = async (
   let escalate = result.intent === 'needs_human';
 
   // productImages are populated by the agentic loop during tool calls.
-  // No need to branch on intent — they're always ready in the result.
   const productImages: ProductImage[] = result.productImages;
 
   if (result.intent === 'product_search') {
@@ -549,17 +601,20 @@ export const handleIncomingMessage = async (
       { matches: productImages.length, customerId, messageId },
       'Product search intent — images from agentic loop tool calls',
     );
+
+    // If Claude used product_search but the tool returned 0 results, escalate.
+    // The customer asked for something specific that isn't in inventory —
+    // the owner needs to respond with alternatives or confirm a special order.
+    if (productImages.length === 0 && result.searchHints) {
+      escalate = true;
+      logger.info(
+        { customerId, messageId, searchHints: result.searchHints },
+        'Product search returned 0 results — escalating to owner',
+      );
+    }
   }
 
   // ── Handle create_order intent ────────────────────────────────────────────
-  // NOTE: Order creation from a fuzzy product name hint is a known weakness.
-  // The correct long-term design is a two-step confirmation flow: Luis presents
-  // the resolved order, customer confirms, then the order is committed. This
-  // requires conversation state tracking and n8n workflow changes — tracked as
-  // a follow-up task before high-volume production use.
-  //
-  // createOrder is idempotent via sourceMessageId — duplicate executions are
-  // resolved transparently inside order.service.ts.
   if (result.intent === 'create_order') {
     if (!result.orderHints?.length) {
       escalate = true;
@@ -625,14 +680,58 @@ export const handleIncomingMessage = async (
     }
   }
 
+  // ── Build escalation message with full context ────────────────────────────
+  // Built after all business logic so we have the final escalate flag,
+  // product search results, order hints, and intent all resolved.
+  let escalationMessage: string | undefined;
+
   if (escalate) {
     logger.info({ customerId, from, messageId }, 'Escalate flag set for n8n');
+
+    const searchHints = result.searchHints;
+    const intent      = result.intent;
+
+    let reason: string;
+    let suggestedAction: string;
+    let inventoryResult: string | undefined;
+
+    if (intent === 'needs_human') {
+      reason          = 'El asistente detectó que la situación requiere una decisión humana (queja, devolución, negociación especial, o solicitud fuera de lo normal).';
+      suggestedAction = 'Revisar el mensaje del cliente y responder directamente con la solución apropiada.';
+    } else if (intent === 'product_search' && productImages.length === 0) {
+      const keyword   = searchHints?.keyword ?? 'producto no especificado';
+      const size      = searchHints?.size;
+      inventoryResult = `No se encontraron productos disponibles que coincidan con "${keyword}"${size ? ` talla ${size}` : ''}.`;
+      reason          = 'El bot no puede confirmar disponibilidad porque el producto no existe actualmente en inventario.';
+      suggestedAction = `Responder al cliente con una alternativa disponible o confirmar si se puede conseguir "${keyword}" sobre pedido.`;
+    } else if (intent === 'create_order') {
+      const items     = result.orderHints
+        ?.map((h) => `${h.productNameHint} talla ${h.size} color ${h.color}`)
+        .join(', ') ?? 'sin detalle';
+      reason          = `El pedido no pudo crearse automáticamente. Productos solicitados: ${items}.`;
+      suggestedAction = 'Verificar disponibilidad de los productos en el inventario y crear el pedido manualmente si corresponde.';
+    } else {
+      reason          = `Escalación forzada por estado inesperado (intent: ${intent}).`;
+      suggestedAction = 'Revisar logs de Railway y responder al cliente manualmente.';
+    }
+
+    escalationMessage = buildEscalationMessage({
+      customerPhone: from,
+      customerName,
+      customerMessage: message,
+      intent,
+      searchHints,
+      orderHints:      result.orderHints,
+      inventoryResult,
+      reason,
+      suggestedAction,
+    });
   }
 
   // ── Persist conversation after all business effects are resolved ──────────
   const newTurns = [
-    { role: 'user' as const,      content: message,          createdAt: new Date() },
-    { role: 'assistant' as const, content: result.response,  createdAt: new Date() },
+    { role: 'user' as const,      content: message,         createdAt: new Date() },
+    { role: 'assistant' as const, content: result.response, createdAt: new Date() },
   ];
 
   await ConversationModel.findOneAndUpdate(
@@ -662,6 +761,7 @@ export const handleIncomingMessage = async (
       customerPhone: from,
       customerName,
       productImages,
+      escalationMessage,
     },
     from,
     customerName,
