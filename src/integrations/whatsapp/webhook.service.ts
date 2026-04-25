@@ -16,12 +16,21 @@ import type { ClaudeSearchHints } from '#/integrations/whatsapp/claude.service.j
 
 // ─── Response schema ──────────────────────────────────────────────────────────
 
+// productImages is an array of objects so n8n can access {{ $json.productImages.url }}
+// and {{ $json.productImages.caption }} after Split Out.
+const productImageSchema = z.object({
+  url: z.string().url(),
+  caption: z.string().optional(),
+});
+
+export type ProductImage = z.infer<typeof productImageSchema>;
+
 const webhookResultSchema = z.object({
   reply: z.string(),
   escalate: z.boolean(),
   customerPhone: z.string(),
   customerName: z.string().nullable(),
-  productImages: z.array(z.string().url()),
+  productImages: z.array(productImageSchema),
 });
 
 export type WebhookResult = z.infer<typeof webhookResultSchema>;
@@ -34,19 +43,70 @@ const EMPTY_RESULT: WebhookResult = {
   productImages: [],
 };
 
-function toSafeResult(raw: unknown): WebhookResult {
+// When outbound result validation fails, return a visible escalation instead of
+// silent empty. This turns correctness failures into owner alerts rather than
+// "Luis just went quiet" incidents that are hard to diagnose in production.
+function toSafeResult(
+  raw: unknown,
+  customerPhone = '',
+  customerName: string | null = null,
+): WebhookResult {
   const parsed = webhookResultSchema.safeParse(raw);
   if (!parsed.success) {
     logger.error(
       { issues: parsed.error.issues, raw },
-      'WebhookResult failed schema validation — returning empty result',
+      'WebhookResult failed schema validation — escalating instead of silent empty',
     );
-    return EMPTY_RESULT;
+    return {
+      reply: 'Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻',
+      escalate: true,
+      customerPhone,
+      customerName,
+      productImages: [],
+    };
   }
   return parsed.data;
 }
 
+// ─── Integration boundary schemas ─────────────────────────────────────────────
+// Validates what external services return before their data enters business logic.
+// The LLM integration and the image search service are the least stable
+// boundaries in the system — a prompt change, model update, or service refactor
+// can silently change return shapes. Catching that here prevents undefined
+// values from propagating into order creation and product search paths.
+
+const processMessageResultSchema = z.object({
+  intent: z.enum(['product_search', 'create_order', 'needs_human', 'general']),
+  response: z.string().min(1),
+  searchHints: z
+    .object({
+      keyword: z.string().min(1),
+      gender: z.enum(['female', 'male', 'unknown']).optional(),
+    })
+    .optional(),
+  orderHints: z
+    .array(
+      z.object({
+        productNameHint: z.string().min(1),
+        size: z.string().optional(),
+        color: z.string().optional(),
+        quantity: z.number().int().positive(),
+      }),
+    )
+    .optional(),
+});
+
+type ProcessMessageResult = z.infer<typeof processMessageResultSchema>;
+
+const imageSearchResultSchema = z.object({
+  reply: z.string().min(1),
+  // productImages are raw values — URL normalization happens downstream
+  productImages: z.array(z.unknown()).default([]),
+});
+
 // ─── Business info ────────────────────────────────────────────────────────────
+// TODO: Move to a validated env/config or settings collection so business
+// changes (hours, address, prices) do not require a code release.
 
 const BUSINESS_INFO = {
   showroomAddress: 'Av. Guadalupe 1390, Chapalita Oriente, Guadalajara, Jalisco',
@@ -59,16 +119,30 @@ const BUSINESS_INFO = {
   paymentDays: 20,
 } as const;
 
+// ─── Image message idempotency ────────────────────────────────────────────────
+// The buffer/claim system deduplicates text messages via executionId ownership.
+// Image messages bypass the buffer and go directly to searchProductsByImage, so
+// a duplicate webhook delivery from Meta would rerun the search, append
+// duplicate conversation turns, and potentially send duplicate replies.
+//
+// This in-memory set provides a 5-minute dedup window keyed by messageId.
+// Acceptable for single-process Railway deployment. Replace with a Redis-backed
+// key if the service scales horizontally.
+
+const recentImageMessageIds = new Set<string>();
+const IMAGE_DEDUP_WINDOW_MS = 5 * 60 * 1000;
+
+function trackImageMessageId(id: string): boolean {
+  if (recentImageMessageIds.has(id)) return false; // duplicate — skip
+  recentImageMessageIds.add(id);
+  setTimeout(() => recentImageMessageIds.delete(id), IMAGE_DEDUP_WINDOW_MS);
+  return true; // new — proceed
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function normalizePhoneForLookup(value: unknown): string {
   if (typeof value !== 'string') return '';
-
-  // Conservative normalization:
-  // - trim
-  // - remove all non-digit characters
-  // - do not rewrite country-specific prefixes here
-  // This keeps WhatsApp sender IDs stable while collapsing formatting variants.
   return value.trim().replace(/\D+/g, '');
 }
 
@@ -86,10 +160,8 @@ function findProductByHint(
 
 function toValidUrl(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-
   const trimmed = value.trim();
   if (!trimmed) return undefined;
-
   try {
     new URL(trimmed);
     return trimmed;
@@ -98,28 +170,38 @@ function toValidUrl(value: unknown): string | undefined {
   }
 }
 
-function normalizeProductImages(value: unknown): string[] {
+// Converts raw image search results into ProductImage objects.
+// Caption is omitted — there is no product context available in image search results.
+function normalizeProductImages(value: unknown): ProductImage[] {
   if (!Array.isArray(value)) return [];
   return value
-    .map((item) => toValidUrl(item))
-    .filter((url): url is string => Boolean(url));
+    .map((item) => {
+      const url = toValidUrl(item);
+      if (!url) return undefined;
+      return { url } satisfies ProductImage;
+    })
+    .filter((img): img is ProductImage => Boolean(img));
 }
 
-// Returns the first valid image URL from each matched product.
-// Only the first image per product is intentional — sending multiple angles
-// per product would flood the customer's chat.
+// Returns the first valid image per matched product as a ProductImage with caption.
+// One image per product is intentional — multiple angles would flood the chat.
+//
+// TODO: This keyword filter is a temporary heuristic. Once the search_products
+// tool use is introduced in claude.service.ts, product retrieval becomes
+// demand-driven from Claude tool calls and this function should be removed.
 function filterProductsBySearchHints(
   products: {
     _id: { toString(): string };
     name: string;
     brand: string;
+    price: number;
     gender?: string;
     categoryGroup?: string;
     subcategory?: string;
     images?: unknown;
   }[],
   hints: ClaudeSearchHints,
-): string[] {
+): ProductImage[] {
   const keyword = hints.keyword.toLowerCase().trim();
 
   const matched = products.filter((p) => {
@@ -137,13 +219,14 @@ function filterProductsBySearchHints(
     return true;
   });
 
-  return matched
-    .map((p) => {
-      const images = p.images;
-      if (!Array.isArray(images)) return undefined;
-      return toValidUrl(images[0]);
-    })
-    .filter((url): url is string => Boolean(url));
+  return matched.flatMap((p) => {
+    const images = p.images;
+    if (!Array.isArray(images)) return [];
+    const url = toValidUrl(images[0]);
+    if (!url) return [];
+    const caption = `${p.name} — ${p.brand} $${p.price.toLocaleString('es-MX')}`;
+    return [{ url, caption } satisfies ProductImage];
+  });
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -160,7 +243,7 @@ export const handleIncomingMessage = async (
       ? payload.messageId.trim()
       : null;
 
-  // ── 0. Guards — ignore non-message and malformed WhatsApp events ──────────
+  // ── 0. Guards — drop malformed and unsupported events early ──────────────
 
   if (!from) {
     logger.info(
@@ -171,7 +254,7 @@ export const handleIncomingMessage = async (
       },
       'Ignoring non-message webhook event — empty or invalid from field after normalization',
     );
-    return toSafeResult(EMPTY_RESULT);
+    return EMPTY_RESULT;
   }
 
   if (rawFrom && rawFrom !== from) {
@@ -186,12 +269,12 @@ export const handleIncomingMessage = async (
       { from, messageType, messageId },
       'Ignoring unsupported WhatsApp message type',
     );
-    return toSafeResult(EMPTY_RESULT);
+    return EMPTY_RESULT;
   }
 
   if (messageType === 'image' && !payload.imageMediaId) {
     logger.info({ from, messageId }, 'Ignoring image webhook event without imageMediaId');
-    return toSafeResult(EMPTY_RESULT);
+    return EMPTY_RESULT;
   }
 
   if ((messageType === 'text' || !messageType) && !message) {
@@ -199,7 +282,7 @@ export const handleIncomingMessage = async (
       { from, messageId, messageType },
       'Ignoring empty text-like WhatsApp event',
     );
-    return toSafeResult(EMPTY_RESULT);
+    return EMPTY_RESULT;
   }
 
   // ── 1. Identify / create customer ─────────────────────────────────────────
@@ -222,13 +305,31 @@ export const handleIncomingMessage = async (
 
   if (!customer) {
     logger.error({ phone: from }, 'Customer upsert returned null — unexpected');
-    return toSafeResult(EMPTY_RESULT);
+    return toSafeResult(EMPTY_RESULT, from);
   }
 
   if (customer.isActive === false) {
     logger.warn(
       { customerId: customer._id.toString(), phone: from },
       'Inactive customer record reused for WhatsApp message',
+    );
+  }
+
+  // ── 1a. Refresh placeholder names ─────────────────────────────────────────
+  // $setOnInsert only writes the name on first creation. If a customer was
+  // created without a contactName, their record stays as "WhatsApp {from}"
+  // indefinitely, degrading personalization. This targeted update refreshes the
+  // name only when the stored value is still the system placeholder and a real
+  // name arrives. It will not overwrite a name manually corrected in the CRM.
+  if (payload.contactName && customer.name === `WhatsApp ${from}`) {
+    await CustomerModel.updateOne(
+      { _id: customer._id },
+      { $set: { name: payload.contactName } },
+    );
+    customer.name = payload.contactName;
+    logger.info(
+      { customerId: customer._id.toString(), from },
+      'Updated customer placeholder name from incoming contactName',
     );
   }
 
@@ -242,6 +343,19 @@ export const handleIncomingMessage = async (
   // ── 2. Image message — search inventory by visual similarity ─────────────
 
   if (messageType === 'image') {
+    // Deduplicate image messages before processing. Meta can deliver the same
+    // webhook event more than once. The text path is protected by the
+    // buffer/claim system. The image path is not — without this guard a
+    // duplicate delivery reruns the image search, appends duplicate turns,
+    // and may send duplicate replies to the customer.
+    if (messageId && !trackImageMessageId(messageId)) {
+      logger.info(
+        { from, messageId, customerId },
+        'Duplicate image messageId — skipping reprocessing',
+      );
+      return EMPTY_RESULT;
+    }
+
     logger.info(
       { customerId, mediaId: payload.imageMediaId, messageId },
       'Image message received — running visual search',
@@ -250,16 +364,20 @@ export const handleIncomingMessage = async (
     const fallbackReply = 'Ahorita te confirmo eso bonita, dame un momento 🙏🏻';
 
     try {
-      const { reply, productImages: rawProductImages } = await searchProductsByImage(
-        payload.imageMediaId!,
-      );
+      const rawSearchResult = await searchProductsByImage(payload.imageMediaId!);
+
+      // Validate the external service response at the boundary before use.
+      const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
+      if (!searchResult.success) {
+        throw new Error(
+          `searchProductsByImage returned unexpected shape: ${JSON.stringify(searchResult.error.issues)}`,
+        );
+      }
+
+      const { reply, productImages: rawProductImages } = searchResult.data;
       const productImages = normalizeProductImages(rawProductImages);
 
-      if (
-        Array.isArray(rawProductImages) &&
-        rawProductImages.length > 0 &&
-        productImages.length === 0
-      ) {
+      if (rawProductImages.length > 0 && productImages.length === 0) {
         logger.warn(
           { customerId, messageId },
           'Image search returned productImages but none were valid absolute URLs',
@@ -288,13 +406,11 @@ export const handleIncomingMessage = async (
         { upsert: true, new: true },
       );
 
-      return toSafeResult({
-        reply,
-        escalate: false,
-        customerPhone: from,
+      return toSafeResult(
+        { reply, escalate: false, customerPhone: from, customerName, productImages },
+        from,
         customerName,
-        productImages,
-      });
+      );
     } catch (err) {
       logger.error(
         { err, customerId, mediaId: payload.imageMediaId, messageId },
@@ -323,13 +439,17 @@ export const handleIncomingMessage = async (
         { upsert: true, new: true },
       );
 
-      return toSafeResult({
-        reply: fallbackReply,
-        escalate: true,
-        customerPhone: from,
+      return toSafeResult(
+        {
+          reply: fallbackReply,
+          escalate: true,
+          customerPhone: from,
+          customerName,
+          productImages: [],
+        },
+        from,
         customerName,
-        productImages: [],
-      });
+      );
     }
   }
 
@@ -347,7 +467,10 @@ export const handleIncomingMessage = async (
 
   const recentOrder = await OrderModel.findOne({ customerId }).sort({ createdAt: -1 }).lean();
 
-  // TODO: add pagination / smarter retrieval if catalog grows significantly.
+  // TODO: This full catalog load runs on every text message and will become the
+  // primary latency and token cost problem as inventory grows. Remove this block
+  // when search_products tool use is introduced in claude.service.ts and product
+  // retrieval becomes demand-driven from Claude tool calls instead of preloaded.
   const products = await ProductModel.find({ status: 'active' })
     .select('name price brand gender categoryGroup subcategory images')
     .lean();
@@ -359,7 +482,7 @@ export const handleIncomingMessage = async (
     brand: p.brand,
   }));
 
-  const result = await processMessage({
+  const rawResult = await processMessage({
     customerName,
     customerGender,
     recentOrder: recentOrder
@@ -375,8 +498,33 @@ export const handleIncomingMessage = async (
     businessInfo: BUSINESS_INFO,
   });
 
+  // Validate processMessage result at the integration boundary.
+  // A prompt change, model update, or parsing bug can silently change the output
+  // shape. Catching it here prevents undefined values from reaching order
+  // creation and product search logic below.
+  const parsedResult = processMessageResultSchema.safeParse(rawResult);
+  if (!parsedResult.success) {
+    logger.error(
+      { issues: parsedResult.error.issues, rawResult, customerId, messageId },
+      'processMessage returned unexpected shape — escalating',
+    );
+    return toSafeResult(
+      {
+        reply: 'Lo siento bonita, hubo un error procesando tu mensaje. Alguien del equipo te contactará pronto 🙏🏻',
+        escalate: true,
+        customerPhone: from,
+        customerName,
+        productImages: [],
+      },
+      from,
+      customerName,
+    );
+  }
+
+  const result: ProcessMessageResult = parsedResult.data;
+
   let escalate = result.intent === 'needs_human';
-  let productImages: string[] = [];
+  let productImages: ProductImage[] = [];
 
   // ── Resolve product images ────────────────────────────────────────────────
   if (result.intent === 'product_search' && result.searchHints) {
@@ -388,8 +536,14 @@ export const handleIncomingMessage = async (
   }
 
   // ── Handle create_order intent ────────────────────────────────────────────
-  // createOrder is idempotent via sourceMessageId — duplicate orders are
-  // resolved transparently inside order.service.ts and do not need a pre-check here.
+  // NOTE: Order creation from a fuzzy product name hint is a known weakness.
+  // The correct long-term design is a two-step confirmation flow: Luis presents
+  // the resolved order, customer confirms, then the order is committed. This
+  // requires conversation state tracking and n8n workflow changes — tracked as
+  // a follow-up task before high-volume production use.
+  //
+  // createOrder is idempotent via sourceMessageId — duplicate executions are
+  // resolved transparently inside order.service.ts.
   if (result.intent === 'create_order') {
     if (!result.orderHints?.length) {
       escalate = true;
@@ -485,11 +639,15 @@ export const handleIncomingMessage = async (
     'Conversation turn persisted',
   );
 
-  return toSafeResult({
-    reply: result.response,
-    escalate,
-    customerPhone: from,
+  return toSafeResult(
+    {
+      reply: result.response,
+      escalate,
+      customerPhone: from,
+      customerName,
+      productImages,
+    },
+    from,
     customerName,
-    productImages,
-  });
+  );
 };
