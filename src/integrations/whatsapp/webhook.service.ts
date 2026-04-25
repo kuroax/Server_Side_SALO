@@ -12,34 +12,37 @@ import { CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 import { logger } from '#/config/logger.js';
 import { z } from 'zod';
 import type { WebhookPayload } from '#/integrations/whatsapp/webhook.validation.js';
-import type { ClaudeSearchHints } from '#/integrations/whatsapp/claude.service.js';
+import type {
+  ClaudeSearchHints,
+  ProductSearchItem,
+} from '#/integrations/whatsapp/claude.service.js';
 
 // ─── Response schema ──────────────────────────────────────────────────────────
 
 // productImages is an array of objects so n8n can access {{ $json.productImages.url }}
 // and {{ $json.productImages.caption }} after Split Out.
 const productImageSchema = z.object({
-  url: z.string().url(),
+  url:     z.string().url(),
   caption: z.string().optional(),
 });
 
 export type ProductImage = z.infer<typeof productImageSchema>;
 
 const webhookResultSchema = z.object({
-  reply: z.string(),
-  escalate: z.boolean(),
+  reply:         z.string(),
+  escalate:      z.boolean(),
   customerPhone: z.string(),
-  customerName: z.string().nullable(),
+  customerName:  z.string().nullable(),
   productImages: z.array(productImageSchema),
 });
 
 export type WebhookResult = z.infer<typeof webhookResultSchema>;
 
 const EMPTY_RESULT: WebhookResult = {
-  reply: '',
-  escalate: false,
+  reply:         '',
+  escalate:      false,
   customerPhone: '',
-  customerName: null,
+  customerName:  null,
   productImages: [],
 };
 
@@ -58,8 +61,8 @@ function toSafeResult(
       'WebhookResult failed schema validation — escalating instead of silent empty',
     );
     return {
-      reply: 'Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻',
-      escalate: true,
+      reply:         'Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻',
+      escalate:      true,
       customerPhone,
       customerName,
       productImages: [],
@@ -70,10 +73,6 @@ function toSafeResult(
 
 // ─── Integration boundary schemas ─────────────────────────────────────────────
 // Validates what external services return before their data enters business logic.
-// The LLM integration and the image search service are the least stable
-// boundaries in the system — a prompt change, model update, or service refactor
-// can silently change return shapes. Catching that here prevents undefined
-// values from propagating into order creation and product search paths.
 
 // Mirror the full ClaudeIntent union from claude.service.ts.
 // All seven intents must be present — missing any causes valid Claude responses
@@ -81,39 +80,42 @@ function toSafeResult(
 const processMessageResultSchema = z.object({
   intent: z.enum([
     'catalog_query',  // gathering info — Luis asks follow-up questions
-    'product_search', // search ready — searchHints present
+    'product_search', // search ran via tool — productImages populated by agentic loop
     'price_query',    // customer asked about a price
     'create_order',   // order commit — orderHints present
     'order_status',   // customer asked about their order
     'needs_human',    // escalation required
     'general',        // greetings, confirmations, catch-all
   ]),
-  response: z.string().min(1),
-  // searchHints includes optional size field to match claude.service.ts
+  response:      z.string().min(1),
+  // searchHints is kept for forward-compat but is no longer used to drive
+  // product retrieval. Product images come from the agentic loop tool calls.
   searchHints: z
     .object({
       keyword: z.string().min(1),
-      gender: z.enum(['female', 'male', 'unknown']).optional(),
-      size: z.string().optional(),
+      gender:  z.enum(['female', 'male', 'unknown']).optional(),
+      size:    z.string().optional(),
     })
     .optional(),
-  // size and color are required strings in claude.service.ts orderHintSchema
   orderHints: z
     .array(
       z.object({
         productNameHint: z.string().min(1),
-        size: z.string().min(1),
-        color: z.string().min(1),
-        quantity: z.number().int().positive(),
+        size:            z.string().min(1),
+        color:           z.string().min(1),
+        quantity:        z.number().int().positive(),
       }),
     )
     .optional(),
+  // productImages are populated by the agentic loop during tool calls.
+  // Always present (may be empty array) — required by ProcessMessageOutput.
+  productImages: z.array(productImageSchema),
 });
 
 type ProcessMessageResult = z.infer<typeof processMessageResultSchema>;
 
 const imageSearchResultSchema = z.object({
-  reply: z.string().min(1),
+  reply:         z.string().min(1),
   // productImages are raw values — URL normalization happens downstream
   productImages: z.array(z.unknown()).default([]),
 });
@@ -126,11 +128,11 @@ const BUSINESS_INFO = {
   showroomAddress: 'Av. Guadalupe 1390, Chapalita Oriente, Guadalajara, Jalisco',
   businessHours:
     'Lunes a Viernes 10:00am–8:30pm · Sábados 11:00am–7:00pm · Domingos cerrado',
-  shippingPrice: 179,
+  shippingPrice:  179,
   paymentMethods:
     'Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.',
   depositPercent: 30,
-  paymentDays: 20,
+  paymentDays:    20,
 } as const;
 
 // ─── Image message idempotency ────────────────────────────────────────────────
@@ -184,8 +186,8 @@ function toValidUrl(value: unknown): string | undefined {
   }
 }
 
-// Converts raw image search results into ProductImage objects.
-// Caption is omitted — there is no product context available in image search results.
+// Converts raw image search results (from image-search.service.ts) into
+// ProductImage objects. Caption is omitted — no product context available.
 function normalizeProductImages(value: unknown): ProductImage[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -197,25 +199,20 @@ function normalizeProductImages(value: unknown): ProductImage[] {
     .filter((img): img is ProductImage => Boolean(img));
 }
 
-// Returns the first valid image per matched product as a ProductImage with caption.
-// One image per product is intentional — multiple angles would flood the chat.
+// ─── On-demand product search ─────────────────────────────────────────────────
+// Called by claude.service.ts only when Claude invokes the search_products tool.
+// Defers the heavy DB query (gender, categoryGroup, subcategory, images) until
+// actually needed — zero cost for messages that don't involve a product search.
 //
-// TODO: This keyword filter is a temporary heuristic. Once the search_products
-// tool use is introduced in claude.service.ts, product retrieval becomes
-// demand-driven from Claude tool calls and this function should be removed.
-function filterProductsBySearchHints(
-  products: {
-    _id: { toString(): string };
-    name: string;
-    brand: string;
-    price: number;
-    gender?: string;
-    categoryGroup?: string;
-    subcategory?: string;
-    images?: unknown;
-  }[],
-  hints: ClaudeSearchHints,
-): ProductImage[] {
+// Returns ProductSearchItem[] so claude.service.ts can:
+//   1. Format name/brand/price as tool result text sent back to Claude.
+//   2. Accumulate imageUrl/imageCaption into productImages for n8n.
+
+async function searchProductsForClaude(hints: ClaudeSearchHints): Promise<ProductSearchItem[]> {
+  const products = await ProductModel.find({ status: 'active' })
+    .select('name price brand gender categoryGroup subcategory images')
+    .lean();
+
   const keyword = hints.keyword.toLowerCase().trim();
 
   const matched = products.filter((p) => {
@@ -230,24 +227,22 @@ function filterProductsBySearchHints(
       // Normalize DB gender values to Claude hint values before comparing.
       // MongoDB stores 'women'/'men' (Shopify convention) but Claude returns
       // 'female'/'male'. Without this, every gender-filtered search returns empty.
-      const normalizedProductGender = p.gender === 'women'
-        ? 'female'
-        : p.gender === 'men'
-          ? 'male'
-          : p.gender;
+      const normalizedProductGender =
+        p.gender === 'women' ? 'female' : p.gender === 'men' ? 'male' : p.gender;
       if (normalizedProductGender !== hints.gender) return false;
     }
 
     return true;
   });
 
-  return matched.flatMap((p) => {
+  return matched.flatMap((p): ProductSearchItem[] => {
     const images = p.images;
     if (!Array.isArray(images)) return [];
     const url = toValidUrl(images[0]);
     if (!url) return [];
+    // One image per product — multiple angles would flood the chat.
     const caption = `${p.name} — ${p.brand} $${p.price.toLocaleString('es-MX')}`;
-    return [{ url, caption } satisfies ProductImage];
+    return [{ name: p.name, brand: p.brand, price: p.price, imageUrl: url, imageCaption: caption }];
   });
 }
 
@@ -256,11 +251,11 @@ function filterProductsBySearchHints(
 export const handleIncomingMessage = async (
   payload: WebhookPayload,
 ): Promise<WebhookResult> => {
-  const rawFrom = payload.from;
-  const from = normalizePhoneForLookup(rawFrom);
+  const rawFrom    = payload.from;
+  const from       = normalizePhoneForLookup(rawFrom);
   const messageType = payload.messageType;
-  const message = typeof payload.message === 'string' ? payload.message.trim() : '';
-  const messageId =
+  const message    = typeof payload.message === 'string' ? payload.message.trim() : '';
+  const messageId  =
     typeof payload.messageId === 'string' && payload.messageId.trim()
       ? payload.messageId.trim()
       : null;
@@ -270,9 +265,9 @@ export const handleIncomingMessage = async (
   if (!from) {
     logger.info(
       {
-        rawFrom: payload.from,
+        rawFrom:     payload.from,
         messageType: payload.messageType,
-        messageId: payload.messageId,
+        messageId:   payload.messageId,
       },
       'Ignoring non-message webhook event — empty or invalid from field after normalization',
     );
@@ -314,12 +309,12 @@ export const handleIncomingMessage = async (
     { phone: from },
     {
       $setOnInsert: {
-        name: payload.contactName ?? `WhatsApp ${from}`,
-        phone: from,
+        name:           payload.contactName ?? `WhatsApp ${from}`,
+        phone:          from,
         contactChannel: 'whatsapp',
-        gender: CUSTOMER_GENDERS.UNKNOWN,
-        isActive: true,
-        tags: [],
+        gender:         CUSTOMER_GENDERS.UNKNOWN,
+        isActive:       true,
+        tags:           [],
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -355,8 +350,8 @@ export const handleIncomingMessage = async (
     );
   }
 
-  const customerId = customer._id.toString();
-  const customerName = customer.name !== `WhatsApp ${from}` ? customer.name : null;
+  const customerId    = customer._id.toString();
+  const customerName  = customer.name !== `WhatsApp ${from}` ? customer.name : null;
   const customerGender = (customer.gender ?? CUSTOMER_GENDERS.UNKNOWN) as
     | 'female'
     | 'male'
@@ -408,13 +403,13 @@ export const handleIncomingMessage = async (
 
       const imageTurns = [
         {
-          role: 'user' as const,
-          content: '[Imagen enviada por el cliente]',
+          role:      'user' as const,
+          content:   '[Imagen enviada por el cliente]',
           createdAt: new Date(),
         },
         {
-          role: 'assistant' as const,
-          content: reply,
+          role:      'assistant' as const,
+          content:   reply,
           createdAt: new Date(),
         },
       ];
@@ -423,7 +418,7 @@ export const handleIncomingMessage = async (
         { customerId, channel: 'whatsapp' },
         {
           $push: { turns: { $each: imageTurns, $slice: -MAX_CONVERSATION_TURNS } },
-          $set: { lastMessageAt: new Date() },
+          $set:  { lastMessageAt: new Date() },
         },
         { upsert: true, new: true },
       );
@@ -441,13 +436,13 @@ export const handleIncomingMessage = async (
 
       const fallbackTurns = [
         {
-          role: 'user' as const,
-          content: '[Imagen enviada por el cliente]',
+          role:      'user' as const,
+          content:   '[Imagen enviada por el cliente]',
           createdAt: new Date(),
         },
         {
-          role: 'assistant' as const,
-          content: fallbackReply,
+          role:      'assistant' as const,
+          content:   fallbackReply,
           createdAt: new Date(),
         },
       ];
@@ -456,15 +451,15 @@ export const handleIncomingMessage = async (
         { customerId, channel: 'whatsapp' },
         {
           $push: { turns: { $each: fallbackTurns, $slice: -MAX_CONVERSATION_TURNS } },
-          $set: { lastMessageAt: new Date() },
+          $set:  { lastMessageAt: new Date() },
         },
         { upsert: true, new: true },
       );
 
       return toSafeResult(
         {
-          reply: fallbackReply,
-          escalate: true,
+          reply:         fallbackReply,
+          escalate:      true,
           customerPhone: from,
           customerName,
           productImages: [],
@@ -483,25 +478,26 @@ export const handleIncomingMessage = async (
   }).lean();
 
   const conversationHistory = (conversation?.turns ?? []).map((t) => ({
-    role: t.role as 'user' | 'assistant',
+    role:    t.role as 'user' | 'assistant',
     content: t.content,
   }));
 
   const recentOrder = await OrderModel.findOne({ customerId }).sort({ createdAt: -1 }).lean();
 
-  // TODO: This full catalog load runs on every text message and will become the
-  // primary latency and token cost problem as inventory grows. Remove this block
-  // when search_products tool use is introduced in claude.service.ts and product
-  // retrieval becomes demand-driven from Claude tool calls instead of preloaded.
-  const products = await ProductModel.find({ status: 'active' })
-    .select('name price brand gender categoryGroup subcategory images')
+  // Minimal catalog load — only name and price, only for create_order resolution
+  // in findProductByHint below. The heavy product fields (gender, categoryGroup,
+  // subcategory, images) are no longer loaded upfront — they are fetched on
+  // demand inside searchProductsForClaude when Claude calls the search_products
+  // tool. Most messages (greetings, order status, price queries, etc.) never
+  // trigger a product search, so those requests now do zero product DB work.
+  const catalogForOrders = await ProductModel.find({ status: 'active' })
+    .select('name price')
     .lean();
 
-  const catalog = products.map((p) => ({
-    id: p._id.toString(),
-    name: p.name,
+  const catalog = catalogForOrders.map((p) => ({
+    id:    p._id.toString(),
+    name:  p.name,
     price: p.price,
-    brand: p.brand,
   }));
 
   const rawResult = await processMessage({
@@ -510,20 +506,17 @@ export const handleIncomingMessage = async (
     recentOrder: recentOrder
       ? {
           orderNumber: recentOrder.orderNumber,
-          status: recentOrder.status,
-          total: recentOrder.total,
+          status:      recentOrder.status,
+          total:       recentOrder.total,
         }
       : null,
-    catalog,
+    searchProducts: searchProductsForClaude,
     incomingMessage: message,
     conversationHistory,
     businessInfo: BUSINESS_INFO,
   });
 
   // Validate processMessage result at the integration boundary.
-  // A prompt change, model update, or parsing bug can silently change the output
-  // shape. Catching it here prevents undefined values from reaching order
-  // creation and product search logic below.
   const parsedResult = processMessageResultSchema.safeParse(rawResult);
   if (!parsedResult.success) {
     logger.error(
@@ -532,8 +525,8 @@ export const handleIncomingMessage = async (
     );
     return toSafeResult(
       {
-        reply: 'Lo siento bonita, hubo un error procesando tu mensaje. Alguien del equipo te contactará pronto 🙏🏻',
-        escalate: true,
+        reply:         'Lo siento bonita, hubo un error procesando tu mensaje. Alguien del equipo te contactará pronto 🙏🏻',
+        escalate:      true,
         customerPhone: from,
         customerName,
         productImages: [],
@@ -546,14 +539,15 @@ export const handleIncomingMessage = async (
   const result: ProcessMessageResult = parsedResult.data;
 
   let escalate = result.intent === 'needs_human';
-  let productImages: ProductImage[] = [];
 
-  // ── Resolve product images ────────────────────────────────────────────────
-  if (result.intent === 'product_search' && result.searchHints) {
-    productImages = filterProductsBySearchHints(products, result.searchHints);
+  // productImages are populated by the agentic loop during tool calls.
+  // No need to branch on intent — they're always ready in the result.
+  const productImages: ProductImage[] = result.productImages;
+
+  if (result.intent === 'product_search') {
     logger.info(
-      { keyword: result.searchHints.keyword, matches: productImages.length },
-      'Product search — returning matched images',
+      { matches: productImages.length, customerId, messageId },
+      'Product search intent — images from agentic loop tool calls',
     );
   }
 
@@ -588,9 +582,9 @@ export const handleIncomingMessage = async (
 
             return {
               productId: product.id,
-              size: hint.size,
-              color: hint.color,
-              quantity: hint.quantity,
+              size:      hint.size,
+              color:     hint.color,
+              quantity:  hint.quantity,
               unitPrice: product.price,
             };
           })
@@ -607,8 +601,8 @@ export const handleIncomingMessage = async (
             {
               customerId,
               channel: 'whatsapp',
-              items: resolvedItems,
-              notes: [{ message: 'Pedido creado automáticamente desde WhatsApp.', kind: 'system' }],
+              items:   resolvedItems,
+              notes:   [{ message: 'Pedido creado automáticamente desde WhatsApp.', kind: 'system' }],
             },
             null,
             messageId,
@@ -637,15 +631,15 @@ export const handleIncomingMessage = async (
 
   // ── Persist conversation after all business effects are resolved ──────────
   const newTurns = [
-    { role: 'user' as const, content: message, createdAt: new Date() },
-    { role: 'assistant' as const, content: result.response, createdAt: new Date() },
+    { role: 'user' as const,      content: message,          createdAt: new Date() },
+    { role: 'assistant' as const, content: result.response,  createdAt: new Date() },
   ];
 
   await ConversationModel.findOneAndUpdate(
     { customerId, channel: 'whatsapp' },
     {
       $push: { turns: { $each: newTurns, $slice: -MAX_CONVERSATION_TURNS } },
-      $set: { lastMessageAt: new Date() },
+      $set:  { lastMessageAt: new Date() },
     },
     { upsert: true, new: true },
   );
@@ -653,7 +647,7 @@ export const handleIncomingMessage = async (
   logger.info(
     {
       customerId,
-      intent: result.intent,
+      intent:       result.intent,
       historyTurns: conversationHistory.length,
       customerGender,
       messageId,
@@ -663,7 +657,7 @@ export const handleIncomingMessage = async (
 
   return toSafeResult(
     {
-      reply: result.response,
+      reply:         result.response,
       escalate,
       customerPhone: from,
       customerName,
