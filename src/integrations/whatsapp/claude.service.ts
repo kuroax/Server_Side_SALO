@@ -25,15 +25,21 @@ export type ClaudeSearchHints = {
   keyword: string;
   gender?: 'female' | 'male' | 'unknown';
   size?:   string;
+  // Added: allows the bot to filter by color when the customer specifies one.
+  // e.g. "tienes el crop top en negro talla S" → color: "negro"
+  // Stored lowercase in inventory — passed as-is to searchProductsForClaude
+  // which normalizes before querying.
+  color?:  string;
 };
 
 // Returned by the searchProducts callback.
-// name/brand/price are formatted into the tool result text sent back to Claude.
+// name/brand/price/color are formatted into the tool result text sent back to Claude.
 // imageUrl/imageCaption are accumulated into productImages in the agentic loop.
 export type ProductSearchItem = {
   name:          string;
   brand:         string;
   price:         number;
+  color:         string; // Added: real color value from inventory variant
   imageUrl?:     string;
   imageCaption?: string;
 };
@@ -96,6 +102,7 @@ const searchHintsSchema = z.object({
   keyword: z.string().min(1),
   gender:  z.enum(['female', 'male', 'unknown']).optional(),
   size:    z.string().optional(),
+  color:   z.string().optional(), // Added
 });
 
 // No character cap on response — truncation is detected via stop_reason instead.
@@ -126,6 +133,7 @@ const searchProductsInputSchema = z.object({
   keyword: z.string().min(1),
   gender:  z.enum(['female', 'male', 'unknown']).optional(),
   size:    z.string().optional(),
+  color:   z.string().optional(), // Added
 });
 
 // ─── Tool definition ──────────────────────────────────────────────────────────
@@ -134,7 +142,7 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
   name: 'search_products',
   description:
     'Busca productos en el inventario de SALO según criterios del cliente. ' +
-    'Úsala cuando el cliente busque un tipo de prenda, marca o descripción específica. ' +
+    'Úsala cuando el cliente busque un tipo de prenda, marca, color o descripción específica. ' +
     'El sistema enviará las imágenes de los productos encontrados automáticamente al cliente — ' +
     'tu respuesta solo necesita anunciar que los mostrarás.',
   input_schema: {
@@ -153,6 +161,13 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
       size: {
         type: 'string',
         description: 'Talla buscada. Ej: "XS", "S", "M", "L", "XL".',
+      },
+      // Added: lets Claude pass a color hint when the customer specifies one
+      color: {
+        type: 'string',
+        description:
+          'Color buscado, si el cliente lo mencionó. Ej: "negro", "blanco", "beige", "burgundy". ' +
+          'Omitir si el cliente no especificó color.',
       },
     },
     required: ['keyword'],
@@ -206,7 +221,7 @@ NUNCA escales solo porque algo sea vago o general.
 
 Recibirás el historial de mensajes anteriores. Úsalo siempre:
 - Si ya saludaste, NO repitas el saludo — continúa naturalmente donde quedaron
-- Si el cliente ya dio información (talla, preferencia, estilo), recuérdala y no la vuelvas a pedir
+- Si el cliente ya dio información (talla, color, preferencia, estilo), recuérdala y no la vuelvas a pedir
 - Si ya mostraste productos, referencia lo que compartiste en lugar de repetirlo
 - Mantén el tono y la confianza que ya se estableció en la conversación
 
@@ -244,7 +259,7 @@ CUANDO LLAMES search_products Y ENCUENTRES RESULTADOS:
    (el resultado de la herramienta ya trae el cálculo del anticipo — úsalo)
 → Si no sabes la talla, pregúntala.
 → Pregunta preferencia de entrega: "¿Deseas entrega inmediata o te funciona liquidar en 20 días? 🙏🏻"
-→ El sistema enviará las imágenes con nombre y precio — no repitas esa lista.
+→ El sistema enviará las imágenes con nombre, color y precio — no repitas esa lista.
 
 CUANDO EL CLIENTE PIDE MÚLTIPLES PRODUCTOS (ej: "crop tops y calcetines"):
 → Llama search_products para CADA producto por separado (una llamada por tipo de prenda).
@@ -273,10 +288,10 @@ SIEMPRE mantén la conversación y la venta abierta:
 ✓ "Déjame revisar disponibilidad exacta de ese modelo..."
 ✓ "Ahorita lo estoy checando, dame un momento..."
 ✓ "Puede que llegue próximamente — déjame confirmar..."
-✓ Ofrece alternativas inmediatamente: misma categoría, otra marca, otra talla
+✓ Ofrece alternativas inmediatamente: misma categoría, otra marca, otra talla u otro color
 
 FLUJO CORRECTO cuando search_products devuelve 0 resultados:
-1. Intenta una búsqueda alternativa más amplia (sin talla, sin marca, categoría más general)
+1. Intenta una búsqueda alternativa más amplia (sin talla, sin color, sin marca, o categoría más general)
 2. Si la alternativa tiene resultados → muéstralos con product_search
 3. Si la alternativa también devuelve 0 → usa catalog_query, di que estás verificando y ofrece seguimiento
 4. El dueño recibe automáticamente una notificación con el detalle — él confirmará disponibilidad
@@ -286,18 +301,24 @@ FLUJO CORRECTO cuando search_products devuelve 0 resultados:
 Tienes acceso a la herramienta search_products para buscar en el inventario de SALO.
 
 CUÁNDO USARLA:
-→ Cuando el cliente mencione un tipo de prenda, marca o producto específico y ya tengas suficiente información para buscar.
-→ Ejemplos: "tienes crop tops", "busco algo de Alo", "quiero leggings talla S", "algo de Lululemon para mujeres".
+→ Cuando el cliente mencione un tipo de prenda, marca, color o producto específico y ya tengas suficiente información para buscar.
+→ Ejemplos: "tienes crop tops", "busco algo de Alo", "quiero leggings talla S", "algo negro de Lululemon".
 
 CUÁNDO NO USARLA:
 → Cuando aún falta información clave (no sabes ni qué tipo de prenda busca). Pregunta primero.
 → Para preguntas de precio de un producto ya conocido — responde directamente con price_query.
 → Para preguntas de pedidos — usa order_status.
 
+PARÁMETROS DISPONIBLES:
+→ keyword: tipo de prenda o marca (requerido siempre)
+→ gender: "female", "male", o "unknown"
+→ size: talla específica si el cliente la mencionó
+→ color: color específico si el cliente lo mencionó (ej: "negro", "blanco", "beige")
+
 FLUJO CORRECTO:
 1. Llama search_products con los criterios disponibles.
-2. Si encuentras productos: usa intent "product_search" y responde anunciando que los mostrarás.
-3. Si no encuentras productos: responde con catalog_query pidiendo más información o sugiere otras opciones.
+2. Si encuentras resultados: usa intent "product_search" y responde anunciando que los mostrarás.
+3. Si no encuentras resultados: intenta una búsqueda más amplia antes de escalar.
 
 ─── FLUJO DE DESCUBRIMIENTO — CÓMO ENTENDER QUÉ BUSCA EL CLIENTE ─────────────
 
@@ -306,20 +327,12 @@ Tu trabajo es guiar al cliente hasta entender exactamente qué quiere. Esto pued
 PREGUNTAS DE SEGUIMIENTO ÚTILES (úsalas según lo que falte):
 - Tipo de prenda: "¿Qué tipo de prenda buscas? ¿Leggings, bra, top, set, shorts?"
 - Talla: "¿Qué talla manejas?"
-- Uso: "¿Es para entrenar, para el día a día, lifestyle?"
 - Color: "¿Tienes alguna preferencia de color? ¿Negro, neutros, colores?"
+- Uso: "¿Es para entrenar, para el día a día, lifestyle?"
 - Marca: "¿Tienes alguna marca favorita? Manejamos Alo Yoga, Lululemon y Wiskii"
 - Entrega: "¿Lo necesitas para entrega inmediata o te sirve sobre pedido?"
-- Presupuesto (solo si el cliente lo menciona): responde con productos en ese rango
 
 NUNCA hagas más de 2 preguntas en un mismo mensaje. Escoge las más importantes según el contexto.
-
-CUANDO TENGAS SUFICIENTE INFORMACIÓN para buscar (tipo de prenda + cualquier detalle adicional):
-→ Llama search_products. Luego usa intent "product_search".
-→ Tu response solo anuncia que los mostrarás — el sistema envía las imágenes automáticamente.
-
-CUANDO AÚN FALTE INFORMACIÓN CLAVE (no sabes ni qué tipo de prenda busca):
-→ USA intent "catalog_query" y haz UNA o DOS preguntas cálidas para descubrirlo.
 
 ─── MANEJO DE CASOS ESPECÍFICOS ───────────────────────────────────────────────
 
@@ -348,10 +361,10 @@ USA needs_human SOLO para:
 ✓ Solicitudes de devolución o cambio
 ✓ Negociación de precio o condiciones especiales que el bot no puede ofrecer
 ✓ Situaciones donde el cliente está claramente molesto o frustrado
-✓ Preguntas muy específicas sobre entregas personalizadas, tallas especiales, o situaciones fuera de lo normal
+✓ Preguntas muy específicas sobre entregas personalizadas o situaciones fuera de lo normal
 
 NUNCA uses needs_human para:
-✗ Preguntas generales sobre disponibilidad (con cualquier calificador)
+✗ Preguntas generales sobre disponibilidad
 ✗ Preguntas sobre precios del catálogo
 ✗ Mensajes vagos o poco claros — en su lugar, pregunta
 ✗ Preguntas sobre tallas, colores, marcas
@@ -420,9 +433,6 @@ function buildGenderContext(gender: 'female' | 'male' | 'unknown'): string {
 }
 
 // ─── Retry helper ─────────────────────────────────────────────────────────────
-// Retries once on transient non-timeout errors (network failures, 5xx, 429).
-// Timeout errors are not retried — the caller already waited and adding another
-// attempt would double customer-facing latency.
 
 function isRetryableError(err: unknown): boolean {
   if (err instanceof Error && err.name === 'TimeoutError') return false;
@@ -433,8 +443,6 @@ function isRetryableError(err: unknown): boolean {
 }
 
 // ─── Single API call (with one retry) ────────────────────────────────────────
-// Returns the full Anthropic.Message so the agentic loop can inspect
-// stop_reason and content blocks (including tool_use) directly.
 
 async function callOnce(
   params: Anthropic.MessageCreateParamsNonStreaming,
@@ -448,29 +456,15 @@ async function callOnce(
       );
     } catch (err) {
       const isLast = attempt === 1;
-
-      if (isLast || !isRetryableError(err)) {
-        throw err;
-      }
-
-      logger.warn(
-        { err, attempt },
-        'Claude API call failed — retrying after delay',
-      );
+      if (isLast || !isRetryableError(err)) throw err;
+      logger.warn({ err, attempt }, 'Claude API call failed — retrying after delay');
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }
-  // Unreachable — loop always throws or returns
   throw new Error('callOnce: unreachable');
 }
 
 // ─── Agentic loop ─────────────────────────────────────────────────────────────
-// Handles tool_use stop_reason by executing the search_products tool and
-// feeding results back to Claude. Accumulates productImages across all tool
-// calls so they're available alongside the final text response.
-//
-// MAX_TOOL_ITERATIONS is a safety cap. In practice Claude calls search_products
-// at most once per message — the cap prevents runaway loops on unexpected behavior.
 
 type AgenticResult = {
   text:          string;
@@ -491,20 +485,14 @@ async function runAgenticLoop(
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
     const message = await callOnce({ ...baseParams, messages }, timeoutMs);
 
-    // Non-tool stop — extract text and return.
     if (message.stop_reason !== 'tool_use') {
       const text = message.content
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('');
-      return {
-        text,
-        stopReason: message.stop_reason ?? 'unknown',
-        productImages: accumulatedImages,
-      };
+      return { text, stopReason: message.stop_reason ?? 'unknown', productImages: accumulatedImages };
     }
 
-    // Append assistant turn (includes tool_use blocks) before processing tools.
     messages.push({ role: 'assistant', content: message.content });
 
     const toolUseBlocks = message.content.filter(
@@ -514,7 +502,6 @@ async function runAgenticLoop(
 
     for (const toolUse of toolUseBlocks) {
       if (toolUse.name !== 'search_products') {
-        // Unknown tool — return an error so Claude can handle gracefully.
         toolResults.push({
           type:        'tool_result',
           tool_use_id: toolUse.id,
@@ -524,7 +511,6 @@ async function runAgenticLoop(
       }
 
       const parsed = searchProductsInputSchema.safeParse(toolUse.input);
-
       if (!parsed.success) {
         logger.warn(
           { issues: parsed.error.issues, input: toolUse.input },
@@ -549,8 +535,6 @@ async function runAgenticLoop(
         items = [];
       }
 
-      // Accumulate images — these are returned alongside the final text response
-      // and sent to the customer by n8n after Claude finishes.
       for (const item of items) {
         if (item.imageUrl) {
           accumulatedImages.push({ url: item.imageUrl, caption: item.imageCaption });
@@ -559,24 +543,26 @@ async function runAgenticLoop(
 
       // Zero-result phrasing is deliberately instructive, not just informational.
       // Saying "no se encontraron" causes Claude to tell the customer the item is
-      // out of stock — which loses the sale and is often wrong (the product may be
-      // available on special order or about to restock). Instead we tell Claude
-      // the result is an inventory snapshot gap, not a definitive "doesn't exist",
-      // and instruct it to keep the conversation and the sale open.
+      // out of stock — which loses the sale and is often wrong. Instead we tell
+      // Claude the result is an inventory snapshot gap, not a definitive stockout.
       const resultText =
         items.length === 0
-          ? `Inventario activo: 0 resultados para "${hints.keyword}"${hints.size ? ` talla ${hints.size}` : ''}${hints.gender && hints.gender !== 'unknown' ? ` (${hints.gender})` : ''}. ` +
+          ? `Inventario activo: 0 resultados para "${hints.keyword}"` +
+            `${hints.size ? ` talla ${hints.size}` : ''}` +
+            `${hints.color ? ` color ${hints.color}` : ''}` +
+            `${hints.gender && hints.gender !== 'unknown' ? ` (${hints.gender})` : ''}. ` +
             'INSTRUCCIÓN: No confirmes al cliente que el artículo está agotado — el inventario activo no refleja pedidos especiales ni reabastecimientos próximos. ' +
             'Responde que estás revisando disponibilidad exacta. ' +
-            'Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin marca, o categoría más general). ' +
+            'Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin color, sin marca, o categoría más general). ' +
             'Si la búsqueda alternativa también devuelve 0 resultados, responde con catalog_query ofreciendo opciones cercanas y manteniendo la conversación abierta. ' +
             'El dueño ha sido notificado automáticamente para confirmar disponibilidad o reabastecimiento.'
-          : `Encontré ${items.length} producto(s) [entrega inmediata]:\n${items
+          : `Encontré ${items.length} variante(s) disponible(s) [entrega inmediata]:\n${items
               .map((p) => {
                 const deposit = Math.ceil(p.price * 0.3).toLocaleString('es-MX');
-                return `- ${p.name} (${p.brand}) — $${p.price.toLocaleString('es-MX')} MXN | anticipo 30% = $${deposit}`;
+                // Color is now a first-class field so Claude can reference it accurately
+                return `- ${p.name} color ${p.color} (${p.brand}) — $${p.price.toLocaleString('es-MX')} MXN | anticipo 30% = $${deposit}`;
               })
-              .join('\n')}\n\nINSTRUCCIÓN: En tu respuesta de texto (además de anunciar que las imágenes vienen), incluye el precio y el anticipo del primer producto. Ejemplo real: "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo. NO dupliques la lista de productos — las imágenes ya se envían con nombre y precio.`;
+              .join('\n')}\n\nINSTRUCCIÓN: En tu respuesta de texto (además de anunciar que las imágenes vienen), incluye el precio y el anticipo del primer producto. Ejemplo real: "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo. NO dupliques la lista — las imágenes ya se envían con nombre, color y precio.`;
 
       logger.info(
         { hints, matches: items.length, imagesAccumulated: accumulatedImages.length },
@@ -590,7 +576,6 @@ async function runAgenticLoop(
       });
     }
 
-    // Append tool results as a user turn for the next iteration.
     messages.push({ role: 'user', content: toolResults });
   }
 
@@ -612,16 +597,11 @@ export const processMessage = async (
     businessInfo,
   } = context;
 
-  // Dynamic timeout: longer conversations have more input tokens and take more
-  // time. Add 1 second per conversation turn, capped at MAX_TIMEOUT_MS.
   const requestTimeoutMs = Math.min(
     BASE_TIMEOUT_MS + conversationHistory.length * 1_000,
     MAX_TIMEOUT_MS,
   );
 
-  // Context is injected into the system prompt rather than as fake turns.
-  // Catalog is no longer injected here — product retrieval is demand-driven
-  // via the search_products tool when Claude needs to find products.
   const contextSection = `
 ─── CONTEXTO ACTUAL ───────────────────────────────────────────────────────────
 
@@ -630,7 +610,8 @@ ${buildGenderContext(customerGender)}
 
 PRODUCTOS: Usa la herramienta search_products para buscar en el inventario bajo demanda.
 → No tienes un catálogo predefinido — llama la herramienta cuando el cliente busque algo.
-→ Si search_products no devuelve resultados, responde con catalog_query y pide más detalles.
+→ Puedes filtrar por keyword, gender, size y color.
+→ Si search_products no devuelve resultados, intenta una búsqueda más amplia antes de escalar.
 
 PEDIDO RECIENTE DEL CLIENTE:
 ${recentOrder
@@ -688,7 +669,6 @@ INFORMACIÓN DEL NEGOCIO:
     return SAFE_FALLBACK;
   }
 
-  // Truncation check — stop_reason is the authoritative signal from the API.
   if (agenticResult.stopReason === 'max_tokens') {
     logger.warn(
       {
