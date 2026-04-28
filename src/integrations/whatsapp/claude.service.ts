@@ -577,10 +577,22 @@ async function runAgenticLoop(
         }
       }
 
-      // Zero-result phrasing is deliberately instructive, not just informational.
-      // Saying "no se encontraron" causes Claude to tell the customer the item is
-      // out of stock — which loses the sale and is often wrong. Instead we tell
-      // Claude the result is an inventory snapshot gap, not a definitive stockout.
+      // Build the tool result text sent back to Claude.
+      // Deposit instruction is split by result count:
+      //   - 1 product: quote price and deposit directly — customer context is clear
+      //   - 2+ products: do NOT quote a specific deposit — different products may
+      //     have different prices. Instead instruct Claude to ask which product
+      //     the customer is interested in before quoting the deposit. This prevents
+      //     quoting $597 (from a $1,990 product) when the customer picks up a
+      //     $2,500 item from the same gallery.
+      const singleProductInstruction = (p: ProductSearchItem) => {
+        const deposit = Math.ceil(p.price * 0.3).toLocaleString("es-MX");
+        return `INSTRUCCIÓN: En tu respuesta anuncia que las imágenes vienen y menciona el precio y anticipo: "Puedes ordenar con el 30% equivalente a $${deposit} y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo.`;
+      };
+
+      const multiProductInstruction =
+        'INSTRUCCIÓN: Anuncia que las imágenes vienen. NO menciones un anticipo específico todavía — hay varios productos a distintos precios. Pregunta cuál le interesa más a la cliente antes de cotizar el anticipo. Ejemplo: "¿Cuál de estas opciones te llama más la atención? 😊 Cuéntame para darte el detalle del precio y el anticipo."';
+
       const resultText =
         items.length === 0
           ? `Inventario activo: 0 resultados para "${hints.keyword}"` +
@@ -592,17 +604,16 @@ async function runAgenticLoop(
             "Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin color, sin marca, o categoría más general). " +
             "Si la búsqueda alternativa también devuelve 0 resultados, responde con catalog_query ofreciendo opciones cercanas y manteniendo la conversación abierta. " +
             "El dueño ha sido notificado automáticamente para confirmar disponibilidad o reabastecimiento."
-          : `Encontré ${items.length} variante(s) disponible(s) [entrega inmediata]:\n${items
+          : `Encontré ${items.length} producto(s) disponible(s) [entrega inmediata]:\n${items
               .map((p) => {
                 const deposit = Math.ceil(p.price * 0.3).toLocaleString(
                   "es-MX",
                 );
-                // Color is now a first-class field so Claude can reference it accurately
                 return `- ${p.name} color ${p.color} (${p.brand}) — $${p.price.toLocaleString("es-MX")} MXN | anticipo 30% = $${deposit}`;
               })
               .join(
                 "\n",
-              )}\n\nINSTRUCCIÓN: En tu respuesta de texto (además de anunciar que las imágenes vienen), incluye el precio y el anticipo del primer producto. Ejemplo real: "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo. NO dupliques la lista — las imágenes ya se envían con nombre, color y precio.`;
+              )}\n\n${items.length === 1 ? singleProductInstruction(items[0]) : multiProductInstruction}`;
 
       logger.info(
         {
