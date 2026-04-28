@@ -200,10 +200,13 @@ const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
 
-// Raised from 512 to 1024. At 512, product lists with prices and a follow-up
-// question routinely exceeded the limit, producing truncated JSON that failed
-// parsing and returned SAFE_FALLBACK — appearing as a false escalation.
-const MAX_TOKENS = 1024;
+// Raised from 1024 to 2048. With 9 images accumulated from 3 products,
+// the tool result text sent back to Claude is substantially larger than
+// a single-product search. Claude needs enough token budget to receive
+// the full tool result AND produce a valid JSON response. At 1024 tokens
+// the response was truncated or Claude produced plain text instead of JSON,
+// triggering the non_json_response fallback.
+const MAX_TOKENS = 2048;
 
 // Base timeout for short conversations. Extended dynamically per conversation
 // length below — longer history means more input tokens and slower responses.
@@ -331,6 +334,12 @@ FLUJO CORRECTO:
 1. Llama search_products con los criterios disponibles.
 2. Si encuentras resultados: usa intent "product_search" y responde anunciando que los mostrarás.
 3. Si no encuentras resultados: intenta una búsqueda más amplia antes de escalar.
+
+CRÍTICO — DESPUÉS DE LLAMAR search_products SIEMPRE RESPONDE EN JSON:
+Tu respuesta final DESPUÉS de recibir resultados de search_products DEBE ser JSON válido.
+NUNCA respondas en texto libre después de una llamada a la herramienta.
+Ejemplo correcto:
+{"intent":"product_search","response":"Sipi! Te muestro los tops que tengo disponibles ✨"}
 
 ─── FLUJO DE DESCUBRIMIENTO — CÓMO ENTENDER QUÉ BUSCA EL CLIENTE ─────────────
 
