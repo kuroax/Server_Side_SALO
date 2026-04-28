@@ -1,56 +1,62 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { z } from 'zod';
-import { ANTHROPIC_API_KEY } from '#/config/env.js';
-import { logger } from '#/config/logger.js';
+import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
+import { ANTHROPIC_API_KEY } from "#/config/env.js";
+import { logger } from "#/config/logger.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ClaudeIntent =
-  | 'catalog_query'
-  | 'product_search'
-  | 'price_query'
-  | 'create_order'
-  | 'order_status'
-  | 'needs_human'
-  | 'general';
+  | "catalog_query"
+  | "product_search"
+  | "price_query"
+  | "create_order"
+  | "order_status"
+  | "needs_human"
+  | "general";
 
 export type ClaudeOrderHint = {
   productNameHint: string;
-  size:            string;
-  color:           string;
-  quantity:        number;
+  size: string;
+  color: string;
+  quantity: number;
 };
 
 export type ClaudeSearchHints = {
   keyword: string;
-  gender?: 'female' | 'male' | 'unknown';
-  size?:   string;
+  gender?: "female" | "male" | "unknown";
+  size?: string;
   // Added: allows the bot to filter by color when the customer specifies one.
   // e.g. "tienes el crop top en negro talla S" → color: "negro"
   // Stored lowercase in inventory — passed as-is to searchProductsForClaude
   // which normalizes before querying.
-  color?:  string;
+  color?: string;
 };
 
 // Returned by the searchProducts callback.
 // name/brand/price/color are formatted into the tool result text sent back to Claude.
-// imageUrl/imageCaption are accumulated into productImages in the agentic loop.
+// images are accumulated into productImages in the agentic loop — one entry per
+// product photo, all sent to the customer as a gallery.
 export type ProductSearchItem = {
-  name:          string;
-  brand:         string;
-  price:         number;
-  color:         string; // Added: real color value from inventory variant
-  imageUrl?:     string;
-  imageCaption?: string;
+  name: string;
+  brand: string;
+  price: number;
+  color: string;
+  // All product images for this result, each with a caption.
+  // Previously only imageUrl/imageCaption (single image) were stored here,
+  // which caused the first image to be duplicated once per in-stock size variant.
+  // Now searchProductsForClaude deduplicates by product and returns all images.
+  images: Array<{ url: string; caption: string }>;
 };
 
-export type SearchProductsFn = (hints: ClaudeSearchHints) => Promise<ProductSearchItem[]>;
+export type SearchProductsFn = (
+  hints: ClaudeSearchHints,
+) => Promise<ProductSearchItem[]>;
 
 // Internal — shape of Claude's JSON output.
 type ClaudeJsonResult = {
-  intent:       ClaudeIntent;
-  response:     string;
-  orderHints?:  ClaudeOrderHint[];
+  intent: ClaudeIntent;
+  response: string;
+  orderHints?: ClaudeOrderHint[];
   searchHints?: ClaudeSearchHints;
 };
 
@@ -61,31 +67,31 @@ export type ProcessMessageOutput = ClaudeJsonResult & {
 };
 
 export type ConversationTurnInput = {
-  role:    'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
 };
 
 export type ClaudeContext = {
-  customerName:        string | null;
-  customerGender:      'female' | 'male' | 'unknown';
+  customerName: string | null;
+  customerGender: "female" | "male" | "unknown";
   recentOrder: {
     orderNumber: string;
-    status:      string;
-    total:       number;
+    status: string;
+    total: number;
   } | null;
   // Replaces the full catalog injection. Called on-demand by the agentic loop
   // when Claude uses the search_products tool. Only fires when Claude actually
   // needs to search — zero cost for greetings, order status, price queries, etc.
-  searchProducts:      SearchProductsFn;
-  incomingMessage:     string;
+  searchProducts: SearchProductsFn;
+  incomingMessage: string;
   conversationHistory: ConversationTurnInput[];
   businessInfo: {
     showroomAddress: string;
-    businessHours:   string;
-    shippingPrice:   number;
-    paymentMethods:  string;
-    depositPercent:  number;
-    paymentDays:     number;
+    businessHours: string;
+    shippingPrice: number;
+    paymentMethods: string;
+    depositPercent: number;
+    paymentDays: number;
   };
 };
 
@@ -93,36 +99,42 @@ export type ClaudeContext = {
 
 const orderHintSchema = z.object({
   productNameHint: z.string().min(1),
-  size:            z.string().min(1),
-  color:           z.string().min(1),
-  quantity:        z.number().int().positive().max(100),
+  size: z.string().min(1),
+  color: z.string().min(1),
+  quantity: z.number().int().positive().max(100),
 });
 
 const searchHintsSchema = z.object({
   keyword: z.string().min(1),
-  gender:  z.enum(['female', 'male', 'unknown']).optional(),
-  size:    z.string().optional(),
-  color:   z.string().optional(), // Added
+  gender: z.enum(["female", "male", "unknown"]).optional(),
+  size: z.string().optional(),
+  color: z.string().optional(), // Added
 });
 
 // No character cap on response — truncation is detected via stop_reason instead.
 const claudeResultSchema = z.union([
   z.object({
-    intent:      z.literal('create_order'),
-    response:    z.string().min(1),
-    orderHints:  z.array(orderHintSchema).min(1),
+    intent: z.literal("create_order"),
+    response: z.string().min(1),
+    orderHints: z.array(orderHintSchema).min(1),
   }),
   z.object({
     // product_search: searchHints is now optional because the actual search
     // is performed via the search_products tool during the agentic loop.
     // productImages are populated by the loop, not by this JSON field.
-    intent:      z.literal('product_search'),
-    response:    z.string().min(1),
+    intent: z.literal("product_search"),
+    response: z.string().min(1),
     searchHints: searchHintsSchema.optional(),
   }),
   z.object({
-    intent:     z.enum(['catalog_query', 'price_query', 'order_status', 'needs_human', 'general']),
-    response:   z.string().min(1),
+    intent: z.enum([
+      "catalog_query",
+      "price_query",
+      "order_status",
+      "needs_human",
+      "general",
+    ]),
+    response: z.string().min(1),
     orderHints: z.undefined().optional(),
   }),
 ]);
@@ -131,54 +143,54 @@ const claudeResultSchema = z.union([
 
 const searchProductsInputSchema = z.object({
   keyword: z.string().min(1),
-  gender:  z.enum(['female', 'male', 'unknown']).optional(),
-  size:    z.string().optional(),
-  color:   z.string().optional(), // Added
+  gender: z.enum(["female", "male", "unknown"]).optional(),
+  size: z.string().optional(),
+  color: z.string().optional(), // Added
 });
 
 // ─── Tool definition ──────────────────────────────────────────────────────────
 
 const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
-  name: 'search_products',
+  name: "search_products",
   description:
-    'Busca productos en el inventario de SALO según criterios del cliente. ' +
-    'Úsala cuando el cliente busque un tipo de prenda, marca, color o descripción específica. ' +
-    'El sistema enviará las imágenes de los productos encontrados automáticamente al cliente — ' +
-    'tu respuesta solo necesita anunciar que los mostrarás.',
+    "Busca productos en el inventario de SALO según criterios del cliente. " +
+    "Úsala cuando el cliente busque un tipo de prenda, marca, color o descripción específica. " +
+    "El sistema enviará las imágenes de los productos encontrados automáticamente al cliente — " +
+    "tu respuesta solo necesita anunciar que los mostrarás.",
   input_schema: {
-    type: 'object' as const,
+    type: "object" as const,
     properties: {
       keyword: {
-        type: 'string',
+        type: "string",
         description:
           'Tipo de prenda, nombre o marca. Ej: "legging", "crop top", "bra", "short", "Alo", "Lululemon".',
       },
       gender: {
-        type: 'string',
-        enum: ['female', 'male', 'unknown'],
-        description: 'Género del cliente o del producto buscado.',
+        type: "string",
+        enum: ["female", "male", "unknown"],
+        description: "Género del cliente o del producto buscado.",
       },
       size: {
-        type: 'string',
+        type: "string",
         description: 'Talla buscada. Ej: "XS", "S", "M", "L", "XL".',
       },
       // Added: lets Claude pass a color hint when the customer specifies one
       color: {
-        type: 'string',
+        type: "string",
         description:
           'Color buscado, si el cliente lo mencionó. Ej: "negro", "blanco", "beige", "burgundy". ' +
-          'Omitir si el cliente no especificó color.',
+          "Omitir si el cliente no especificó color.",
       },
     },
-    required: ['keyword'],
+    required: ["keyword"],
   },
 };
 
 // ─── Safe fallback ────────────────────────────────────────────────────────────
 
 const SAFE_FALLBACK: ProcessMessageOutput = {
-  intent:        'needs_human',
-  response:      'Ahorita te confirmo eso bonita, dame un momento 🙏🏻',
+  intent: "needs_human",
+  response: "Ahorita te confirmo eso bonita, dame un momento 🙏🏻",
   productImages: [],
 };
 
@@ -186,7 +198,7 @@ const SAFE_FALLBACK: ProcessMessageOutput = {
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL = "claude-sonnet-4-20250514";
 
 // Raised from 512 to 1024. At 512, product lists with prices and a follow-up
 // question routinely exceeded the limit, producing truncated JSON that failed
@@ -197,9 +209,9 @@ const MAX_TOKENS = 1024;
 // length below — longer history means more input tokens and slower responses.
 // MAX_TIMEOUT_MS raised from 20s to 30s to accommodate tool call round trips
 // (DB query + second Claude call). In practice tool calls add ~1-2s total.
-const BASE_TIMEOUT_MS    = 10_000;
-const MAX_TIMEOUT_MS     = 30_000;
-const RETRY_DELAY_MS     = 1_000;
+const BASE_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS = 30_000;
+const RETRY_DELAY_MS = 1_000;
 const MAX_TOOL_ITERATIONS = 3; // safety cap — Claude should use the tool at most once per message
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -420,13 +432,13 @@ Para cualquier otro intent (orderHints PROHIBIDO):
 
 // ─── Gender context builder ───────────────────────────────────────────────────
 
-function buildGenderContext(gender: 'female' | 'male' | 'unknown'): string {
+function buildGenderContext(gender: "female" | "male" | "unknown"): string {
   switch (gender) {
-    case 'male':
+    case "male":
       return 'GÉNERO DEL CLIENTE: masculino — usa "amigo", tono directo. NUNCA uses "bonita", "bella", "corazón", "linda".';
-    case 'female':
+    case "female":
       return 'GÉNERO DEL CLIENTE: femenino — usa "bonita", "bella", "corazón", "linda" naturalmente.';
-    case 'unknown':
+    case "unknown":
     default:
       return 'GÉNERO DEL CLIENTE: desconocido — usa femenino por defecto ("bonita", "bella") hasta confirmar.';
   }
@@ -435,7 +447,7 @@ function buildGenderContext(gender: 'female' | 'male' | 'unknown'): string {
 // ─── Retry helper ─────────────────────────────────────────────────────────────
 
 function isRetryableError(err: unknown): boolean {
-  if (err instanceof Error && err.name === 'TimeoutError') return false;
+  if (err instanceof Error && err.name === "TimeoutError") return false;
   if (err instanceof Anthropic.APIError) {
     return [429, 500, 502, 503, 529].includes(err.status);
   }
@@ -450,25 +462,27 @@ async function callOnce(
 ): Promise<Anthropic.Message> {
   for (let attempt = 0; attempt <= 1; attempt++) {
     try {
-      return await client.messages.create(
-        params,
-        { signal: AbortSignal.timeout(timeoutMs) },
-      );
+      return await client.messages.create(params, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
     } catch (err) {
       const isLast = attempt === 1;
       if (isLast || !isRetryableError(err)) throw err;
-      logger.warn({ err, attempt }, 'Claude API call failed — retrying after delay');
+      logger.warn(
+        { err, attempt },
+        "Claude API call failed — retrying after delay",
+      );
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }
-  throw new Error('callOnce: unreachable');
+  throw new Error("callOnce: unreachable");
 }
 
 // ─── Agentic loop ─────────────────────────────────────────────────────────────
 
 type AgenticResult = {
-  text:          string;
-  stopReason:    string;
+  text: string;
+  stopReason: string;
   productImages: Array<{ url: string; caption?: string }>;
 };
 
@@ -485,27 +499,31 @@ async function runAgenticLoop(
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
     const message = await callOnce({ ...baseParams, messages }, timeoutMs);
 
-    if (message.stop_reason !== 'tool_use') {
+    if (message.stop_reason !== "tool_use") {
       const text = message.content
-        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
         .map((b) => b.text)
-        .join('');
-      return { text, stopReason: message.stop_reason ?? 'unknown', productImages: accumulatedImages };
+        .join("");
+      return {
+        text,
+        stopReason: message.stop_reason ?? "unknown",
+        productImages: accumulatedImages,
+      };
     }
 
-    messages.push({ role: 'assistant', content: message.content });
+    messages.push({ role: "assistant", content: message.content });
 
     const toolUseBlocks = message.content.filter(
-      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
     );
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolUseBlocks) {
-      if (toolUse.name !== 'search_products') {
+      if (toolUse.name !== "search_products") {
         toolResults.push({
-          type:        'tool_result',
+          type: "tool_result",
           tool_use_id: toolUse.id,
-          content:     `Error: herramienta '${toolUse.name}' no reconocida.`,
+          content: `Error: herramienta '${toolUse.name}' no reconocida.`,
         });
         continue;
       }
@@ -514,30 +532,39 @@ async function runAgenticLoop(
       if (!parsed.success) {
         logger.warn(
           { issues: parsed.error.issues, input: toolUse.input },
-          'search_products tool call — invalid input from Claude',
+          "search_products tool call — invalid input from Claude",
         );
         toolResults.push({
-          type:        'tool_result',
+          type: "tool_result",
           tool_use_id: toolUse.id,
-          content:     'Error: parámetros de búsqueda inválidos.',
+          content: "Error: parámetros de búsqueda inválidos.",
         });
         continue;
       }
 
       const hints = parsed.data;
-      logger.info({ hints, iteration }, 'search_products tool call — querying inventory');
+      logger.info(
+        { hints, iteration },
+        "search_products tool call — querying inventory",
+      );
 
       let items: ProductSearchItem[];
       try {
         items = await searchProducts(hints);
       } catch (err) {
-        logger.error({ err, hints }, 'searchProducts callback threw — returning empty result to Claude');
+        logger.error(
+          { err, hints },
+          "searchProducts callback threw — returning empty result to Claude",
+        );
         items = [];
       }
 
       for (const item of items) {
-        if (item.imageUrl) {
-          accumulatedImages.push({ url: item.imageUrl, caption: item.imageCaption });
+        // item.images is now an array of all product photos.
+        // Each image is pushed individually so the customer receives a full gallery
+        // in the order the owner uploaded them — main photo first.
+        for (const img of item.images) {
+          accumulatedImages.push({ url: img.url, caption: img.caption });
         }
       }
 
@@ -548,38 +575,48 @@ async function runAgenticLoop(
       const resultText =
         items.length === 0
           ? `Inventario activo: 0 resultados para "${hints.keyword}"` +
-            `${hints.size ? ` talla ${hints.size}` : ''}` +
-            `${hints.color ? ` color ${hints.color}` : ''}` +
-            `${hints.gender && hints.gender !== 'unknown' ? ` (${hints.gender})` : ''}. ` +
-            'INSTRUCCIÓN: No confirmes al cliente que el artículo está agotado — el inventario activo no refleja pedidos especiales ni reabastecimientos próximos. ' +
-            'Responde que estás revisando disponibilidad exacta. ' +
-            'Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin color, sin marca, o categoría más general). ' +
-            'Si la búsqueda alternativa también devuelve 0 resultados, responde con catalog_query ofreciendo opciones cercanas y manteniendo la conversación abierta. ' +
-            'El dueño ha sido notificado automáticamente para confirmar disponibilidad o reabastecimiento.'
+            `${hints.size ? ` talla ${hints.size}` : ""}` +
+            `${hints.color ? ` color ${hints.color}` : ""}` +
+            `${hints.gender && hints.gender !== "unknown" ? ` (${hints.gender})` : ""}. ` +
+            "INSTRUCCIÓN: No confirmes al cliente que el artículo está agotado — el inventario activo no refleja pedidos especiales ni reabastecimientos próximos. " +
+            "Responde que estás revisando disponibilidad exacta. " +
+            "Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin color, sin marca, o categoría más general). " +
+            "Si la búsqueda alternativa también devuelve 0 resultados, responde con catalog_query ofreciendo opciones cercanas y manteniendo la conversación abierta. " +
+            "El dueño ha sido notificado automáticamente para confirmar disponibilidad o reabastecimiento."
           : `Encontré ${items.length} variante(s) disponible(s) [entrega inmediata]:\n${items
               .map((p) => {
-                const deposit = Math.ceil(p.price * 0.3).toLocaleString('es-MX');
+                const deposit = Math.ceil(p.price * 0.3).toLocaleString(
+                  "es-MX",
+                );
                 // Color is now a first-class field so Claude can reference it accurately
-                return `- ${p.name} color ${p.color} (${p.brand}) — $${p.price.toLocaleString('es-MX')} MXN | anticipo 30% = $${deposit}`;
+                return `- ${p.name} color ${p.color} (${p.brand}) — $${p.price.toLocaleString("es-MX")} MXN | anticipo 30% = $${deposit}`;
               })
-              .join('\n')}\n\nINSTRUCCIÓN: En tu respuesta de texto (además de anunciar que las imágenes vienen), incluye el precio y el anticipo del primer producto. Ejemplo real: "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo. NO dupliques la lista — las imágenes ya se envían con nombre, color y precio.`;
+              .join(
+                "\n",
+              )}\n\nINSTRUCCIÓN: En tu respuesta de texto (además de anunciar que las imágenes vienen), incluye el precio y el anticipo del primer producto. Ejemplo real: "Puedes ordenar con el 30% equivalente a $X y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo. NO dupliques la lista — las imágenes ya se envían con nombre, color y precio.`;
 
       logger.info(
-        { hints, matches: items.length, imagesAccumulated: accumulatedImages.length },
-        'search_products tool call — results returned to Claude',
+        {
+          hints,
+          matches: items.length,
+          imagesAccumulated: accumulatedImages.length,
+        },
+        "search_products tool call — results returned to Claude",
       );
 
       toolResults.push({
-        type:        'tool_result',
+        type: "tool_result",
         tool_use_id: toolUse.id,
-        content:     resultText,
+        content: resultText,
       });
     }
 
-    messages.push({ role: 'user', content: toolResults });
+    messages.push({ role: "user", content: toolResults });
   }
 
-  throw new Error('runAgenticLoop: exceeded MAX_TOOL_ITERATIONS without final text response');
+  throw new Error(
+    "runAgenticLoop: exceeded MAX_TOOL_ITERATIONS without final text response",
+  );
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -605,7 +642,7 @@ export const processMessage = async (
   const contextSection = `
 ─── CONTEXTO ACTUAL ───────────────────────────────────────────────────────────
 
-CLIENTE: ${customerName ?? 'Cliente nueva'}
+CLIENTE: ${customerName ?? "Cliente nueva"}
 ${buildGenderContext(customerGender)}
 
 PRODUCTOS: Usa la herramienta search_products para buscar en el inventario bajo demanda.
@@ -614,10 +651,11 @@ PRODUCTOS: Usa la herramienta search_products para buscar en el inventario bajo 
 → Si search_products no devuelve resultados, intenta una búsqueda más amplia antes de escalar.
 
 PEDIDO RECIENTE DEL CLIENTE:
-${recentOrder
+${
+  recentOrder
     ? `${recentOrder.orderNumber} — ${recentOrder.status} — $${recentOrder.total} MXN`
-    : 'Sin pedidos previos.'
-  }
+    : "Sin pedidos previos."
+}
 
 INFORMACIÓN DEL NEGOCIO:
 - Showroom: ${businessInfo.showroomAddress}
@@ -630,17 +668,17 @@ INFORMACIÓN DEL NEGOCIO:
 
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
-    { role: 'user', content: incomingMessage },
+    { role: "user", content: incomingMessage },
   ];
 
   logger.info(
     {
-      hasRecentOrder:   !!recentOrder,
-      historyTurns:     conversationHistory.length,
+      hasRecentOrder: !!recentOrder,
+      historyTurns: conversationHistory.length,
       customerGender,
       requestTimeoutMs,
     },
-    'Calling Claude API (agentic loop)',
+    "Calling Claude API (agentic loop)",
   );
 
   let agenticResult: AgenticResult;
@@ -648,36 +686,41 @@ INFORMACIÓN DEL NEGOCIO:
   try {
     agenticResult = await runAgenticLoop(
       {
-        model:      CLAUDE_MODEL,
+        model: CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
-        system:     fullSystemPrompt,
-        tools:      [SEARCH_PRODUCTS_TOOL],
+        system: fullSystemPrompt,
+        tools: [SEARCH_PRODUCTS_TOOL],
         messages,
       },
       requestTimeoutMs,
       searchProducts,
     );
   } catch (err) {
-    const isTimeout = err instanceof Error && err.name === 'TimeoutError';
-    const failureReason = isTimeout ? 'api_timeout' : 'api_error';
+    const isTimeout = err instanceof Error && err.name === "TimeoutError";
+    const failureReason = isTimeout ? "api_timeout" : "api_error";
     logger.error(
-      { err, failureReason, historyTurns: conversationHistory.length, requestTimeoutMs },
+      {
+        err,
+        failureReason,
+        historyTurns: conversationHistory.length,
+        requestTimeoutMs,
+      },
       isTimeout
-        ? 'Claude API timed out — returning safe fallback'
-        : 'Claude API call failed — returning safe fallback',
+        ? "Claude API timed out — returning safe fallback"
+        : "Claude API call failed — returning safe fallback",
     );
     return SAFE_FALLBACK;
   }
 
-  if (agenticResult.stopReason === 'max_tokens') {
+  if (agenticResult.stopReason === "max_tokens") {
     logger.warn(
       {
-        failureReason:   'truncated_response',
-        stopReason:      agenticResult.stopReason,
-        historyTurns:    conversationHistory.length,
-        rawTextPreview:  agenticResult.text.slice(0, 200),
+        failureReason: "truncated_response",
+        stopReason: agenticResult.stopReason,
+        historyTurns: conversationHistory.length,
+        rawTextPreview: agenticResult.text.slice(0, 200),
       },
-      'Claude response was truncated at token limit — increase MAX_TOKENS or reduce prompt size',
+      "Claude response was truncated at token limit — increase MAX_TOKENS or reduce prompt size",
     );
     return SAFE_FALLBACK;
   }
@@ -687,12 +730,17 @@ INFORMACIÓN DEL NEGOCIO:
   try {
     parsed = JSON.parse(agenticResult.text);
   } catch {
-    const rawTextPreview = agenticResult.text.length > 200
-      ? `${agenticResult.text.slice(0, 200)}…`
-      : agenticResult.text;
+    const rawTextPreview =
+      agenticResult.text.length > 200
+        ? `${agenticResult.text.slice(0, 200)}…`
+        : agenticResult.text;
     logger.warn(
-      { failureReason: 'non_json_response', rawTextPreview, rawTextLength: agenticResult.text.length },
-      'Claude returned non-JSON — returning safe fallback',
+      {
+        failureReason: "non_json_response",
+        rawTextPreview,
+        rawTextLength: agenticResult.text.length,
+      },
+      "Claude returned non-JSON — returning safe fallback",
     );
     return SAFE_FALLBACK;
   }
@@ -701,20 +749,23 @@ INFORMACIÓN DEL NEGOCIO:
 
   if (!validated.success) {
     logger.warn(
-      { failureReason: 'schema_validation_failed', issues: validated.error.issues },
-      'Claude output failed schema validation — returning safe fallback',
+      {
+        failureReason: "schema_validation_failed",
+        issues: validated.error.issues,
+      },
+      "Claude output failed schema validation — returning safe fallback",
     );
     return SAFE_FALLBACK;
   }
 
   logger.info(
     {
-      intent:        validated.data.intent,
-      historyTurns:  conversationHistory.length,
-      stopReason:    agenticResult.stopReason,
+      intent: validated.data.intent,
+      historyTurns: conversationHistory.length,
+      stopReason: agenticResult.stopReason,
       productImages: agenticResult.productImages.length,
     },
-    'Claude response validated successfully',
+    "Claude response validated successfully",
   );
 
   return {
