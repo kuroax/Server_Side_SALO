@@ -57,7 +57,9 @@ type ClaudeJsonResult = {
   intent: ClaudeIntent;
   response: string;
   orderHints?: ClaudeOrderHint[];
-  searchHints?: ClaudeSearchHints;
+  // searchHints is intentionally excluded: it was previously echoed back by
+  // Claude in the JSON but is never read by processMessage or its callers.
+  // Removing it prevents the type from implying a capability that doesn't exist.
 };
 
 // Public — what processMessage returns.
@@ -119,12 +121,12 @@ const claudeResultSchema = z.union([
     orderHints: z.array(orderHintSchema).min(1),
   }),
   z.object({
-    // product_search: searchHints is now optional because the actual search
-    // is performed via the search_products tool during the agentic loop.
-    // productImages are populated by the loop, not by this JSON field.
+    // product_search: the actual search is performed via the search_products tool
+    // during the agentic loop. productImages are populated by the loop, not by
+    // this JSON field. searchHints is intentionally omitted — Claude sometimes
+    // echoes it back but nothing downstream reads it, so we don't validate it.
     intent: z.literal("product_search"),
     response: z.string().min(1),
-    searchHints: searchHintsSchema.optional(),
   }),
   z.object({
     intent: z.enum([
@@ -188,11 +190,19 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
 
 // ─── Safe fallback ────────────────────────────────────────────────────────────
 
-const SAFE_FALLBACK: ProcessMessageOutput = {
+// Returns a NEW object on every call — prevents callers from mutating a shared
+// singleton (especially the productImages array). Also gender-aware so male
+// customers don't receive a female-gendered fallback on API failures.
+const SAFE_FALLBACK = (
+  gender: "female" | "male" | "unknown" = "unknown",
+): ProcessMessageOutput => ({
   intent: "needs_human",
-  response: "Ahorita te confirmo eso bonita, dame un momento 🙏🏻",
+  response:
+    gender === "male"
+      ? "Permíteme un momento amigo, ahorita te atiendo 🙏🏻"
+      : "Permíteme un momento bonita, ahorita te atiendo 🙏🏻",
   productImages: [],
-};
+});
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
@@ -280,8 +290,8 @@ CUANDO EL CLIENTE PIDE MÚLTIPLES PRODUCTOS (ej: "crop tops y calcetines"):
 → Llama search_products para CADA producto por separado (una llamada por tipo de prenda).
 → En tu respuesta de texto maneja cada uno explícitamente:
    - Lo que encontraste: "Te encontré crop tops disponibles, te los muestro 🙌🏼"
-   - Lo que no encontraste: "Los calcetines los estoy checando para confirmarte disponibilidad exacta"
-→ Nunca digas que algo está agotado — solo que lo estás verificando.
+   - Lo que no encontraste: intenta una búsqueda más amplia primero. Si sigue sin resultados, ofrece una alternativa cercana (otra categoría, otra marca). Si es genuinamente necesario involucrar al dueño, usa needs_human.
+→ NUNCA digas "lo estoy checando" o "te confirmo después" — si no tienes el dato, busca o escala ahora.
 
 CUANDO EL CLIENTE CONFIRMA PAGO:
 "Mil Gracias!!! Que se te multiplique 70 mil veces 7! 💫"
@@ -299,17 +309,17 @@ NUNCA uses lenguaje definitivo de agotamiento:
 ✗ "Se me agotaron" / "No lo tengo" / "No hay disponible" / "No lo manejo"
 ✗ Cualquier frase que cierre la puerta a la venta
 
-SIEMPRE mantén la conversación y la venta abierta:
-✓ "Déjame revisar disponibilidad exacta de ese modelo..."
-✓ "Ahorita lo estoy checando, dame un momento..."
-✓ "Puede que llegue próximamente — déjame confirmar..."
-✓ Ofrece alternativas inmediatamente: misma categoría, otra marca, otra talla u otro color
+NUNCA uses frases que prometan una confirmación futura sin escalar realmente:
+✗ "Déjame revisar disponibilidad exacta..." (suena a que vas a checar después — no lo harás)
+✗ "Ahorita lo estoy checando, dame un momento..." (implica seguimiento que nunca llega)
+✗ "Te confirmo en un momento..." / "Espera a que confirme..."
+✗ Cualquier frase que haga al cliente esperar una respuesta que no va a llegar
 
 FLUJO CORRECTO cuando search_products devuelve 0 resultados:
-1. Intenta una búsqueda alternativa más amplia (sin talla, sin color, sin marca, o categoría más general)
+1. Intenta UNA búsqueda alternativa más amplia (sin talla, sin color, sin marca, o categoría más general)
 2. Si la alternativa tiene resultados → muéstralos con product_search
-3. Si la alternativa también devuelve 0 → usa catalog_query, di que estás verificando y ofrece seguimiento
-4. El dueño recibe automáticamente una notificación con el detalle — él confirmará disponibilidad
+3. Si la alternativa también devuelve 0 → ofrece una alternativa de producto disponible inmediatamente (otra categoría, otra marca, otro color), O usa needs_human para que el dueño realmente sea notificado y pueda hacer seguimiento
+4. NUNCA menciones al dueño ni prometas seguimiento a menos que uses needs_human — ese es el único mecanismo real de notificación
 
 ─── HERRAMIENTA: search_products ──────────────────────────────────────────────
 
@@ -599,11 +609,11 @@ async function runAgenticLoop(
             `${hints.size ? ` talla ${hints.size}` : ""}` +
             `${hints.color ? ` color ${hints.color}` : ""}` +
             `${hints.gender && hints.gender !== "unknown" ? ` (${hints.gender})` : ""}. ` +
-            "INSTRUCCIÓN: No confirmes al cliente que el artículo está agotado — el inventario activo no refleja pedidos especiales ni reabastecimientos próximos. " +
-            "Responde que estás revisando disponibilidad exacta. " +
+            "INSTRUCCIÓN: NO digas al cliente que estás revisando ni que te dio un momento — eso implica un seguimiento que no va a ocurrir. " +
             "Intenta una búsqueda alternativa llamando search_products con un término más amplio (sin talla, sin color, sin marca, o categoría más general). " +
-            "Si la búsqueda alternativa también devuelve 0 resultados, responde con catalog_query ofreciendo opciones cercanas y manteniendo la conversación abierta. " +
-            "El dueño ha sido notificado automáticamente para confirmar disponibilidad o reabastecimiento."
+            "Si la búsqueda alternativa también devuelve 0 resultados, ofrece una alternativa de producto disponible inmediatamente (otra categoría, otra marca, otro color) " +
+            "o usa needs_human para que el dueño sea notificado realmente y pueda hacer seguimiento. " +
+            "NUNCA menciones al dueño ni prometas confirmación futura a menos que uses needs_human."
           : `Encontré ${items.length} producto(s) disponible(s) [entrega inmediata]:\n${items
               .map((p) => {
                 const deposit = Math.ceil(p.price * 0.3).toLocaleString(
@@ -631,11 +641,20 @@ async function runAgenticLoop(
       });
     }
 
-    messages.push({ role: "user", content: toolResults });
+    // Guard: never push an empty user turn — the Anthropic API rejects it with 400.
+    // This can happen if every toolUse block was an unknown tool or had invalid
+    // input, producing zero valid toolResults entries.
+    if (toolResults.length > 0) {
+      messages.push({ role: "user", content: toolResults });
+    }
   }
 
+  // NOTE on accumulatedImages: images are pushed once per successful tool call.
+  // callOnce retries only on the Claude API call itself (before tool results are
+  // processed), so duplicate pushes are not possible today. If retry logic ever
+  // expands to the loop level, add URL-based deduplication here before returning.
   throw new Error(
-    "runAgenticLoop: exceeded MAX_TOOL_ITERATIONS without final text response",
+    "runAgenticLoop: tool_loop_exhausted — exceeded MAX_TOOL_ITERATIONS without final text response",
   );
 }
 
@@ -657,7 +676,14 @@ export const processMessage = async (
   const requestTimeoutMs = Math.min(
     BASE_TIMEOUT_MS + conversationHistory.length * 1_000,
     MAX_TIMEOUT_MS,
+    // NOTE: timeout stops scaling at 20 turns (10_000 + 20*1_000 = 30_000 = cap).
+    // Longer conversations don't get extra time. If p99 latency climbs on long
+    // histories, raise MAX_TIMEOUT_MS rather than the per-turn increment.
   );
+
+  // Sanitize incoming message: cap length to prevent abnormally long payloads
+  // from bloating token usage or triggering prompt-injection via extreme length.
+  const sanitizedMessage = incomingMessage.slice(0, 2000);
 
   const contextSection = `
 ─── CONTEXTO ACTUAL ───────────────────────────────────────────────────────────
@@ -688,7 +714,7 @@ INFORMACIÓN DEL NEGOCIO:
 
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
-    { role: "user", content: incomingMessage },
+    { role: "user", content: sanitizedMessage },
   ];
 
   logger.info(
@@ -717,7 +743,13 @@ INFORMACIÓN DEL NEGOCIO:
     );
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "TimeoutError";
-    const failureReason = isTimeout ? "api_timeout" : "api_error";
+    const isLoopExhausted =
+      err instanceof Error && err.message.includes("tool_loop_exhausted");
+    const failureReason = isTimeout
+      ? "api_timeout"
+      : isLoopExhausted
+        ? "tool_loop_exhausted"
+        : "api_error";
     logger.error(
       {
         err,
@@ -727,9 +759,11 @@ INFORMACIÓN DEL NEGOCIO:
       },
       isTimeout
         ? "Claude API timed out — returning safe fallback"
-        : "Claude API call failed — returning safe fallback",
+        : isLoopExhausted
+          ? "Claude agentic loop exhausted MAX_TOOL_ITERATIONS — returning safe fallback"
+          : "Claude API call failed — returning safe fallback",
     );
-    return SAFE_FALLBACK;
+    return SAFE_FALLBACK(customerGender);
   }
 
   if (agenticResult.stopReason === "max_tokens") {
@@ -742,7 +776,7 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude response was truncated at token limit — increase MAX_TOKENS or reduce prompt size",
     );
-    return SAFE_FALLBACK;
+    return SAFE_FALLBACK(customerGender);
   }
 
   let parsed: unknown;
@@ -762,7 +796,7 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude returned non-JSON — returning safe fallback",
     );
-    return SAFE_FALLBACK;
+    return SAFE_FALLBACK(customerGender);
   }
 
   const validated = claudeResultSchema.safeParse(parsed);
@@ -775,7 +809,7 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude output failed schema validation — returning safe fallback",
     );
-    return SAFE_FALLBACK;
+    return SAFE_FALLBACK(customerGender);
   }
 
   logger.info(
@@ -787,6 +821,24 @@ INFORMACIÓN DEL NEGOCIO:
     },
     "Claude response validated successfully",
   );
+
+  // ─── Hallucinated-promise detection ─────────────────────────────────────────
+  // Detects when Luis promises follow-up but intent is not needs_human (meaning
+  // no owner notification actually fires). Does not block the response — logs
+  // for pilot-week review so the system prompt can be tightened further.
+  // Uses regex to catch phrasing variants that simple substring checks miss.
+  const suspiciousPattern =
+    /d[eé]j[ae]me?\s+revisar|lo estoy (checando|revisando)|te (confirmo|aviso)|en breve te (digo|confirmo)|estoy revisando disponibilidad/i;
+  const isEscalating = validated.data.intent === "needs_human";
+  if (!isEscalating && suspiciousPattern.test(validated.data.response)) {
+    logger.warn(
+      {
+        intent: validated.data.intent,
+        responsePreview: validated.data.response.slice(0, 200),
+      },
+      "[Luis] Hallucinated confirmation promise detected — review system prompt adherence",
+    );
+  }
 
   return {
     ...validated.data,
