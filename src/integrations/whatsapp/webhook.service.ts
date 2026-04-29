@@ -38,13 +38,15 @@ const webhookResultSchema = z.object({
 
 export type WebhookResult = z.infer<typeof webhookResultSchema>;
 
-const EMPTY_RESULT: WebhookResult = {
+// Returns a new object on every call — prevents shared array mutation across
+// requests if any caller ever does result.productImages.push(...).
+const emptyResult = (): WebhookResult => ({
   reply: "",
   escalate: false,
   customerPhone: "",
   customerName: null,
   productImages: [],
-};
+});
 
 function toSafeResult(
   raw: unknown,
@@ -75,6 +77,14 @@ function toSafeResult(
     };
   }
   return parsed.data;
+}
+
+// Gender-aware error reply — used in fallback paths where customerGender
+// is already resolved. Prevents female-gendered apologies to male customers.
+function buildErrorReply(gender: "female" | "male" | "unknown"): string {
+  return gender === "male"
+    ? "Lo siento amigo, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻"
+    : "Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻";
 }
 
 // ─── Escalation message builder ───────────────────────────────────────────────
@@ -195,6 +205,8 @@ const BUSINESS_INFO = {
 
 // ─── Image message idempotency ────────────────────────────────────────────────
 
+// WARNING: process-local — deduplication breaks if Railway scales to >1 instance.
+// Replace with a Redis TTL key or MongoDB TTL collection before horizontal scaling.
 const recentImageMessageIds = new Set<string>();
 const IMAGE_DEDUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -275,32 +287,57 @@ async function searchProductsForClaude(
 ): Promise<ProductSearchItem[]> {
   const keyword = hints.keyword.toLowerCase().trim();
 
-  // Step 1: Match products by keyword, brand, category, or subcategory.
-  // Gender normalization: DB stores 'women'/'men' (Shopify), Claude sends 'female'/'male'.
-  const productFilter: Record<string, unknown> = { status: "active" };
+  // Guard: empty keyword would throw "text search string is empty" from MongoDB.
+  // claude.service.ts validates keyword with min(1) but we defend here too.
+  if (!keyword) return [];
+
+  // Step 1: Match products using MongoDB full-text index.
+  // The text index covers: name (weight 10), brand (8), searchKeywords (6),
+  // subcategory (6), categoryGroup (3), description (1) — with Spanish stemming.
+  // This replaces the previous in-memory .filter() which did a full collection
+  // scan on every search call and missed subcategory-to-colloquial-term matches
+  // (e.g. customer says "sudadera", product is named "Jersey de cuello redondo").
+  //
+  // Gender normalization: DB stores 'women'/'men', Claude sends 'female'/'male'.
+  const productFilter: Record<string, unknown> = {
+    status: "active",
+    $text: { $search: keyword },
+  };
 
   if (hints.gender && hints.gender !== "unknown") {
     const dbGender = hints.gender === "female" ? "women" : "men";
     productFilter.gender = dbGender;
   }
 
-  const products = await ProductModel.find(productFilter)
-    .select("name price brand gender categoryGroup subcategory images")
-    .lean();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let products: any[] = [];
 
-  const matchingProducts = products.filter((p) => {
-    const searchableFields = [
-      p.name,
-      p.brand,
-      p.categoryGroup ?? "",
-      p.subcategory ?? "",
-    ].map((f) => f.toLowerCase());
-    return searchableFields.some((f) => f.includes(keyword));
-  });
+  try {
+    products = await ProductModel.find(productFilter, {
+      score: { $meta: "textScore" },
+    })
+      .select("name price brand gender categoryGroup subcategory images")
+      .sort({ score: { $meta: "textScore" } })
+      .limit(20)
+      .lean();
+  } catch (err: unknown) {
+    // If the text index doesn't exist yet (fresh deploy, index still building),
+    // MongoDB throws "text index required for $text query". Log clearly and
+    // return empty rather than crashing the entire message handler.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("text index required")) {
+      logger.error(
+        { keyword, err },
+        "searchProductsForClaude — text index not ready, returning empty. Check MongoDB index status.",
+      );
+      return [];
+    }
+    throw err;
+  }
 
-  if (matchingProducts.length === 0) return [];
+  if (products.length === 0) return [];
 
-  const matchingProductIds = matchingProducts.map((p) => p._id);
+  const matchingProductIds = products.map((p) => p._id);
 
   // Step 2: Query inventory for in-stock variants of matching products.
   // Filter by size and color at the DB level so we don't return zero-stock rows.
@@ -330,9 +367,7 @@ async function searchProductsForClaude(
   if (inStockInventory.length === 0) return [];
 
   // Step 3: Build a product lookup map for fast joining
-  const productMap = new Map(
-    matchingProducts.map((p) => [p._id.toString(), p]),
-  );
+  const productMap = new Map(products.map((p) => [p._id.toString(), p]));
 
   // Step 4: Deduplicate by product and build one ProductSearchItem per matching
   // product (not per inventory variant).
@@ -377,7 +412,12 @@ async function searchProductsForClaude(
         const url = toValidUrl(uri);
         return url ? { url, caption: index === 0 ? primaryCaption : "" } : null;
       })
-      .filter((img): img is { url: string; caption: string } => img !== null);
+      .filter(
+        (
+          img: { url: string; caption: string } | null,
+        ): img is { url: string; caption: string } =>
+          img !== null && img !== undefined,
+      );
 
     results.push({
       name: product.name,
@@ -394,7 +434,7 @@ async function searchProductsForClaude(
       gender: hints.gender,
       size: hints.size,
       color: hints.color,
-      productMatches: matchingProducts.length,
+      productMatches: products.length,
       inventoryMatches: inStockInventory.length,
       returned: results.length,
     },
@@ -430,7 +470,7 @@ export const handleIncomingMessage = async (
       },
       "Ignoring non-message webhook event — empty or invalid from field after normalization",
     );
-    return EMPTY_RESULT;
+    return emptyResult();
   }
 
   if (rawFrom && rawFrom !== from) {
@@ -445,7 +485,7 @@ export const handleIncomingMessage = async (
       { from, messageType, messageId },
       "Ignoring unsupported WhatsApp message type",
     );
-    return EMPTY_RESULT;
+    return emptyResult();
   }
 
   if (messageType === "image" && !payload.imageMediaId) {
@@ -453,7 +493,7 @@ export const handleIncomingMessage = async (
       { from, messageId },
       "Ignoring image webhook event without imageMediaId",
     );
-    return EMPTY_RESULT;
+    return emptyResult();
   }
 
   if ((messageType === "text" || !messageType) && !message) {
@@ -461,7 +501,7 @@ export const handleIncomingMessage = async (
       { from, messageId, messageType },
       "Ignoring empty text-like WhatsApp event",
     );
-    return EMPTY_RESULT;
+    return emptyResult();
   }
 
   // ── 1. Identify / create customer ─────────────────────────────────────────
@@ -483,7 +523,7 @@ export const handleIncomingMessage = async (
 
   if (!customer) {
     logger.error({ phone: from }, "Customer upsert returned null — unexpected");
-    return toSafeResult(EMPTY_RESULT, from);
+    return toSafeResult(emptyResult(), from);
   }
 
   if (payload.contactName && customer.name === `WhatsApp ${from}`) {
@@ -514,7 +554,7 @@ export const handleIncomingMessage = async (
         { from, messageId, customerId },
         "Duplicate image messageId — skipping",
       );
-      return EMPTY_RESULT;
+      return emptyResult();
     }
 
     logger.info(
@@ -522,11 +562,11 @@ export const handleIncomingMessage = async (
       "Image message — running visual search",
     );
 
-    const fallbackReply = "Ahorita te confirmo eso bonita, dame un momento 🙏🏻";
+    const fallbackReply = buildErrorReply(customerGender);
 
     try {
       const rawSearchResult = await searchProductsByImage(
-        payload.imageMediaId!,
+        payload.imageMediaId as string,
       );
       const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
       if (!searchResult.success) {
@@ -642,16 +682,6 @@ export const handleIncomingMessage = async (
     .sort({ createdAt: -1 })
     .lean();
 
-  // Minimal catalog for create_order resolution only — heavy fields deferred to searchProductsForClaude
-  const catalogForOrders = await ProductModel.find({ status: "active" })
-    .select("name price")
-    .lean();
-  const catalog = catalogForOrders.map((p) => ({
-    id: p._id.toString(),
-    name: p.name,
-    price: p.price,
-  }));
-
   const rawResult = await processMessage({
     customerName,
     customerGender,
@@ -674,10 +704,39 @@ export const handleIncomingMessage = async (
       { issues: parsedResult.error.issues, rawResult, customerId, messageId },
       "processMessage returned unexpected shape — escalating",
     );
+
+    // Persist the failed turn so Luis has context on the next message.
+    // Without this, the conversation history has a gap and Luis may re-greet
+    // or lose context mid-negotiation.
+    const errorReply = buildErrorReply(customerGender);
+    await ConversationModel.findOneAndUpdate(
+      { customerId, channel: "whatsapp" },
+      {
+        $push: {
+          turns: {
+            $each: [
+              {
+                role: "user" as const,
+                content: message,
+                createdAt: new Date(),
+              },
+              {
+                role: "assistant" as const,
+                content: errorReply,
+                createdAt: new Date(),
+              },
+            ],
+            $slice: -MAX_CONVERSATION_TURNS,
+          },
+        },
+        $set: { lastMessageAt: new Date() },
+      },
+      { upsert: true, new: true },
+    );
+
     return toSafeResult(
       {
-        reply:
-          "Lo siento bonita, hubo un error procesando tu mensaje. Alguien del equipo te contactará pronto 🙏🏻",
+        reply: errorReply,
         escalate: true,
         customerPhone: from,
         customerName,
@@ -726,6 +785,18 @@ export const handleIncomingMessage = async (
       );
     } else {
       try {
+        // Fetch catalog here — only needed for create_order resolution.
+        // Previously fetched unconditionally before processMessage, causing
+        // a wasted DB round-trip on every greet, search, and general message.
+        const catalogForOrders = await ProductModel.find({ status: "active" })
+          .select("name price")
+          .lean();
+        const catalog = catalogForOrders.map((p) => ({
+          id: p._id.toString(),
+          name: p.name,
+          price: p.price,
+        }));
+
         const resolvedItems = result.orderHints
           .map((hint) => {
             const product = findProductByHint(hint.productNameHint, catalog);
