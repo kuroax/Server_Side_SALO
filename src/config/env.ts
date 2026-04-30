@@ -64,6 +64,23 @@ const envSchema = z
     // WhatsApp media servers for visual inventory search.
     WHATSAPP_ACCESS_TOKEN: requiredTrimmedString("WHATSAPP_ACCESS_TOKEN"),
 
+    // Shared secret used by n8n buffer endpoints (push + claim).
+    // Must match BUFFER_WEBHOOK_SECRET set in n8n Railway service variables.
+    // Rotate both values together if compromised.
+    BUFFER_WEBHOOK_SECRET: z
+      .string()
+      .trim()
+      .min(16, "BUFFER_WEBHOOK_SECRET must be at least 16 characters"),
+
+    // How long (ms) the n8n Wait node holds before the buffer is claimed.
+    // Must be less than the n8n Wait node duration (default: 60000ms).
+    // Set to 5000 for local testing, 55000 for production.
+    WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(55000),
+
     // Cloudinary URL for the bank account image sent automatically when a customer
     // asks where to deposit. Optional — if not set Luis escalates to the owner instead.
     // Empty Railway values are treated as undefined.
@@ -106,7 +123,8 @@ if (env.IS_PRODUCTION && env.CORS_ORIGINS.includes("*")) {
 }
 
 export const {
-  NODE_ENV,
+  NODE_ENV, // No default — must be set explicitly in every environment.
+  // Local dev: add NODE_ENV=development to your .env file.
   PORT,
   MONGODB_URI,
   JWT_SECRET,
@@ -116,11 +134,16 @@ export const {
   BCRYPT_SALT_ROUNDS,
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
+  // CORS_ORIGIN is the raw comma-separated string from the environment variable.
+  // Prefer CORS_ORIGINS (parsed array) in middleware. CORS_ORIGIN retained for
+  // backwards compatibility — remove once all middleware uses CORS_ORIGINS.
   CORS_ORIGIN,
   CORS_ORIGINS,
   ANTHROPIC_API_KEY,
   WEBHOOK_SECRET,
   WHATSAPP_ACCESS_TOKEN,
+  BUFFER_WEBHOOK_SECRET,
+  WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS,
   BANK_ACCOUNT_IMAGE_URL,
   IS_PRODUCTION,
   IS_DEVELOPMENT,
