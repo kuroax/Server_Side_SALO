@@ -11,6 +11,7 @@ import { processMessage } from "#/integrations/whatsapp/claude.service.js";
 import { searchProductsByImage } from "#/integrations/whatsapp/image-search.service.js";
 import { CUSTOMER_GENDERS } from "#/modules/customers/customer.types.js";
 import { logger } from "#/config/logger.js";
+import { BANK_ACCOUNT_IMAGE_URL } from "#/config/env.js";
 import { z } from "zod";
 import type { WebhookPayload } from "#/integrations/whatsapp/webhook.validation.js";
 import type {
@@ -157,6 +158,7 @@ const processMessageResultSchema = z.object({
     "price_query",
     "create_order",
     "order_status",
+    "payment_info",
     "needs_human",
     "general",
   ]),
@@ -180,6 +182,7 @@ const processMessageResultSchema = z.object({
     )
     .optional(),
   productImages: z.array(productImageSchema),
+  detectedGender: z.enum(["female", "male"]).optional(),
 });
 
 type ProcessMessageResult = z.infer<typeof processMessageResultSchema>;
@@ -854,6 +857,31 @@ export const handleIncomingMessage = async (
     }
   }
 
+  // ── payment_info — auto-send bank account image ───────────────────────────
+  // When Luis detects a payment/deposit question it returns intent "payment_info".
+  // The system injects the bank account image into productImages so the existing
+  // image pipeline (IF Has Product Images → Send Image) delivers it automatically.
+  // No n8n changes needed — reuses the existing gallery pipeline.
+  if (result.intent === "payment_info") {
+    if (BANK_ACCOUNT_IMAGE_URL) {
+      productImages.push({
+        url: BANK_ACCOUNT_IMAGE_URL,
+        caption: "Datos bancarios para tu depósito 🏦",
+      });
+      logger.info(
+        { customerId, messageId },
+        "payment_info — bank account image injected",
+      );
+    } else {
+      // Image URL not configured — escalate so owner can send details manually.
+      escalate = true;
+      logger.warn(
+        { customerId, messageId },
+        "payment_info — BANK_ACCOUNT_IMAGE_URL not set, escalating to owner",
+      );
+    }
+  }
+
   // ── Build escalation message ──────────────────────────────────────────────
 
   let escalationMessage: string | undefined;
@@ -940,6 +968,30 @@ export const handleIncomingMessage = async (
     },
     "Conversation turn persisted",
   );
+
+  // ── Persist detected gender ───────────────────────────────────────────────
+  // If Claude detected an explicit gender signal in this message (e.g. customer
+  // said "soy el que te mandó mensaje" → male), update the customer record so
+  // all future conversations start with the correct gender without re-detection.
+  if (result.detectedGender && result.detectedGender !== customerGender) {
+    await CustomerModel.updateOne(
+      { _id: customer._id },
+      { $set: { gender: result.detectedGender } },
+    ).catch((err) => {
+      logger.warn(
+        { err, customerId },
+        "Failed to persist detected customer gender — non-critical, will retry on next detection",
+      );
+    });
+    logger.info(
+      {
+        customerId,
+        previousGender: customerGender,
+        detectedGender: result.detectedGender,
+      },
+      "Customer gender updated from conversation signal",
+    );
+  }
 
   return toSafeResult(
     {

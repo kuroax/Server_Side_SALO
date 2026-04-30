@@ -60,6 +60,10 @@ type ClaudeJsonResult = {
   // searchHints is intentionally excluded: it was previously echoed back by
   // Claude in the JSON but is never read by processMessage or its callers.
   // Removing it prevents the type from implying a capability that doesn't exist.
+  // detectedGender: set by Claude when it detects an explicit gender signal
+  // in the customer's message (e.g. "soy el que te mandó mensaje" → male).
+  // Used by webhook.service.ts to persist the detected gender to the customer record.
+  detectedGender?: "female" | "male";
 };
 
 // Public — what processMessage returns.
@@ -119,6 +123,7 @@ const claudeResultSchema = z.union([
     intent: z.literal("create_order"),
     response: z.string().min(1),
     orderHints: z.array(orderHintSchema).min(1),
+    detectedGender: z.enum(["female", "male"]).optional(),
   }),
   z.object({
     // product_search: the actual search is performed via the search_products tool
@@ -127,6 +132,7 @@ const claudeResultSchema = z.union([
     // echoes it back but nothing downstream reads it, so we don't validate it.
     intent: z.literal("product_search"),
     response: z.string().min(1),
+    detectedGender: z.enum(["female", "male"]).optional(),
   }),
   z.object({
     intent: z.enum([
@@ -138,6 +144,7 @@ const claudeResultSchema = z.union([
     ]),
     response: z.string().min(1),
     orderHints: z.undefined().optional(),
+    detectedGender: z.enum(["female", "male"]).optional(),
   }),
 ]);
 
@@ -250,16 +257,40 @@ Recibirás el historial de mensajes anteriores. Úsalo siempre:
 - Si ya mostraste productos, referencia lo que compartiste en lugar de repetirlo
 - Mantén el tono y la confianza que ya se estableció en la conversación
 
-─── ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────────────────
+─── DETECCIÓN Y ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────
 
-CLIENTE FEMENINO (gender: female) o DESCONOCIDO (usa femenino por defecto):
+PASO 1 — DETECTA SEÑALES DE GÉNERO EN EL MENSAJE ACTUAL:
+Analiza el mensaje del cliente buscando señales explícitas de género,
+independientemente del género que el sistema te haya indicado previamente.
+
+SEÑALES MASCULINAS — cambia a tono masculino inmediatamente:
+✓ "soy el", "soy un hombre", "yo el", "el que te"
+✓ Nombres masculinos en presentaciones: "soy Carlos", "soy Juan"
+✓ Artículos/pronombres masculinos: "el que te mandó", "el de ayer"
+
+SEÑALES FEMENINAS — confirma tono femenino:
+✓ "soy la", "soy una", "yo la"
+✓ Nombres femeninos en presentaciones
+
+PASO 2 — APLICA EL TONO DETECTADO INMEDIATAMENTE:
+No esperes a que el sistema confirme el género. Si el cliente dice
+"soy el que te mandó mensaje", responde en tono masculino de inmediato
+aunque el historial previo haya usado tono femenino.
+
+TONO MASCULINO (señal detectada o gender: male):
+- Apodos: "amigo", "bro", "brocito"
+- NUNCA uses "bonita", "bella", "corazón", "linda", "bb"
+- Tono: directo, entusiasta, cálido
+
+TONO FEMENINO (señal femenina, gender: female, o género desconocido sin señal):
 - Apodos: "bonita", "bella", "corazón", "linda", "amiga", "bb"
 - Tono: cálido, cercano, entusiasta
 
-CLIENTE MASCULINO (gender: male):
-- Apodos: "amigo", "bro", "brocito"
-- NUNCA uses "bonita", "bella", "corazón", "linda"
-- Tono: directo, entusiasta, igualmente cálido
+PASO 3 — REPORTA EL GÉNERO DETECTADO EN TU JSON:
+Si detectaste una señal EXPLÍCITA y CLARA de género en el mensaje actual,
+incluye "detectedGender": "male" o "female" en tu JSON de respuesta.
+Esto actualiza el perfil del cliente para futuras conversaciones.
+Solo incluye este campo ante señales claras — no especules.
 
 ─── ESTILO DE COMUNICACIÓN ────────────────────────────────────────────────────
 
@@ -440,26 +471,31 @@ Para intent create_order (orderHints OBLIGATORIO y no vacío):
 Para intent product_search (úsalo DESPUÉS de llamar search_products):
 {
   "intent": "product_search",
-  "response": "tu respuesta aquí"
+  "response": "tu respuesta aquí",
+  "detectedGender": "male" | "female"  // solo si detectaste señal explícita
 }
 
 Para cualquier otro intent (orderHints PROHIBIDO):
 {
   "intent": "catalog_query" | "price_query" | "order_status" | "needs_human" | "general",
-  "response": "tu respuesta aquí"
+  "response": "tu respuesta aquí",
+  "detectedGender": "male" | "female"  // solo si detectaste señal explícita
 }`;
 
 // ─── Gender context builder ───────────────────────────────────────────────────
 
 function buildGenderContext(gender: "female" | "male" | "unknown"): string {
+  // This provides the stored gender from the customer record as a starting point.
+  // Claude's real-time detection (PASO 1 in the system prompt) overrides this
+  // if an explicit gender signal is found in the current message.
   switch (gender) {
     case "male":
-      return 'GÉNERO DEL CLIENTE: masculino — usa "amigo", tono directo. NUNCA uses "bonita", "bella", "corazón", "linda".';
+      return 'GÉNERO ALMACENADO: masculino — usa "amigo", tono directo. NUNCA uses "bonita", "bella", "corazón", "linda".';
     case "female":
-      return 'GÉNERO DEL CLIENTE: femenino — usa "bonita", "bella", "corazón", "linda" naturalmente.';
+      return 'GÉNERO ALMACENADO: femenino — usa "bonita", "bella", "corazón", "linda" naturalmente.';
     case "unknown":
     default:
-      return 'GÉNERO DEL CLIENTE: desconocido — usa femenino por defecto ("bonita", "bella") hasta confirmar.';
+      return 'GÉNERO ALMACENADO: desconocido — usa femenino por defecto ("bonita", "bella") A MENOS QUE detectes una señal masculina explícita en el mensaje actual.';
   }
 }
 
