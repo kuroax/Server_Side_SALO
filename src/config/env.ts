@@ -1,52 +1,79 @@
 import "dotenv/config";
 import { z } from "zod";
 
-const envSchema = z.object({
-  // Server
-  NODE_ENV: z
-    .enum(["development", "production", "test"])
-    .default("development"),
-  PORT: z.coerce.number().int().positive().default(4000),
+const durationSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(s|m|h|d)$/i, "Must be a duration like 15m, 7d, 1h, or 30s");
 
-  // Database
-  MONGODB_URI: z.string().min(1, "MONGODB_URI is required"),
+const requiredTrimmedString = (name: string) =>
+  z.string().trim().min(1, `${name} is required`);
 
-  // Auth
-  JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
-  JWT_EXPIRES_IN: z.string().default("15m"),
-  JWT_REFRESH_SECRET: z
-    .string()
-    .min(32, "JWT_REFRESH_SECRET must be at least 32 characters"),
-  JWT_REFRESH_EXPIRES_IN: z.string().default("7d"),
+const optionalUrlSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
 
-  // Security
-  BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
-  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900000),
-  RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(100),
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}, z.string().url().optional());
 
-  // CORS — no default intentionally: must be set explicitly in every environment.
-  // Wildcard is rejected in production at startup.
-  CORS_ORIGIN: z.string().min(1, "CORS_ORIGIN is required"),
+const envSchema = z
+  .object({
+    // Server
+    // Do not default NODE_ENV. Railway/production must explicitly set this.
+    NODE_ENV: z.enum(["development", "production", "test"]),
+    PORT: z.coerce.number().int().min(1).max(65535).default(4000),
 
-  // Integrations
-  // Required for WhatsApp bot — Claude API key from console.anthropic.com.
-  ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
+    // Database
+    MONGODB_URI: requiredTrimmedString("MONGODB_URI"),
 
-  // Shared secret sent by n8n in X-Webhook-Secret header.
-  // Must match the value configured in the n8n HTTP Request node.
-  WEBHOOK_SECRET: z
-    .string()
-    .min(16, "WEBHOOK_SECRET must be at least 16 characters"),
+    // Auth
+    JWT_SECRET: z
+      .string()
+      .trim()
+      .min(32, "JWT_SECRET must be at least 32 characters"),
+    JWT_EXPIRES_IN: durationSchema.default("15m"),
+    JWT_REFRESH_SECRET: z
+      .string()
+      .trim()
+      .min(32, "JWT_REFRESH_SECRET must be at least 32 characters"),
+    JWT_REFRESH_EXPIRES_IN: durationSchema.default("7d"),
 
-  // Meta permanent access token — used to download customer-sent images from
-  // WhatsApp media servers for visual inventory search.
-  WHATSAPP_ACCESS_TOKEN: z.string().min(1, "WHATSAPP_ACCESS_TOKEN is required"),
+    // Security
+    BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
+    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900000),
+    RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(100),
 
-  // Cloudinary URL for the bank account image sent automatically when a customer
-  // asks where to deposit. Optional — if not set Luis escalates to the owner instead.
-  // Set in Railway: BANK_ACCOUNT_IMAGE_URL=https://res.cloudinary.com/...
-  BANK_ACCOUNT_IMAGE_URL: z.string().url().optional(),
-});
+    // CORS — no default intentionally: must be set explicitly in every environment.
+    // Wildcard is rejected in production at startup.
+    // Multiple origins can be provided as a comma-separated string.
+    CORS_ORIGIN: requiredTrimmedString("CORS_ORIGIN"),
+
+    // Integrations
+    // Required for WhatsApp bot — Claude API key from console.anthropic.com.
+    ANTHROPIC_API_KEY: requiredTrimmedString("ANTHROPIC_API_KEY"),
+
+    // Shared secret sent by n8n in X-Webhook-Secret header.
+    // Must match the value configured in the n8n HTTP Request node.
+    // IMPORTANT: confirm this variable name matches Railway, backend middleware, and n8n.
+    WEBHOOK_SECRET: z
+      .string()
+      .trim()
+      .min(16, "WEBHOOK_SECRET must be at least 16 characters"),
+
+    // Meta permanent access token — used to download customer-sent images from
+    // WhatsApp media servers for visual inventory search.
+    WHATSAPP_ACCESS_TOKEN: requiredTrimmedString("WHATSAPP_ACCESS_TOKEN"),
+
+    // Cloudinary URL for the bank account image sent automatically when a customer
+    // asks where to deposit. Optional — if not set Luis escalates to the owner instead.
+    // Empty Railway values are treated as undefined.
+    // Set in Railway: BANK_ACCOUNT_IMAGE_URL=https://res.cloudinary.com/...
+    BANK_ACCOUNT_IMAGE_URL: optionalUrlSchema,
+  })
+  .refine((env) => env.JWT_SECRET !== env.JWT_REFRESH_SECRET, {
+    path: ["JWT_REFRESH_SECRET"],
+    message: "JWT_REFRESH_SECRET must be different from JWT_SECRET",
+  });
 
 const parsed = envSchema.safeParse(process.env);
 
@@ -58,17 +85,22 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+const corsOrigins = parsed.data.CORS_ORIGIN.split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 export const env = {
   ...parsed.data,
+  CORS_ORIGINS: corsOrigins,
   IS_PRODUCTION: parsed.data.NODE_ENV === "production",
   IS_DEVELOPMENT: parsed.data.NODE_ENV === "development",
   IS_TEST: parsed.data.NODE_ENV === "test",
 } as const;
 
 // Hard fail in production for wildcard CORS.
-if (env.IS_PRODUCTION && env.CORS_ORIGIN === "*") {
+if (env.IS_PRODUCTION && env.CORS_ORIGINS.includes("*")) {
   console.error(
-    "❌ CORS_ORIGIN cannot be wildcard (*) in production. Set an explicit origin.",
+    "❌ CORS_ORIGIN cannot include wildcard (*) in production. Set explicit origins.",
   );
   process.exit(1);
 }
@@ -85,6 +117,7 @@ export const {
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
   CORS_ORIGIN,
+  CORS_ORIGINS,
   ANTHROPIC_API_KEY,
   WEBHOOK_SECRET,
   WHATSAPP_ACCESS_TOKEN,
