@@ -11,6 +11,7 @@ export type ClaudeIntent =
   | "price_query"
   | "create_order"
   | "order_status"
+  | "payment_info"
   | "needs_human"
   | "general";
 
@@ -139,6 +140,7 @@ const claudeResultSchema = z.union([
       "catalog_query",
       "price_query",
       "order_status",
+      "payment_info",
       "needs_human",
       "general",
     ]),
@@ -177,7 +179,14 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
       gender: {
         type: "string",
         enum: ["female", "male", "unknown"],
-        description: "Género del cliente o del producto buscado.",
+        description:
+          "Género DEL PRODUCTO buscado — NO el género del cliente. " +
+          "SOLO incluir 'female' si el cliente pide EXPLÍCITAMENTE ropa de mujer " +
+          "('busco para mi novia', 'algo femenino', 'para ella'). " +
+          "SOLO incluir 'male' si pide EXPLÍCITAMENTE ropa de hombre " +
+          "('algo masculino', 'para hombre', 'para él'). " +
+          "En TODOS los demás casos omitir o usar 'unknown'. " +
+          "El género del cliente determina el TONO, no el filtro de productos.",
       },
       size: {
         type: "string",
@@ -256,6 +265,41 @@ Recibirás el historial de mensajes anteriores. Úsalo siempre:
 - Si el cliente ya dio información (talla, color, preferencia, estilo), recuérdala y no la vuelvas a pedir
 - Si ya mostraste productos, referencia lo que compartiste en lugar de repetirlo
 - Mantén el tono y la confianza que ya se estableció en la conversación
+
+─── DETECCIÓN Y ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────
+
+PASO 1 — DETECTA SEÑALES DE GÉNERO EN EL MENSAJE ACTUAL:
+Analiza el mensaje del cliente buscando señales explícitas de género,
+independientemente del género que el sistema te haya indicado previamente.
+
+SEÑALES MASCULINAS — cambia a tono masculino inmediatamente:
+✓ "soy el", "soy un hombre", "yo el", "el que te"
+✓ Nombres masculinos en presentaciones: "soy Carlos", "soy Juan"
+✓ Artículos/pronombres masculinos: "el que te mandó", "el de ayer"
+
+SEÑALES FEMENINAS — confirma tono femenino:
+✓ "soy la", "soy una", "yo la"
+✓ Nombres femeninos en presentaciones
+
+PASO 2 — APLICA EL TONO DETECTADO INMEDIATAMENTE:
+No esperes a que el sistema confirme el género. Si el cliente dice
+"soy el que te mandó mensaje", responde en tono masculino de inmediato
+aunque el historial previo haya usado tono femenino.
+
+TONO MASCULINO (señal detectada o gender: male):
+- Apodos: "amigo", "bro", "brocito"
+- NUNCA uses "bonita", "bella", "corazón", "linda", "bb"
+- Tono: directo, entusiasta, cálido
+
+TONO FEMENINO (señal femenina, gender: female, o género desconocido sin señal):
+- Apodos: "bonita", "bella", "corazón", "linda", "amiga", "bb"
+- Tono: cálido, cercano, entusiasta
+
+PASO 3 — REPORTA EL GÉNERO DETECTADO EN TU JSON:
+Si detectaste una señal EXPLÍCITA y CLARA de género en el mensaje actual,
+incluye "detectedGender": "male" o "female" en tu JSON de respuesta.
+Esto actualiza el perfil del cliente para futuras conversaciones.
+Solo incluye este campo ante señales claras — no especules.
 
 ─── DETECCIÓN Y ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────
 
@@ -371,6 +415,24 @@ PARÁMETROS DISPONIBLES:
 → size: talla específica si el cliente la mencionó
 → color: color específico si el cliente lo mencionó (ej: "negro", "blanco", "beige")
 
+─── REGLA CRÍTICA — parámetro gender en search_products ──────────────────────
+
+El género del CLIENTE y el género del PRODUCTO son conceptos completamente distintos.
+
+SOLO pasa gender: "female" si el cliente pide EXPLÍCITAMENTE ropa de mujer:
+✓ "busco para mi novia", "algo para mujer", "ropa femenina", "para ella"
+
+SOLO pasa gender: "male" si el cliente pide EXPLÍCITAMENTE ropa de hombre:
+✓ "algo para hombre", "ropa masculina", "para él"
+
+EN TODOS LOS DEMÁS CASOS usa gender: "unknown" o no incluyas el parámetro:
+✗ Un cliente masculino preguntando "tienes sudaderas" NO implica que busca
+  ropa de hombre — puede estar comprando para alguien más o la tienda
+  simplemente vende ropa de mujer.
+✗ El género del cliente sirve para el TONO de la respuesta, no para filtrar productos.
+✗ Si pasas gender: "male" sin confirmación explícita, eliminarás todos los
+  productos femeninos del catálogo y el cliente verá 0 resultados.
+
 FLUJO CORRECTO:
 1. Llama search_products con los criterios disponibles.
 2. Si encuentras resultados: usa intent "product_search" y responde anunciando que los mostrarás.
@@ -414,6 +476,17 @@ El cliente pregunta el precio de algo:
 El cliente pregunta por su pedido:
 → Revisa el pedido reciente en el contexto y responde. intent: order_status.
 
+El cliente pregunta a qué cuenta depositar, cómo hacer el anticipo, cómo pagar, o dónde transferir:
+→ Responde: "¡Con gusto! Ahorita te mando los datos de pago 🙌🏼" (tono según género detectado)
+→ intent: payment_info
+→ El sistema enviará automáticamente la imagen con los datos bancarios.
+→ NUNCA escribas números de cuenta, CLABEs, ni datos bancarios manualmente en el texto.
+→ NUNCA escales este intent al dueño — el sistema lo maneja solo.
+
+Cuando el historial muestra [Imagen: "..."] o [Cliente seleccionó una imagen] seguido de texto:
+→ El cliente indica qué producto le interesa del gallery previamente enviado.
+→ Usa el historial para identificar el producto, talla o color. Llama search_products si necesitas confirmar stock.
+
 ─── CUÁNDO ESCALAR AL DUEÑO — needs_human ─────────────────────────────────────
 
 needs_human es para situaciones que REQUIEREN una decisión humana real. Úsalo con moderación.
@@ -439,6 +512,7 @@ NUNCA uses needs_human para:
 - price_query    : cliente pregunta precio de algo — responde directamente
 - create_order   : cliente quiere hacer un pedido — necesitas producto + talla + color confirmados
 - order_status   : cliente pregunta por su pedido — revisa el contexto y responde
+- payment_info   : cliente pregunta a qué cuenta depositar, cómo pagar el anticipo, o datos de pago
 - general        : saludos, preguntas generales, confirmaciones, mensajes que no encajan en otro intent
 - needs_human    : situación que requiere decisión humana real (ver criterios arriba)
 
@@ -477,7 +551,7 @@ Para intent product_search (úsalo DESPUÉS de llamar search_products):
 
 Para cualquier otro intent (orderHints PROHIBIDO):
 {
-  "intent": "catalog_query" | "price_query" | "order_status" | "needs_human" | "general",
+  "intent": "catalog_query" | "price_query" | "order_status" | "payment_info" | "needs_human" | "general",
   "response": "tu respuesta aquí",
   "detectedGender": "male" | "female"  // solo si detectaste señal explícita
 }`;
@@ -633,11 +707,11 @@ async function runAgenticLoop(
       //     $2,500 item from the same gallery.
       const singleProductInstruction = (p: ProductSearchItem) => {
         const deposit = Math.ceil(p.price * 0.3).toLocaleString("es-MX");
-        return `INSTRUCCIÓN: En tu respuesta anuncia que las imágenes vienen y menciona el precio y anticipo: "Puedes ordenar con el 30% equivalente a $${deposit} y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en plazo.`;
+        return `INSTRUCCIÓN: En tu respuesta anuncia que las imágenes vienen y menciona el precio y anticipo: "Puedes ordenar con el 30% equivalente a $${deposit} y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en 20 días.`;
       };
 
       const multiProductInstruction =
-        'INSTRUCCIÓN: Anuncia que las imágenes vienen. NO menciones un anticipo específico todavía — hay varios productos a distintos precios. Pregunta cuál le interesa más a la cliente antes de cotizar el anticipo. Ejemplo: "¿Cuál de estas opciones te llama más la atención? 😊 Cuéntame para darte el detalle del precio y el anticipo."';
+        'INSTRUCCIÓN: Anuncia que las imágenes vienen. NO menciones un anticipo específico todavía — hay varios productos a distintos precios. Pregunta cuál le interesa más al cliente antes de cotizar el anticipo. Ejemplo: "¿Cuál de estas opciones te llama más la atención? 😊 Cuéntame para darte el detalle del precio y el anticipo."';
 
       const resultText =
         items.length === 0
@@ -689,6 +763,22 @@ async function runAgenticLoop(
   // callOnce retries only on the Claude API call itself (before tool results are
   // processed), so duplicate pushes are not possible today. If retry logic ever
   // expands to the loop level, add URL-based deduplication here before returning.
+
+  // If the loop exhausted but images were accumulated from earlier iterations,
+  // return a partial result rather than SAFE_FALLBACK — the customer should
+  // see the products found so far instead of a waiting message.
+  if (accumulatedImages.length > 0) {
+    logger.warn(
+      { imagesAccumulated: accumulatedImages.length },
+      "runAgenticLoop — tool_loop_exhausted but returning partial result with accumulated images",
+    );
+    return {
+      text: '{"intent":"product_search","response":"Sipi! Ahorita te muestro lo que encontré ✨"}',
+      stopReason: "tool_loop_exhausted_partial",
+      productImages: accumulatedImages,
+    };
+  }
+
   throw new Error(
     "runAgenticLoop: tool_loop_exhausted — exceeded MAX_TOOL_ITERATIONS without final text response",
   );
@@ -864,7 +954,7 @@ INFORMACIÓN DEL NEGOCIO:
   // for pilot-week review so the system prompt can be tightened further.
   // Uses regex to catch phrasing variants that simple substring checks miss.
   const suspiciousPattern =
-    /d[eé]j[ae]me?\s+revisar|lo estoy (checando|revisando)|te (confirmo|aviso)|en breve te (digo|confirmo)|estoy revisando disponibilidad/i;
+    /d[eé]j[ae]me?\s+revisar|lo estoy (checando|revisando)|ahorita lo checo|te (confirmo|aviso)|en breve te (digo|confirmo)|estoy revisando disponibilidad|dame un momento|en un momento te/i;
   const isEscalating = validated.data.intent === "needs_human";
   if (!isEscalating && suspiciousPattern.test(validated.data.response)) {
     logger.warn(

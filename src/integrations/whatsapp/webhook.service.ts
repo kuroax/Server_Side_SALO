@@ -60,6 +60,9 @@ function toSafeResult(
       { issues: parsed.error.issues, raw },
       "WebhookResult failed schema validation — escalating instead of silent empty",
     );
+    // NOTE: hardcoded female tone here because toSafeResult is called before
+    // customerGender is resolved in early guard paths (e.g. customer upsert null).
+    // For paths where customerGender is known, buildErrorReply(gender) is used instead.
     return {
       reply:
         "Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻",
@@ -232,10 +235,24 @@ function findProductByHint(
   catalog: { id: string; name: string; price: number }[],
 ): { id: string; name: string; price: number } | null {
   const normalized = hint.toLowerCase().trim();
-  return (
+  const hintWords = normalized.split(/\s+/).filter(Boolean);
+
+  // Pass 1: substring match — fast path for exact or near-exact names
+  const exactMatch =
     catalog.find((p) => p.name.toLowerCase().includes(normalized)) ??
-    catalog.find((p) => normalized.includes(p.name.toLowerCase())) ??
-    null
+    catalog.find((p) => normalized.includes(p.name.toLowerCase()));
+  if (exactMatch) return exactMatch;
+
+  // Pass 2: word-overlap match — handles partial multi-word names.
+  // e.g. hint "jersey accolade" matches "Jersey de cuello redondo Accolade"
+  // because both words appear somewhere in the product name.
+  return (
+    catalog.find((p) => {
+      const productWords = p.name.toLowerCase().split(/\s+/);
+      return hintWords.every((hw) =>
+        productWords.some((pw) => pw.includes(hw) || hw.includes(pw)),
+      );
+    }) ?? null
   );
 }
 
@@ -336,6 +353,32 @@ async function searchProductsForClaude(
       return [];
     }
     throw err;
+  }
+
+  if (products.length === 0 && productFilter.gender) {
+    // Safety net: gender filter returned 0 results.
+    // A male customer asking generically ("tienes sudaderas") should see all
+    // available products — not 0 results because the catalog is women's clothing.
+    // Retry without the gender filter before giving up.
+    const filterWithoutGender = { ...productFilter };
+    delete filterWithoutGender.gender;
+    try {
+      products = await ProductModel.find(filterWithoutGender, {
+        score: { $meta: "textScore" },
+      })
+        .select("name price brand gender categoryGroup subcategory images")
+        .sort({ score: { $meta: "textScore" } })
+        .limit(20)
+        .lean();
+      if (products.length > 0) {
+        logger.info(
+          { keyword, removedGender: productFilter.gender },
+          "searchProductsForClaude — gender filter returned 0, retried without gender and found results",
+        );
+      }
+    } catch {
+      // If retry also fails, fall through to return []
+    }
   }
 
   if (products.length === 0) return [];
@@ -490,6 +533,9 @@ export const handleIncomingMessage = async (
     );
     return emptyResult();
   }
+  // NOTE: if messageType is undefined (not provided by n8n), the guard above
+  // is falsy and execution falls through to the text handler below — treating
+  // undefined type as a text message. This is intentional and correct behavior.
 
   if (messageType === "image" && !payload.imageMediaId) {
     logger.info(
@@ -681,6 +727,8 @@ export const handleIncomingMessage = async (
     content: t.content,
   }));
 
+  // NOTE: add { customerId: 1, createdAt: -1 } compound index on orders if
+  // this sort becomes slow when order volume grows beyond pilot scale.
   const recentOrder = await OrderModel.findOne({ customerId })
     .sort({ createdAt: -1 })
     .lean();
@@ -761,7 +809,10 @@ export const handleIncomingMessage = async (
 
   const result: ProcessMessageResult = parsedResult.data;
   let escalate = result.intent === "needs_human";
-  const productImages: ProductImage[] = result.productImages;
+  // Spread to a new array — prevents mutating result.productImages by reference.
+  // payment_info later pushes the bank image into this array; without the spread,
+  // that push would corrupt the original processMessage return value.
+  const productImages: ProductImage[] = [...result.productImages];
 
   if (result.intent === "product_search") {
     logger.info(
@@ -769,6 +820,10 @@ export const handleIncomingMessage = async (
       "Product search intent",
     );
     if (productImages.length === 0 && result.searchHints) {
+      // Escalate when product_search returns 0 images.
+      // The system prompt instructs Claude to attempt broader searches before
+      // returning product_search with 0 results — so reaching here means Claude
+      // already exhausted its search attempts. Escalating is the correct action.
       escalate = true;
       logger.info(
         { customerId, messageId, searchHints: result.searchHints },
@@ -900,6 +955,11 @@ export const handleIncomingMessage = async (
         "El asistente detectó que la situación requiere una decisión humana.";
       suggestedAction =
         "Revisar el mensaje del cliente y responder directamente.";
+    } else if (intent === "payment_info") {
+      reason =
+        "El cliente preguntó por los datos de pago pero BANK_ACCOUNT_IMAGE_URL no está configurado en Railway.";
+      suggestedAction =
+        "Enviar los datos bancarios manualmente al cliente. Configurar BANK_ACCOUNT_IMAGE_URL en Railway → Server_Side_SALO → Variables para que el bot lo haga automáticamente en el futuro.";
     } else if (intent === "product_search" && productImages.length === 0) {
       const keyword = searchHints?.keyword ?? "producto no especificado";
       const size = searchHints?.size;
