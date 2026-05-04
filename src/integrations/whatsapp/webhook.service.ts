@@ -88,7 +88,7 @@ function buildErrorReply(gender: "female" | "male" | "unknown"): string {
     : "Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻";
 }
 
-// ─── Escalation message builder ───────────────────────────────────────────────
+// ─── Escalation message builders ─────────────────────────────────────────────
 
 type EscalationContext = {
   customerPhone: string;
@@ -149,6 +149,77 @@ function buildEscalationMessage(ctx: EscalationContext): string {
   return lines.join("\n");
 }
 
+// Dedicated builder for payment receipt escalation — gives the owner a complete
+// picture with sale context so they can verify without reading the full chat.
+function buildPaymentReceiptEscalation({
+  customerPhone,
+  customerName,
+  saleContext,
+}: {
+  customerPhone: string;
+  customerName: string | null;
+  saleContext: string;
+}): string {
+  const lines: string[] = [
+    "🧾 Comprobante de pago recibido",
+    "",
+    `Cliente: ${customerName ?? "Sin nombre"} (${customerPhone})`,
+    "",
+    "Contexto de venta reciente:",
+    saleContext,
+    "",
+    "─────────────────────────────────",
+    "⚠️  El pedido NO ha sido creado — en espera de verificación de pago.",
+    "✅ Verifica la transferencia en tu cuenta bancaria.",
+    "✅ Una vez confirmado, respóndele al cliente directamente.",
+    "✅ Si el pedido no está claro, pregúntale: producto, talla y color.",
+    "",
+    `📱 Ver comprobante: chat de WhatsApp con ${customerPhone}`,
+  ];
+
+  return lines.join("\n");
+}
+
+// ─── Conversation helpers ─────────────────────────────────────────────────────
+
+type ConversationTurn = { role: string; content: string };
+
+// Returns true if the recent conversation contains evidence that Luis already
+// sent the bank account / payment data to this customer. Used to classify an
+// incoming image as a payment receipt rather than a product photo.
+//
+// Matches the phrases Luis produces for payment_info intent (see system prompt)
+// and the bank account image caption injected by the payment_info handler.
+// Scans the last 10 turns — enough to cover a full payment exchange without
+// reaching back into an unrelated prior session.
+function hasRecentPaymentInfoContext(turns: ConversationTurn[]): boolean {
+  const recentTurns = turns.slice(-10);
+  const paymentPattern =
+    /datos.*pago|ahorita te mando.*datos|datos para.*dep[oó]sito|datos bancarios|te mando los datos|informaci[oó]n.*pago|bancarios para tu dep[oó]sito/i;
+  return recentTurns.some(
+    (t) => t.role === "assistant" && paymentPattern.test(t.content),
+  );
+}
+
+// Scans recent assistant turns for product lines in order-confirmation format
+// (⭐️ Product talla S color negro $2,190) to give the owner sale context in
+// the receipt escalation message.
+function extractSaleContext(turns: ConversationTurn[]): string {
+  const recentTurns = turns.slice(-12);
+  const productLines: string[] = [];
+
+  for (const turn of recentTurns) {
+    if (turn.role === "assistant") {
+      const starLines = turn.content.match(/⭐️[^\n]+/g);
+      if (starLines) productLines.push(...starLines);
+    }
+  }
+
+  return productLines.length > 0
+    ? productLines.join("\n")
+    : "Sin detalle de productos en el historial reciente — revisar el chat completo.";
+}
+
 // ─── Integration boundary schemas ─────────────────────────────────────────────
 
 const processMessageResultSchema = z.object({
@@ -159,6 +230,7 @@ const processMessageResultSchema = z.object({
     "create_order",
     "order_status",
     "payment_info",
+    "payment_receipt",
     "needs_human",
     "general",
   ]),
@@ -594,6 +666,25 @@ export const handleIncomingMessage = async (
     | "male"
     | "unknown";
 
+  // ── 1b. Load conversation — used by both image receipt detection and text flow ──
+  //
+  // Loaded here (before the image/text branch) so the receipt classifier in
+  // section 2 can inspect recent turns without a second DB round-trip.
+  // The full conversation history window for Claude is assembled in section 3.
+  const conversation = await ConversationModel.findOne({
+    customerId,
+    channel: "whatsapp",
+  }).lean();
+
+  const allTurns = conversation?.turns ?? [];
+  const lastMessageAt = conversation?.lastMessageAt;
+
+  // 24h reset: if the customer's last message was over 24 hours ago, treat as
+  // a fresh session — don't send yesterday's product gallery context to Claude.
+  const isStaleConversation =
+    lastMessageAt &&
+    Date.now() - new Date(lastMessageAt).getTime() > 24 * 60 * 60 * 1000;
+
   // ── 2. Image message ──────────────────────────────────────────────────────
 
   if (messageType === "image") {
@@ -604,6 +695,76 @@ export const handleIncomingMessage = async (
       );
       return emptyResult();
     }
+
+    // ── 2a. Payment receipt detection ─────────────────────────────────────
+    // If the customer was shown bank account data in a recent turn, an incoming
+    // image is almost certainly a payment receipt — not a product photo.
+    // Skip searchProductsByImage entirely and return a direct acknowledgment.
+    //
+    // This is checked BEFORE the product search so the receipt is never routed
+    // into image-based catalog search, which would return 0 results and produce
+    // a generic fallback reply ("Permíteme un momento").
+    if (hasRecentPaymentInfoContext(allTurns)) {
+      logger.info(
+        { customerId, mediaId: payload.imageMediaId, messageId },
+        "Image message after payment_info context — treating as payment receipt, skipping product search",
+      );
+
+      const saleContext = extractSaleContext(allTurns);
+      const genderPronoun = customerGender === "male" ? "amigo" : "bonita";
+      const receiptAck =
+        `¡Recibido ${genderPronoun}! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia. ` +
+        `En cuanto confirmen, te escribo de inmediato 🙏🏻\n` +
+        `¿Me confirmas qué producto, talla y color quieres apartar?`;
+
+      // Persist the receipt turn so subsequent text messages have this context.
+      // Storing "[Comprobante de pago enviado]" as the user turn prevents Claude
+      // from treating the next message as coming out of nowhere.
+      await ConversationModel.findOneAndUpdate(
+        { customerId, channel: "whatsapp" },
+        {
+          $push: {
+            turns: {
+              $each: [
+                {
+                  role: "user" as const,
+                  content: "[Comprobante de pago enviado por el cliente]",
+                  createdAt: new Date(),
+                },
+                {
+                  role: "assistant" as const,
+                  content: receiptAck,
+                  createdAt: new Date(),
+                },
+              ],
+              $slice: -MAX_CONVERSATION_TURNS,
+            },
+          },
+          $set: { lastMessageAt: new Date() },
+        },
+        { upsert: true, returnDocument: "after" },
+      );
+
+      return toSafeResult(
+        {
+          reply: receiptAck,
+          escalate: true,
+          customerPhone: from,
+          customerName,
+          productImages: [],
+          escalationMessage: buildPaymentReceiptEscalation({
+            customerPhone: from,
+            customerName,
+            saleContext,
+          }),
+        },
+        from,
+        customerName,
+        customerGender,
+      );
+    }
+
+    // ── 2b. Product image search (existing flow) ───────────────────────────
 
     logger.info(
       { customerId, mediaId: payload.imageMediaId, messageId },
@@ -717,29 +878,9 @@ export const handleIncomingMessage = async (
 
   // ── 3. Text message — Luis flow ───────────────────────────────────────────
 
-  const conversation = await ConversationModel.findOne({
-    customerId,
-    channel: "whatsapp",
-  }).lean();
-
-  // ── Conversation history window ───────────────────────────────────────────
-  // Only the last 10 turns (5 exchanges) are sent to Claude on each call.
-  // Sending the full history grows input tokens linearly with conversation
-  // length — at 50 turns this adds ~7,500 tokens per request unnecessarily.
-  // Luis only needs recent context: what product was shown, what size was
-  // asked, what was just confirmed. Older turns are stored in MongoDB for
-  // owner review but never sent to the AI.
-  //
-  // 24h reset: if the customer's last message was over 24 hours ago, start
-  // with empty history. A returning customer is starting a new session —
-  // sending yesterday's product gallery context confuses Claude since
-  // inventory may have changed and the conversation thread is stale.
+  // Build the history window for Claude.
+  // allTurns and isStaleConversation are already resolved from section 1b.
   const MAX_HISTORY_TURNS_FOR_AI = 10;
-  const allTurns = conversation?.turns ?? [];
-  const lastMessageAt = conversation?.lastMessageAt;
-  const isStaleConversation =
-    lastMessageAt &&
-    Date.now() - new Date(lastMessageAt).getTime() > 24 * 60 * 60 * 1000;
 
   const conversationHistory = isStaleConversation
     ? []
@@ -862,6 +1003,22 @@ export const handleIncomingMessage = async (
     }
   }
 
+  // ── payment_receipt — customer sent or announced a payment comprobante ────
+  // Intent set by Claude when the customer says "ya pagué", "aquí está el
+  // comprobante", "ya transferí", etc. via text message.
+  // (The image-receipt case is handled earlier in section 2a.)
+  //
+  // We escalate to the owner with full sale context but do NOT:
+  //   - inject the bank account image (already sent in a prior payment_info turn)
+  //   - create an order (payment must be verified first)
+  if (result.intent === "payment_receipt") {
+    escalate = true;
+    logger.info(
+      { customerId, messageId },
+      "payment_receipt intent — escalating to owner for payment verification",
+    );
+  }
+
   // ── create_order ──────────────────────────────────────────────────────────
 
   if (result.intent === "create_order") {
@@ -974,67 +1131,90 @@ export const handleIncomingMessage = async (
   if (escalate) {
     logger.info({ customerId, from, messageId }, "Escalate flag set for n8n");
 
-    const searchHints = result.searchHints;
     const intent = result.intent;
-    let reason: string;
-    let suggestedAction: string;
-    let inventoryResult: string | undefined;
 
-    if (intent === "needs_human") {
-      reason =
-        "El asistente detectó que la situación requiere una decisión humana.";
-      suggestedAction =
-        "Revisar el mensaje del cliente y responder directamente.";
-    } else if (intent === "payment_info") {
-      reason =
-        "El cliente preguntó por los datos de pago pero BANK_ACCOUNT_IMAGE_URL no está configurado en Railway.";
-      suggestedAction =
-        "Enviar los datos bancarios manualmente al cliente. Configurar BANK_ACCOUNT_IMAGE_URL en Railway → Server_Side_SALO → Variables para que el bot lo haga automáticamente en el futuro.";
-    } else if (
-      // Deposit receipt detection: image or text with payment keywords after
-      // payment_info was already handled in this conversation.
-      messageType === "image" ||
-      /comprobante|transferencia|deposit[eé]|ya pagu[eé]|ya deposit[eé]|te mand[eé]/i.test(
-        message,
-      )
-    ) {
-      reason =
-        "El cliente posiblemente envió un comprobante de pago — pedido pendiente de confirmación.";
-      suggestedAction =
-        "Verificar la transferencia en tu cuenta bancaria y confirmar el pedido al cliente por WhatsApp. Preguntarle qué producto, talla y color quiere si no está claro.";
-    } else if (intent === "product_search" && productImages.length === 0) {
-      const keyword = searchHints?.keyword ?? "producto no especificado";
-      const size = searchHints?.size;
-      const color = searchHints?.color;
-      inventoryResult = `No se encontraron productos disponibles que coincidan con "${keyword}"${color ? ` color ${color}` : ""}${size ? ` talla ${size}` : ""}.`;
-      reason =
-        "El bot no puede confirmar disponibilidad porque el producto no existe actualmente en inventario.";
-      suggestedAction = `Responder con una alternativa disponible o confirmar si se puede conseguir "${keyword}"${color ? ` en ${color}` : ""} sobre pedido.`;
-    } else if (intent === "create_order") {
-      const items =
-        result.orderHints
-          ?.map((h) => `${h.productNameHint} talla ${h.size} color ${h.color}`)
-          .join(", ") ?? "sin detalle";
-      reason = `El pedido no pudo crearse automáticamente. Producto(s): ${items}. Posible causa: producto desactivado en catálogo o nombre no reconocido.`;
-      suggestedAction =
-        "Verificar que el producto está activo en el inventario SALO. Si está activo, crear el pedido manualmente desde la app.";
+    // payment_receipt: use the dedicated builder with sale context
+    if (intent === "payment_receipt") {
+      const saleContext = extractSaleContext(allTurns);
+      escalationMessage = buildPaymentReceiptEscalation({
+        customerPhone: from,
+        customerName,
+        saleContext,
+      });
     } else {
-      reason = `Escalación forzada por estado inesperado (intent: ${intent}).`;
-      suggestedAction =
-        "Revisar logs de Railway y responder al cliente manualmente.";
-    }
+      // All other escalation reasons use the general builder
+      const searchHints = result.searchHints;
+      let reason: string;
+      let suggestedAction: string;
+      let inventoryResult: string | undefined;
 
-    escalationMessage = buildEscalationMessage({
-      customerPhone: from,
-      customerName,
-      customerMessage: message,
-      intent,
-      searchHints,
-      orderHints: result.orderHints,
-      inventoryResult,
-      reason,
-      suggestedAction,
-    });
+      if (intent === "needs_human") {
+        reason =
+          "El asistente detectó que la situación requiere una decisión humana.";
+        suggestedAction =
+          "Revisar el mensaje del cliente y responder directamente.";
+      } else if (intent === "payment_info") {
+        reason =
+          "El cliente preguntó por los datos de pago pero BANK_ACCOUNT_IMAGE_URL no está configurado en Railway.";
+        suggestedAction =
+          "Enviar los datos bancarios manualmente al cliente. Configurar BANK_ACCOUNT_IMAGE_URL en Railway → Server_Side_SALO → Variables para que el bot lo haga automáticamente en el futuro.";
+      } else if (
+        // Fallback receipt detection: catches edge cases where Claude misclassified
+        // a payment text as a different intent but the message clearly references payment.
+        // payment_receipt intent is handled above; this catches any remainder.
+        /comprobante|transferencia|deposit[eé]|ya pagu[eé]|ya deposit[eé]|te mand[eé]/i.test(
+          message,
+        )
+      ) {
+        const saleContext = extractSaleContext(allTurns);
+        reason =
+          "El cliente posiblemente envió un comprobante de pago — pedido pendiente de confirmación.";
+        suggestedAction =
+          "Verificar la transferencia en tu cuenta bancaria y confirmar el pedido al cliente por WhatsApp. Preguntarle qué producto, talla y color quiere si no está claro.";
+        escalationMessage = buildPaymentReceiptEscalation({
+          customerPhone: from,
+          customerName,
+          saleContext,
+        });
+      } else if (intent === "product_search" && productImages.length === 0) {
+        const keyword = searchHints?.keyword ?? "producto no especificado";
+        const size = searchHints?.size;
+        const color = searchHints?.color;
+        inventoryResult = `No se encontraron productos disponibles que coincidan con "${keyword}"${color ? ` color ${color}` : ""}${size ? ` talla ${size}` : ""}.`;
+        reason =
+          "El bot no puede confirmar disponibilidad porque el producto no existe actualmente en inventario.";
+        suggestedAction = `Responder con una alternativa disponible o confirmar si se puede conseguir "${keyword}"${color ? ` en ${color}` : ""} sobre pedido.`;
+      } else if (intent === "create_order") {
+        const items =
+          result.orderHints
+            ?.map(
+              (h) => `${h.productNameHint} talla ${h.size} color ${h.color}`,
+            )
+            .join(", ") ?? "sin detalle";
+        reason = `El pedido no pudo crearse automáticamente. Producto(s): ${items}. Posible causa: producto desactivado en catálogo o nombre no reconocido.`;
+        suggestedAction =
+          "Verificar que el producto está activo en el inventario SALO. Si está activo, crear el pedido manualmente desde la app.";
+      } else {
+        reason = `Escalación forzada por estado inesperado (intent: ${intent}).`;
+        suggestedAction =
+          "Revisar logs de Railway y responder al cliente manualmente.";
+      }
+
+      // Only build if not already set by the fallback receipt branch above
+      if (!escalationMessage) {
+        escalationMessage = buildEscalationMessage({
+          customerPhone: from,
+          customerName,
+          customerMessage: message,
+          intent,
+          searchHints,
+          orderHints: result.orderHints,
+          inventoryResult,
+          reason,
+          suggestedAction,
+        });
+      }
+    }
   }
 
   // ── Persist conversation ──────────────────────────────────────────────────
