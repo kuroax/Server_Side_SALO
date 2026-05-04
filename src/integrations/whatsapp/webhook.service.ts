@@ -1448,24 +1448,23 @@ export const handleIncomingMessage = async (
     : message;
 
   // When product images are being sent, extract product data from captions and
-  // store a structured summary as an extra assistant turn in history.
+  // append a structured summary to the assistant turn content.
   //
-  // WHY: the tool call results (product names, prices, colors) are passed to
-  // Claude during the agentic loop but ONLY Claude's final text response is
-  // persisted. When the customer replies to a gallery image asking "cómo se llama"
-  // or "cuánto cuesta", the history has no product data — just "¡Sipi! te muestro...".
+  // WHY: tool call results (names, prices, colors) are computed in the agentic
+  // loop and passed to Claude but only Claude's final text response is persisted.
+  // When the customer replies to a gallery image asking "cómo se llama" or
+  // "cuánto cuesta", the history has "¡Sipi! Te muestro..." with no product data.
   //
-  // The caption format set in searchProductsForClaude is:
-  //   "$1,990 — Jersey Alo Athletic Heather Grey (Alo)"
-  // or for secondary photos (no caption, empty string).
+  // The summary is APPENDED to the same assistant turn — NOT stored as a
+  // separate turn. Storing it as a separate assistant turn causes two consecutive
+  // assistant roles, which the Anthropic API rejects with 400, causing
+  // SAFE_FALLBACK on every subsequent gallery reply.
   //
-  // Storing a [Productos enviados:] note gives Claude the product data it needs
-  // to answer follow-up questions without re-running the search.
-  const productTurns: Array<{
-    role: "user" | "assistant";
-    content: string;
-    createdAt: Date;
-  }> = [];
+  // Caption format from searchProductsForClaude:
+  //   "$1,990 — Jersey Alo Athletic Heather Grey (Alo)"  (first image of product)
+  //   ""  (secondary images — no caption)
+  // Filtering to non-empty captions gives one line per unique product.
+  let storedAssistantContent = result.response;
 
   if (productImages.length > 0 && result.intent === "product_search") {
     const uniqueProducts = productImages
@@ -1474,19 +1473,15 @@ export const handleIncomingMessage = async (
 
     if (uniqueProducts.length > 0) {
       const productSummary =
-        `[Productos enviados al cliente en este turn:\n` +
+        `\n\n[Productos enviados al cliente en este turn:\n` +
         uniqueProducts.map((p, i) => `${i + 1}. ${p}`).join("\n") +
         `\nEl cliente puede preguntar el nombre o precio de cualquiera de estos.]`;
 
-      productTurns.push({
-        role: "assistant" as const,
-        content: productSummary,
-        createdAt: new Date(),
-      });
+      storedAssistantContent = result.response + productSummary;
 
       logger.info(
         { customerId, productsLogged: uniqueProducts.length },
-        "Product summary stored in conversation history for gallery reply resolution",
+        "Product summary appended to assistant turn for gallery reply resolution",
       );
     }
   }
@@ -1504,10 +1499,9 @@ export const handleIncomingMessage = async (
             },
             {
               role: "assistant" as const,
-              content: result.response,
+              content: storedAssistantContent,
               createdAt: new Date(),
             },
-            ...productTurns,
           ],
           $slice: -MAX_CONVERSATION_TURNS,
         },
