@@ -137,12 +137,21 @@ const claudeResultSchema = z.union([
     detectedGender: z.enum(["female", "male"]).optional(),
   }),
   z.object({
+    // payment_receipt: orderHints optional — Claude includes them when it can
+    // identify the customer's product selections from the conversation history.
+    // Backend uses these for the escalation message to the owner and to display
+    // a cart summary in the acknowledgment without asking the customer again.
+    intent: z.literal("payment_receipt"),
+    response: z.string().min(1),
+    orderHints: z.array(orderHintSchema).optional(),
+    detectedGender: z.enum(["female", "male"]).optional(),
+  }),
+  z.object({
     intent: z.enum([
       "catalog_query",
       "price_query",
       "order_status",
       "payment_info",
-      "payment_receipt",
       "needs_human",
       "general",
     ]),
@@ -492,27 +501,46 @@ El cliente menciona que el producto es para otra persona ("para mi novia", "para
 Cuando el cliente diga "ya pagué", "ya deposité", "ya transferí", "aquí está el comprobante",
 "te mandé la transferencia", "ya hice el pago", o cualquier frase indicando que realizó el pago:
 
+PASO 1 — REVISA EL HISTORIAL (obligatorio antes de responder):
+Busca en los últimos mensajes del asistente líneas con ⭐️ (formato de confirmación de pedido)
+o productos que el cliente haya seleccionado o confirmado explícitamente.
+
+PASO 2a — SI ENCONTRASTE PRODUCTOS EN EL HISTORIAL:
 → intent: payment_receipt
-→ Agradece de forma cálida y específica — el cliente acaba de completar una acción importante.
-→ Confirma que el equipo verificará el pago.
-→ Si no está claro en el historial, pide confirmación de: producto, talla y color.
-→ El sistema notificará al dueño automáticamente para verificar la transferencia.
+→ Incluye orderHints con los productos identificados (producto, talla, color, cantidad).
+→ Responde con el resumen del carrito — formato exacto:
+
+(masculino)
+"¡Recibido amigo! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia.
+
+Tengo esto para apartarte:
+1. [Producto] color [color] talla [talla]
+2. ...
+
+¿Confirmas que está correcto? En cuanto verifiquen el pago te confirmo 🙏🏻"
+
+(femenino)
+"¡Recibido bonita! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia.
+
+Tengo esto para apartarte:
+1. [Producto] color [color] talla [talla]
+
+¿Confirmas que está correcto? En cuanto verifiquen el pago te confirmo 🙏🏻"
+
+PASO 2b — SI NO ENCONTRASTE PRODUCTOS CLAROS EN EL HISTORIAL:
+→ intent: payment_receipt
+→ NO incluyas orderHints
+→ Responde pidiendo solo la información que realmente falta:
+
+"¡Recibido [amigo/bonita]! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia.
+¿Me confirmas qué producto, talla y color quieres apartar? 🙏🏻"
 
 REGLAS ABSOLUTAS para payment_receipt:
 ✗ NUNCA uses "Permíteme un momento" — el cliente ya pagó, merece respuesta directa.
 ✗ NUNCA uses intent payment_info — ese es para cuando el cliente PREGUNTA a dónde pagar.
-✗ NUNCA confirmes el pedido (create_order) — el pago debe verificarse primero.
-✗ NUNCA inventes que ya verificaste el pago — todavía no ha sido confirmado.
-
-✅ Ejemplo de respuesta correcta (masculino):
-"¡Recibido amigo! 🙌🏼 Ya le aviso al equipo para que verifiquen tu transferencia.
-En cuanto confirmen, te escribo de inmediato 🙏🏻
-¿Me confirmas qué producto, talla y color quieres apartar?"
-
-✅ Ejemplo de respuesta correcta (femenino):
-"¡Recibido bonita! 🙌🏼 Ya le aviso al equipo para que verifiquen tu transferencia.
-En cuanto confirmen, te escribo de inmediato 🙏🏻
-¿Me confirmas qué producto, talla y color quieres apartar?"
+✗ NUNCA uses create_order — el pago debe verificarse primero, el pedido lo crea el dueño.
+✗ NUNCA inventes productos que no aparezcan en el historial.
+✗ NUNCA vuelvas a pedir producto/talla/color si ya está claro en el historial.
 
 ─── CUANDO EL CLIENTE ENVÍA MÚLTIPLES INTENCIONES EN UN MENSAJE ──────────────
 
@@ -614,9 +642,24 @@ Para intent product_search (úsalo DESPUÉS de llamar search_products):
   "detectedGender": "male" | "female"  // solo si detectaste señal explícita
 }
 
+Para intent payment_receipt (orderHints OPCIONAL — incluir solo si identificaste productos del historial):
+{
+  "intent": "payment_receipt",
+  "response": "tu respuesta aquí (cart summary si tienes productos, pregunta si no)",
+  "orderHints": [                         // OMITIR si no encontraste productos claros
+    {
+      "productNameHint": "nombre del producto identificado en el historial",
+      "size": "talla",
+      "color": "color",
+      "quantity": 1
+    }
+  ],
+  "detectedGender": "male" | "female"   // solo si detectaste señal explícita
+}
+
 Para cualquier otro intent (orderHints PROHIBIDO):
 {
-  "intent": "catalog_query" | "price_query" | "order_status" | "payment_info" | "payment_receipt" | "needs_human" | "general",
+  "intent": "catalog_query" | "price_query" | "order_status" | "payment_info" | "needs_human" | "general",
   "response": "tu respuesta aquí",
   "detectedGender": "male" | "female"  // solo si detectaste señal explícita
 }`;

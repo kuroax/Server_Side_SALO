@@ -151,35 +151,6 @@ function buildEscalationMessage(ctx: EscalationContext): string {
 
 // Dedicated builder for payment receipt escalation — gives the owner a complete
 // picture with sale context so they can verify without reading the full chat.
-function buildPaymentReceiptEscalation({
-  customerPhone,
-  customerName,
-  saleContext,
-}: {
-  customerPhone: string;
-  customerName: string | null;
-  saleContext: string;
-}): string {
-  const lines: string[] = [
-    "🧾 Comprobante de pago recibido",
-    "",
-    `Cliente: ${customerName ?? "Sin nombre"} (${customerPhone})`,
-    "",
-    "Contexto de venta reciente:",
-    saleContext,
-    "",
-    "─────────────────────────────────",
-    "⚠️  El pedido NO ha sido creado — en espera de verificación de pago.",
-    "✅ Verifica la transferencia en tu cuenta bancaria.",
-    "✅ Una vez confirmado, respóndele al cliente directamente.",
-    "✅ Si el pedido no está claro, pregúntale: producto, talla y color.",
-    "",
-    `📱 Ver comprobante: chat de WhatsApp con ${customerPhone}`,
-  ];
-
-  return lines.join("\n");
-}
-
 // ─── Conversation helpers ─────────────────────────────────────────────────────
 
 type ConversationTurn = { role: string; content: string };
@@ -201,23 +172,156 @@ function hasRecentPaymentInfoContext(turns: ConversationTurn[]): boolean {
   );
 }
 
-// Scans recent assistant turns for product lines in order-confirmation format
-// (⭐️ Product talla S color negro $2,190) to give the owner sale context in
-// the receipt escalation message.
-function extractSaleContext(turns: ConversationTurn[]): string {
-  const recentTurns = turns.slice(-12);
-  const productLines: string[] = [];
+// ─── Cart helpers ─────────────────────────────────────────────────────────────
+
+// A parsed product selection extracted from conversation history.
+// description is the human-readable product line from Luis's ⭐️ confirmation format.
+// price is parsed from the line if present — used for display in the ack message.
+type CartItem = {
+  description: string;
+  price?: number;
+};
+
+// Scans recent assistant turns for ⭐️ lines (Luis's order confirmation format):
+//   "⭐️Bra Alo color negro Talla S $2,190"
+//   "⭐️ Legging Alo color negro talla S"
+// Returns one CartItem per distinct product line, deduplicating across turns
+// (Claude sometimes repeats the summary across multiple messages).
+//
+// This is the backend's "shopping cart" — used on the image receipt path where
+// Claude is not in the loop, and as a fallback on the text receipt path when
+// Claude provides no orderHints.
+function extractCartFromHistory(turns: ConversationTurn[]): CartItem[] {
+  const recentTurns = turns.slice(-15);
+  const seen = new Set<string>();
+  const items: CartItem[] = [];
 
   for (const turn of recentTurns) {
-    if (turn.role === "assistant") {
-      const starLines = turn.content.match(/⭐️[^\n]+/g);
-      if (starLines) productLines.push(...starLines);
+    if (turn.role !== "assistant") continue;
+
+    const starLines = turn.content.match(/⭐️\s*([^\n]+)/g) ?? [];
+    for (const raw of starLines) {
+      const line = raw.replace(/^⭐️\s*/, "").trim();
+
+      // Skip template placeholders ("[Producto]...") and Total lines
+      if (/^\[|\bTotal\b/i.test(line)) continue;
+
+      // Extract trailing price: "$2,190" or "— $2,190"
+      const priceMatch = line.match(/\$\s*([\d,]+)\s*$/);
+      const price = priceMatch
+        ? parseInt(priceMatch[1].replace(/,/g, ""), 10)
+        : undefined;
+
+      // Strip price suffix and normalize whitespace
+      const description = line
+        .replace(/[-–—]?\s*\$[\d,.\s]+$/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!description || seen.has(description)) continue;
+      seen.add(description);
+      items.push({ description, price });
     }
   }
 
-  return productLines.length > 0
-    ? productLines.join("\n")
-    : "Sin detalle de productos en el historial reciente — revisar el chat completo.";
+  return items;
+}
+
+// Builds the customer-facing receipt acknowledgment.
+// When a cart was found, shows a numbered summary and asks for confirmation —
+// the customer never has to repeat what they already said.
+// Falls back to a generic ask only when the cart is genuinely empty.
+function buildReceiptAck(
+  gender: "female" | "male" | "unknown",
+  cart: CartItem[],
+): string {
+  const pronoun = gender === "male" ? "amigo" : "bonita";
+
+  if (cart.length === 0) {
+    return (
+      `¡Recibido ${pronoun}! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia. ` +
+      `En cuanto confirmen, te escribo de inmediato 🙏🏻\n` +
+      `¿Me confirmas qué producto, talla y color quieres apartar?`
+    );
+  }
+
+  const itemLines = cart
+    .map((item, i) => {
+      const priceStr = item.price
+        ? ` — $${item.price.toLocaleString("es-MX")}`
+        : "";
+      return `${i + 1}. ${item.description}${priceStr}`;
+    })
+    .join("\n");
+
+  return (
+    `¡Recibido ${pronoun}! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia.\n\n` +
+    `Tengo esto para apartarte:\n${itemLines}\n\n` +
+    `¿Confirmas que está correcto? En cuanto verifiquen el pago te confirmo 🙏🏻`
+  );
+}
+
+// Converts orderHints (Claude's structured output) to CartItem[] so both the
+// Claude-driven text path and the backend-driven image path share the same
+// escalation builder signature.
+function orderHintsToCart(
+  hints: Array<{
+    productNameHint: string;
+    size: string;
+    color: string;
+    quantity: number;
+  }>,
+): CartItem[] {
+  return hints.map((h) => ({
+    description: `${h.productNameHint} color ${h.color} talla ${h.size}${h.quantity > 1 ? ` x${h.quantity}` : ""}`,
+  }));
+}
+
+// Dedicated builder for payment receipt escalation.
+// cart is either from Claude's orderHints (text path) or extractCartFromHistory
+// (image path). Either way the owner gets a structured list without reading the
+// full chat.
+function buildPaymentReceiptEscalation({
+  customerPhone,
+  customerName,
+  cart,
+}: {
+  customerPhone: string;
+  customerName: string | null;
+  cart: CartItem[];
+}): string {
+  const lines: string[] = [
+    "🧾 Comprobante de pago recibido",
+    "",
+    `Cliente: ${customerName ?? "Sin nombre"} (${customerPhone})`,
+    "",
+    "Pedido pendiente de verificación:",
+  ];
+
+  if (cart.length > 0) {
+    for (const item of cart) {
+      const priceStr = item.price
+        ? ` — $${item.price.toLocaleString("es-MX")}`
+        : "";
+      lines.push(`  • ${item.description}${priceStr}`);
+    }
+  } else {
+    lines.push(
+      "  Sin detalle de productos en el historial — revisar el chat completo.",
+    );
+  }
+
+  lines.push(
+    "",
+    "─────────────────────────────────",
+    "⚠️  El pedido NO ha sido creado — en espera de verificación de pago.",
+    "✅ Verifica la transferencia en tu cuenta bancaria.",
+    "✅ Una vez confirmado, respóndele al cliente directamente.",
+    "",
+    `📱 Ver comprobante: chat de WhatsApp con ${customerPhone}`,
+  );
+
+  return lines.join("\n");
 }
 
 // ─── Integration boundary schemas ─────────────────────────────────────────────
@@ -710,12 +814,15 @@ export const handleIncomingMessage = async (
         "Image message after payment_info context — treating as payment receipt, skipping product search",
       );
 
-      const saleContext = extractSaleContext(allTurns);
-      const genderPronoun = customerGender === "male" ? "amigo" : "bonita";
-      const receiptAck =
-        `¡Recibido ${genderPronoun}! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia. ` +
-        `En cuanto confirmen, te escribo de inmediato 🙏🏻\n` +
-        `¿Me confirmas qué producto, talla y color quieres apartar?`;
+      // Extract product selections from conversation history so the ack message
+      // shows the customer what they're confirming — not a generic "what do you want?"
+      const cart = extractCartFromHistory(allTurns);
+      const receiptAck = buildReceiptAck(customerGender, cart);
+
+      logger.info(
+        { customerId, cartItems: cart.length },
+        "Payment receipt — built cart-aware ack from conversation history",
+      );
 
       // Persist the receipt turn so subsequent text messages have this context.
       // Storing "[Comprobante de pago enviado]" as the user turn prevents Claude
@@ -755,7 +862,7 @@ export const handleIncomingMessage = async (
           escalationMessage: buildPaymentReceiptEscalation({
             customerPhone: from,
             customerName,
-            saleContext,
+            cart,
           }),
         },
         from,
@@ -1008,13 +1115,17 @@ export const handleIncomingMessage = async (
   // comprobante", "ya transferí", etc. via text message.
   // (The image-receipt case is handled earlier in section 2a.)
   //
-  // We escalate to the owner with full sale context but do NOT:
+  // Claude's response already contains the cart summary (system prompt instructs
+  // it to check history and include a numbered list). We just set escalate and
+  // let the escalation builder below use orderHints for the owner message.
+  //
+  // We do NOT:
   //   - inject the bank account image (already sent in a prior payment_info turn)
-  //   - create an order (payment must be verified first)
+  //   - create an order (payment must be verified first — owner confirms manually)
   if (result.intent === "payment_receipt") {
     escalate = true;
     logger.info(
-      { customerId, messageId },
+      { customerId, messageId, cartItems: result.orderHints?.length ?? 0 },
       "payment_receipt intent — escalating to owner for payment verification",
     );
   }
@@ -1133,13 +1244,17 @@ export const handleIncomingMessage = async (
 
     const intent = result.intent;
 
-    // payment_receipt: use the dedicated builder with sale context
+    // payment_receipt: use the dedicated builder with structured cart.
+    // Prefer Claude's orderHints (it already read the conversation history).
+    // Fall back to extractCartFromHistory if Claude provided no orderHints.
     if (intent === "payment_receipt") {
-      const saleContext = extractSaleContext(allTurns);
+      const cart = result.orderHints?.length
+        ? orderHintsToCart(result.orderHints)
+        : extractCartFromHistory(allTurns);
       escalationMessage = buildPaymentReceiptEscalation({
         customerPhone: from,
         customerName,
-        saleContext,
+        cart,
       });
     } else {
       // All other escalation reasons use the general builder
@@ -1166,7 +1281,7 @@ export const handleIncomingMessage = async (
           message,
         )
       ) {
-        const saleContext = extractSaleContext(allTurns);
+        const cart = extractCartFromHistory(allTurns);
         reason =
           "El cliente posiblemente envió un comprobante de pago — pedido pendiente de confirmación.";
         suggestedAction =
@@ -1174,7 +1289,7 @@ export const handleIncomingMessage = async (
         escalationMessage = buildPaymentReceiptEscalation({
           customerPhone: from,
           customerName,
-          saleContext,
+          cart,
         });
       } else if (intent === "product_search" && productImages.length === 0) {
         const keyword = searchHints?.keyword ?? "producto no especificado";
