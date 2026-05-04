@@ -164,10 +164,10 @@ const claudeResultSchema = z.union([
 // ─── Tool input schema ────────────────────────────────────────────────────────
 
 const searchProductsInputSchema = z.object({
-  keyword: z.string().min(1),
+  keyword: z.string().trim().min(1).max(80),
   gender: z.enum(["female", "male", "unknown"]).optional(),
-  size: z.string().optional(),
-  color: z.string().optional(), // Added
+  size: z.string().trim().max(20).optional(),
+  color: z.string().trim().max(40).optional(),
 });
 
 // ─── Tool definition ──────────────────────────────────────────────────────────
@@ -777,10 +777,19 @@ type AgenticResult = {
   productImages: Array<{ url: string; caption?: string }>;
 };
 
+// Image caps — controls how many product photos are sent per search response.
+// Prevents WhatsApp delivery issues and bad UX when the catalog returns many
+// results. Applied inside the tool loop so the cap is enforced regardless of
+// how many items the DB returns.
+const MAX_PRODUCTS_PER_SEARCH = 4;
+const MAX_IMAGES_PER_PRODUCT = 3;
+const MAX_IMAGES_TOTAL = 12;
+
 async function runAgenticLoop(
   baseParams: Anthropic.MessageCreateParamsNonStreaming,
   timeoutMs: number,
   searchProducts: SearchProductsFn,
+  depositPercent: number,
 ): Promise<AgenticResult> {
   const messages: Anthropic.MessageParam[] = [
     ...(baseParams.messages as Anthropic.MessageParam[]),
@@ -858,11 +867,16 @@ async function runAgenticLoop(
         items = [];
       }
 
-      for (const item of items) {
-        // item.images is now an array of all product photos.
-        // Each image is pushed individually so the customer receives a full gallery
-        // in the order the owner uploaded them — main photo first.
-        for (const img of item.images) {
+      // Apply image caps before accumulating.
+      // MAX_PRODUCTS_PER_SEARCH: prevents flooding the customer with too many gallery items.
+      // MAX_IMAGES_PER_PRODUCT: keeps each product to its key shots (main + 2 detail).
+      // MAX_IMAGES_TOTAL: hard ceiling across all products in this tool call.
+      const depositRate = depositPercent / 100;
+      const limitedItems = items.slice(0, MAX_PRODUCTS_PER_SEARCH);
+
+      for (const item of limitedItems) {
+        for (const img of item.images.slice(0, MAX_IMAGES_PER_PRODUCT)) {
+          if (accumulatedImages.length >= MAX_IMAGES_TOTAL) break;
           accumulatedImages.push({ url: img.url, caption: img.caption });
         }
       }
@@ -876,8 +890,12 @@ async function runAgenticLoop(
       //     quoting $597 (from a $1,990 product) when the customer picks up a
       //     $2,500 item from the same gallery.
       const singleProductInstruction = (p: ProductSearchItem) => {
-        const deposit = Math.ceil(p.price * 0.3).toLocaleString("es-MX");
-        return `INSTRUCCIÓN: En tu respuesta anuncia que las imágenes vienen y menciona el precio y anticipo: "Puedes ordenar con el 30% equivalente a $${deposit} y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en 20 días.`;
+        // depositPercent passed from businessInfo — not hardcoded to 30.
+        // Supports future boutiques with different deposit policies.
+        const deposit = Math.ceil(p.price * depositRate).toLocaleString(
+          "es-MX",
+        );
+        return `INSTRUCCIÓN: En tu respuesta anuncia que las imágenes vienen y menciona el precio y anticipo: "Puedes ordenar con el ${depositPercent}% equivalente a $${deposit} y liquidar dentro de 20 días 🙌🏼". Si no se mencionó talla, pregúntala. Pregunta si prefieren entrega inmediata o liquidar en 20 días.`;
       };
 
       const multiProductInstruction =
@@ -894,12 +912,12 @@ async function runAgenticLoop(
             "Si la búsqueda alternativa también devuelve 0 resultados, ofrece una alternativa de producto disponible inmediatamente (otra categoría, otra marca, otro color) " +
             "o usa needs_human para que el dueño sea notificado realmente y pueda hacer seguimiento. " +
             "NUNCA menciones al dueño ni prometas confirmación futura a menos que uses needs_human."
-          : `Encontré ${items.length} producto(s) disponible(s) [entrega inmediata]:\n${items
+          : `Encontré ${limitedItems.length} producto(s) disponible(s) [entrega inmediata]:\n${limitedItems
               .map((p) => {
-                const deposit = Math.ceil(p.price * 0.3).toLocaleString(
+                const deposit = Math.ceil(p.price * depositRate).toLocaleString(
                   "es-MX",
                 );
-                return `- ${p.name} color ${p.color} (${p.brand}) — $${p.price.toLocaleString("es-MX")} MXN | anticipo 30% = $${deposit}`;
+                return `- ${p.name} color ${p.color} (${p.brand}) — $${p.price.toLocaleString("es-MX")} MXN | anticipo ${depositPercent}% = $${deposit}`;
               })
               .join(
                 "\n",
@@ -1042,6 +1060,7 @@ INFORMACIÓN DEL NEGOCIO:
       },
       requestTimeoutMs,
       searchProducts,
+      businessInfo.depositPercent,
     );
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "TimeoutError";
