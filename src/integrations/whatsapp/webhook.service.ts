@@ -960,6 +960,18 @@ export const handleIncomingMessage = async (
         "El cliente preguntó por los datos de pago pero BANK_ACCOUNT_IMAGE_URL no está configurado en Railway.";
       suggestedAction =
         "Enviar los datos bancarios manualmente al cliente. Configurar BANK_ACCOUNT_IMAGE_URL en Railway → Server_Side_SALO → Variables para que el bot lo haga automáticamente en el futuro.";
+    } else if (
+      // Deposit receipt detection: image or text with payment keywords after
+      // payment_info was already handled in this conversation.
+      messageType === "image" ||
+      /comprobante|transferencia|deposit[eé]|ya pagu[eé]|ya deposit[eé]|te mand[eé]/i.test(
+        message,
+      )
+    ) {
+      reason =
+        "El cliente posiblemente envió un comprobante de pago — pedido pendiente de confirmación.";
+      suggestedAction =
+        "Verificar la transferencia en tu cuenta bancaria y confirmar el pedido al cliente por WhatsApp. Preguntarle qué producto, talla y color quiere si no está claro.";
     } else if (intent === "product_search" && productImages.length === 0) {
       const keyword = searchHints?.keyword ?? "producto no especificado";
       const size = searchHints?.size;
