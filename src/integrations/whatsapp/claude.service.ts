@@ -226,13 +226,12 @@ const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
 
-// Raised from 1024 to 2048. With 9 images accumulated from 3 products,
-// the tool result text sent back to Claude is substantially larger than
-// a single-product search. Claude needs enough token budget to receive
-// the full tool result AND produce a valid JSON response. At 1024 tokens
-// the response was truncated or Claude produced plain text instead of JSON,
-// triggering the non_json_response fallback.
-const MAX_TOKENS = 2048;
+// Raised from 2048 to 3072. With multi-intent messages (image context + product
+// selection + payment question) and 9 images accumulated from 3 products, Claude
+// needs more token budget to receive the full tool result AND produce a valid JSON
+// response. At 2048 tokens Claude was breaking out of JSON format on complex turns,
+// producing plain text and triggering non_json_response → SAFE_FALLBACK.
+const MAX_TOKENS = 3072;
 
 // Base timeout for short conversations. Extended dynamically per conversation
 // length below — longer history means more input tokens and slower responses.
@@ -438,11 +437,24 @@ FLUJO CORRECTO:
 2. Si encuentras resultados: usa intent "product_search" y responde anunciando que los mostrarás.
 3. Si no encuentras resultados: intenta una búsqueda más amplia antes de escalar.
 
-CRÍTICO — DESPUÉS DE LLAMAR search_products SIEMPRE RESPONDE EN JSON:
-Tu respuesta final DESPUÉS de recibir resultados de search_products DEBE ser JSON válido.
-NUNCA respondas en texto libre después de una llamada a la herramienta.
-Ejemplo correcto:
-{"intent":"product_search","response":"Sipi! Te muestro los tops que tengo disponibles ✨"}
+─── REGLA ABSOLUTA — RESPUESTA POST TOOL CALL ────────────────────────────────
+
+Después de recibir el resultado de search_products, tu ÚNICA respuesta posible
+es un objeto JSON válido. Sin introducción. Sin texto antes. Sin texto después.
+
+Si escribes texto libre en lugar de JSON después de una tool call, el sistema
+entero falla silenciosamente: el cliente no recibe respuesta, el bot manda
+"Permíteme un momento" y el dueño recibe una alerta de error innecesaria.
+
+Esto aplica SIEMPRE — incluso cuando el mensaje del cliente tiene múltiples
+intenciones, incluso cuando quieres ser amable, incluso cuando hay contexto
+adicional ("para mi novia", "es un regalo"). La respuesta SIEMPRE es JSON.
+
+✅ CORRECTO:
+{"intent":"product_search","response":"¡Perfecto amigo! Te muestro las sudaderas Alo que tengo ✨"}
+
+❌ INCORRECTO (causa fallo total del sistema):
+¡Perfecto amigo! Te muestro las sudaderas Alo que tengo ✨
 
 ─── FLUJO DE DESCUBRIMIENTO — CÓMO ENTENDER QUÉ BUSCA EL CLIENTE ─────────────
 
@@ -571,6 +583,8 @@ NUNCA uses needs_human para:
 
 ─── CONTRATO DE RESPUESTA — JSON ESTRICTO ─────────────────────────────────────
 
+IMPORTANTE: Este contrato aplica para TODOS los mensajes — especialmente después
+de llamar search_products. La respuesta es SIEMPRE y ÚNICAMENTE JSON puro.
 Sin markdown. Sin texto antes o después del JSON. Sin comentarios.
 
 Para intent create_order (orderHints OBLIGATORIO y no vacío):

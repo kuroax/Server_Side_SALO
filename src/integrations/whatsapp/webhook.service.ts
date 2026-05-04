@@ -567,7 +567,7 @@ export const handleIncomingMessage = async (
         tags: [],
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   ).lean();
 
   if (!customer) {
@@ -649,7 +649,7 @@ export const handleIncomingMessage = async (
           },
           $set: { lastMessageAt: new Date() },
         },
-        { upsert: true, new: true },
+        { upsert: true, returnDocument: "after" },
       );
 
       return toSafeResult(
@@ -691,7 +691,7 @@ export const handleIncomingMessage = async (
           },
           $set: { lastMessageAt: new Date() },
         },
-        { upsert: true, new: true },
+        { upsert: true, returnDocument: "after" },
       );
 
       return toSafeResult(
@@ -722,10 +722,39 @@ export const handleIncomingMessage = async (
     customerId,
     channel: "whatsapp",
   }).lean();
-  const conversationHistory = (conversation?.turns ?? []).map((t) => ({
-    role: t.role as "user" | "assistant",
-    content: t.content,
-  }));
+
+  // ── Conversation history window ───────────────────────────────────────────
+  // Only the last 10 turns (5 exchanges) are sent to Claude on each call.
+  // Sending the full history grows input tokens linearly with conversation
+  // length — at 50 turns this adds ~7,500 tokens per request unnecessarily.
+  // Luis only needs recent context: what product was shown, what size was
+  // asked, what was just confirmed. Older turns are stored in MongoDB for
+  // owner review but never sent to the AI.
+  //
+  // 24h reset: if the customer's last message was over 24 hours ago, start
+  // with empty history. A returning customer is starting a new session —
+  // sending yesterday's product gallery context confuses Claude since
+  // inventory may have changed and the conversation thread is stale.
+  const MAX_HISTORY_TURNS_FOR_AI = 10;
+  const allTurns = conversation?.turns ?? [];
+  const lastMessageAt = conversation?.lastMessageAt;
+  const isStaleConversation =
+    lastMessageAt &&
+    Date.now() - new Date(lastMessageAt).getTime() > 24 * 60 * 60 * 1000;
+
+  const conversationHistory = isStaleConversation
+    ? []
+    : allTurns.slice(-MAX_HISTORY_TURNS_FOR_AI).map((t) => ({
+        role: t.role as "user" | "assistant",
+        content: t.content,
+      }));
+
+  if (isStaleConversation) {
+    logger.info(
+      { customerId, lastMessageAt, messageId },
+      "Stale conversation (>24h) — sending empty history to Claude",
+    );
+  }
 
   // NOTE: add { customerId: 1, createdAt: -1 } compound index on orders if
   // this sort becomes slow when order volume grows beyond pilot scale.
@@ -782,7 +811,7 @@ export const handleIncomingMessage = async (
         },
         $set: { lastMessageAt: new Date() },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: "after" },
     );
 
     return toSafeResult(
@@ -1027,7 +1056,7 @@ export const handleIncomingMessage = async (
       },
       $set: { lastMessageAt: new Date() },
     },
-    { upsert: true, new: true },
+    { upsert: true, returnDocument: "after" },
   );
 
   logger.info(

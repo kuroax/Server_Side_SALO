@@ -379,7 +379,7 @@ export const updateProduct = async (
   const product = await ProductModel.findByIdAndUpdate(
     productId,
     { $set: updateData },
-    { new: true, runValidators: true },
+    { returnDocument: "after", runValidators: true },
   ).lean<ProductLike>();
 
   if (!product) {
