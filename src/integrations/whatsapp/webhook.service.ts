@@ -1412,6 +1412,50 @@ export const handleIncomingMessage = async (
     ? "[Audio]"
     : message;
 
+  // When product images are being sent, extract product data from captions and
+  // store a structured summary as an extra assistant turn in history.
+  //
+  // WHY: the tool call results (product names, prices, colors) are passed to
+  // Claude during the agentic loop but ONLY Claude's final text response is
+  // persisted. When the customer replies to a gallery image asking "cómo se llama"
+  // or "cuánto cuesta", the history has no product data — just "¡Sipi! te muestro...".
+  //
+  // The caption format set in searchProductsForClaude is:
+  //   "$1,990 — Jersey Alo Athletic Heather Grey (Alo)"
+  // or for secondary photos (no caption, empty string).
+  //
+  // Storing a [Productos enviados:] note gives Claude the product data it needs
+  // to answer follow-up questions without re-running the search.
+  const productTurns: Array<{
+    role: "user" | "assistant";
+    content: string;
+    createdAt: Date;
+  }> = [];
+
+  if (productImages.length > 0 && result.intent === "product_search") {
+    const uniqueProducts = productImages
+      .filter((img) => img.caption && img.caption.trim() !== "")
+      .map((img) => img.caption!.trim());
+
+    if (uniqueProducts.length > 0) {
+      const productSummary =
+        `[Productos enviados al cliente en este turn:\n` +
+        uniqueProducts.map((p, i) => `${i + 1}. ${p}`).join("\n") +
+        `\nEl cliente puede preguntar el nombre o precio de cualquiera de estos.]`;
+
+      productTurns.push({
+        role: "assistant" as const,
+        content: productSummary,
+        createdAt: new Date(),
+      });
+
+      logger.info(
+        { customerId, productsLogged: uniqueProducts.length },
+        "Product summary stored in conversation history for gallery reply resolution",
+      );
+    }
+  }
+
   await ConversationModel.findOneAndUpdate(
     { customerId, channel: "whatsapp" },
     {
@@ -1428,6 +1472,7 @@ export const handleIncomingMessage = async (
               content: result.response,
               createdAt: new Date(),
             },
+            ...productTurns,
           ],
           $slice: -MAX_CONVERSATION_TURNS,
         },
