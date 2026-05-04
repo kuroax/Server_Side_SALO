@@ -1016,7 +1016,7 @@ export const handleIncomingMessage = async (
   // Does NOT fire when the message contains a specific product noun
   // (suéter, legging, bra, etc.) — those go to Claude normally.
   const specificProductPattern =
-    /legging|bra|top|jersey|suéter|sudader|short|jogger|set\b|calcet|sock|chaqueta|playera|blusa|pantalón|hoodie|crop|conjunto|outfit|prenda/i;
+    /legging|bra|top|jersey|suéter|sudader|short|jogger|set\b|calcet|sock|chaqueta|playera|blusa|pantalón|hoodie|crop|conjunto|outfit|prenda|\balo\b|lululemon|wiskii/i;
 
   const broadCatalogPattern =
     /^(?:hola+[!¡]?\s*)?(?:qu[eé]\s+(?:productos?|tienes?|hay|manejas?|vendes?|tienen|tienen\s+disponible)|qu[eé]\s+tienes?|muestrame\s+todo|qu[eé]\s+hay\s+disponible|qu[eé]\s+tienen?\s+disponible|tienen?\s+algo\s+disponible|tienes?\s+algo|qu[eé]\s+venden?)/i;
