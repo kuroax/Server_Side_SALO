@@ -53,6 +53,7 @@ function toSafeResult(
   raw: unknown,
   customerPhone = "",
   customerName: string | null = null,
+  gender: "female" | "male" | "unknown" = "unknown",
 ): WebhookResult {
   const parsed = webhookResultSchema.safeParse(raw);
   if (!parsed.success) {
@@ -60,12 +61,8 @@ function toSafeResult(
       { issues: parsed.error.issues, raw },
       "WebhookResult failed schema validation — escalating instead of silent empty",
     );
-    // NOTE: hardcoded female tone here because toSafeResult is called before
-    // customerGender is resolved in early guard paths (e.g. customer upsert null).
-    // For paths where customerGender is known, buildErrorReply(gender) is used instead.
     return {
-      reply:
-        "Lo siento bonita, hubo un problema técnico. Alguien del equipo te contactará pronto 🙏🏻",
+      reply: buildErrorReply(gender),
       escalate: true,
       customerPhone,
       customerName,
@@ -192,7 +189,9 @@ type ProcessMessageResult = z.infer<typeof processMessageResultSchema>;
 
 const imageSearchResultSchema = z.object({
   reply: z.string().min(1),
-  productImages: z.array(z.unknown()).default([]),
+  // Use productImageSchema instead of z.unknown() — validates URLs and prevents
+  // malformed image objects from crashing the WhatsApp send node downstream.
+  productImages: z.array(productImageSchema).default([]),
 });
 
 // ─── Business info ────────────────────────────────────────────────────────────
@@ -848,11 +847,13 @@ export const handleIncomingMessage = async (
       { matches: productImages.length, customerId, messageId },
       "Product search intent",
     );
-    if (productImages.length === 0 && result.searchHints) {
+    if (productImages.length === 0) {
       // Escalate when product_search returns 0 images.
       // The system prompt instructs Claude to attempt broader searches before
-      // returning product_search with 0 results — so reaching here means Claude
-      // already exhausted its search attempts. Escalating is the correct action.
+      // returning product_search with 0 results — reaching here means Claude
+      // already exhausted its search attempts. Removed the searchHints guard:
+      // escalation should fire regardless of whether searchHints is present,
+      // since the customer received no products either way.
       escalate = true;
       logger.info(
         { customerId, messageId, searchHints: result.searchHints },
@@ -1014,9 +1015,9 @@ export const handleIncomingMessage = async (
         result.orderHints
           ?.map((h) => `${h.productNameHint} talla ${h.size} color ${h.color}`)
           .join(", ") ?? "sin detalle";
-      reason = `El pedido no pudo crearse automáticamente. Productos: ${items}.`;
+      reason = `El pedido no pudo crearse automáticamente. Producto(s): ${items}. Posible causa: producto desactivado en catálogo o nombre no reconocido.`;
       suggestedAction =
-        "Verificar disponibilidad y crear el pedido manualmente si corresponde.";
+        "Verificar que el producto está activo en el inventario SALO. Si está activo, crear el pedido manualmente desde la app.";
     } else {
       reason = `Escalación forzada por estado inesperado (intent: ${intent}).`;
       suggestedAction =
@@ -1038,13 +1039,24 @@ export const handleIncomingMessage = async (
 
   // ── Persist conversation ──────────────────────────────────────────────────
 
+  // Normalize user content before storing — voice placeholder strings are
+  // verbose and pollute Claude's context window when replayed as history.
+  // Shorten to a compact form that still signals the message type.
+  const storedUserContent = message.startsWith("[Nota de voz")
+    ? "[Audio]"
+    : message;
+
   await ConversationModel.findOneAndUpdate(
     { customerId, channel: "whatsapp" },
     {
       $push: {
         turns: {
           $each: [
-            { role: "user" as const, content: message, createdAt: new Date() },
+            {
+              role: "user" as const,
+              content: storedUserContent,
+              createdAt: new Date(),
+            },
             {
               role: "assistant" as const,
               content: result.response,
@@ -1094,9 +1106,15 @@ export const handleIncomingMessage = async (
     );
   }
 
+  // Guard: never return an empty reply with a valid customerPhone.
+  // This combination causes the WhatsApp send node to fail with "text.body is required".
+  // If result.response is somehow empty (should not happen after Zod validation),
+  // use the gender-aware error reply as a safe fallback.
+  const finalReply = result.response.trim() || buildErrorReply(customerGender);
+
   return toSafeResult(
     {
-      reply: result.response,
+      reply: finalReply,
       escalate,
       customerPhone: from,
       customerName,
@@ -1105,5 +1123,6 @@ export const handleIncomingMessage = async (
     },
     from,
     customerName,
+    customerGender,
   );
 };

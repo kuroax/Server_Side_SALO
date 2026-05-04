@@ -209,10 +209,16 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
 // Returns a NEW object on every call — prevents callers from mutating a shared
 // singleton (especially the productImages array). Also gender-aware so male
 // customers don't receive a female-gendered fallback on API failures.
+//
+// shouldEscalate: false by default — API timeouts and schema failures should NOT
+// alert the owner. Only pass true when a genuine human decision is needed.
+// Previously always returned needs_human, causing false escalation alerts on
+// every Claude API hiccup — owner becomes desensitized to real escalations.
 const SAFE_FALLBACK = (
   gender: "female" | "male" | "unknown" = "unknown",
+  shouldEscalate = false,
 ): ProcessMessageOutput => ({
-  intent: "needs_human",
+  intent: shouldEscalate ? "needs_human" : "general",
   response:
     gender === "male"
       ? "Permíteme un momento amigo, ahorita te atiendo 🙏🏻"
@@ -264,41 +270,6 @@ Recibirás el historial de mensajes anteriores. Úsalo siempre:
 - Si el cliente ya dio información (talla, color, preferencia, estilo), recuérdala y no la vuelvas a pedir
 - Si ya mostraste productos, referencia lo que compartiste en lugar de repetirlo
 - Mantén el tono y la confianza que ya se estableció en la conversación
-
-─── DETECCIÓN Y ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────
-
-PASO 1 — DETECTA SEÑALES DE GÉNERO EN EL MENSAJE ACTUAL:
-Analiza el mensaje del cliente buscando señales explícitas de género,
-independientemente del género que el sistema te haya indicado previamente.
-
-SEÑALES MASCULINAS — cambia a tono masculino inmediatamente:
-✓ "soy el", "soy un hombre", "yo el", "el que te"
-✓ Nombres masculinos en presentaciones: "soy Carlos", "soy Juan"
-✓ Artículos/pronombres masculinos: "el que te mandó", "el de ayer"
-
-SEÑALES FEMENINAS — confirma tono femenino:
-✓ "soy la", "soy una", "yo la"
-✓ Nombres femeninos en presentaciones
-
-PASO 2 — APLICA EL TONO DETECTADO INMEDIATAMENTE:
-No esperes a que el sistema confirme el género. Si el cliente dice
-"soy el que te mandó mensaje", responde en tono masculino de inmediato
-aunque el historial previo haya usado tono femenino.
-
-TONO MASCULINO (señal detectada o gender: male):
-- Apodos: "amigo", "bro", "brocito"
-- NUNCA uses "bonita", "bella", "corazón", "linda", "bb"
-- Tono: directo, entusiasta, cálido
-
-TONO FEMENINO (señal femenina, gender: female, o género desconocido sin señal):
-- Apodos: "bonita", "bella", "corazón", "linda", "amiga", "bb"
-- Tono: cálido, cercano, entusiasta
-
-PASO 3 — REPORTA EL GÉNERO DETECTADO EN TU JSON:
-Si detectaste una señal EXPLÍCITA y CLARA de género en el mensaje actual,
-incluye "detectedGender": "male" o "female" en tu JSON de respuesta.
-Esto actualiza el perfil del cliente para futuras conversaciones.
-Solo incluye este campo ante señales claras — no especules.
 
 ─── DETECCIÓN Y ADAPTACIÓN DE GÉNERO ──────────────────────────────────────────
 
@@ -495,16 +466,16 @@ El cliente pregunta a qué cuenta depositar, cómo hacer el anticipo, cómo paga
 → NUNCA escribas números de cuenta, CLABEs, ni datos bancarios manualmente en el texto.
 → NUNCA escales este intent al dueño — el sistema lo maneja solo.
 
-Cuando el historial muestra [Cliente respondió a una imagen de producto del historial]
-o [Imagen enviada por cliente con texto: "..."] y el cliente pregunta sobre tallas,
-colores, precio o disponibilidad de ESE producto específico:
-→ El cliente YA vio las imágenes — NO llames search_products de nuevo.
-→ El gallery ya fue enviado — reenviarlo crea confusión y parece un error del bot.
-→ Si la respuesta está en el historial (tallas disponibles, precio) → respóndela directamente.
-→ intent: general (o price_query si pregunta solo precio)
-→ Si Y SOLO SI necesitas confirmar stock de una talla específica que el cliente mencionó,
-  llama search_products con size específica y keyword del producto — NO sin filtros.
-→ NUNCA re-envíes el gallery completo cuando el cliente ya lo recibió en esta conversación.
+Cuando el historial muestra [Imagen: "..."] o [Cliente seleccionó una imagen] seguido de texto:
+→ El cliente indica qué producto le interesa del gallery previamente enviado.
+→ Usa el historial para identificar el producto, talla o color. Llama search_products si necesitas confirmar stock.
+
+Cuando el mensaje es [Sticker recibido] o [Cliente reaccionó con X]:
+→ Reacción positiva (👍 ❤️ 🔥 😍 ✅) → el cliente está interesado o confirmando.
+  Continúa la venta: pregunta talla, confirma producto, o propón siguiente paso.
+→ Reacción negativa (👎 😐) → el cliente tiene duda o no le convenció.
+  Pregunta qué cambiamos: "¿Buscamos otra talla, color o estilo? 🙏🏻"
+→ intent: general. Nunca escales por un sticker o reacción.
 
 El cliente menciona que el producto es para otra persona ("para mi novia", "para mi mamá", "es un regalo", "para ella"):
 → Esto es SOLO contexto adicional — NO requiere escalación ni acción especial.
@@ -526,15 +497,6 @@ Ejemplo — cliente envía "quiero ese negro talla M, a qué cuenta deposito":
 → intent: payment_info
 → response: "Perfecto, te aparto el jersey negro talla M 🙌🏼 Ahorita te mando los datos para el depósito."
 
-Cuando el mensaje contiene [Nota de voz recibida. El cliente prefirió enviar audio.]:
-→ Responde la intención principal del texto. Al final agrega de forma natural:
-  "También recibí tu nota de voz 😊 Si quieres contarme algo más, escríbelo."
-→ NUNCA escales solo porque hay un audio — es contexto adicional, no una emergencia.
-→ Si el ÚNICO contenido es la nota de voz (sin texto adicional):
-  → intent: general
-  → response: "Hola! Recibí tu nota de voz pero por el momento solo puedo leer mensajes 😊
-     ¿Puedes escribirme lo que necesitas?"
-
 ─── CUANDO EL CLIENTE ENVÍA UNA IMAGEN DESPUÉS DE LOS DATOS DE PAGO ──────────
 
 Si el cliente envía una imagen DESPUÉS de que Luis ya envió los datos bancarios (payment_info):
@@ -546,18 +508,22 @@ Si el cliente envía una imagen DESPUÉS de que Luis ya envió los datos bancari
 
 ─── FLUJO DE CONFIRMACIÓN DE PEDIDO — OBLIGATORIO ────────────────────────────
 
-ANTES de usar intent create_order, Luis SIEMPRE debe pedir confirmación explícita:
+ANTES de usar intent create_order, Luis SIEMPRE debe pedir confirmación explícita.
+Usa este formato exacto para que el cliente confirme claramente:
 
-"Para apartar tu pedido necesito confirmar:
+"Para apartar tu pedido te confirmo (válido hoy):
 ⭐️ [Producto] color [color] talla [talla]
 💰 Total: $[precio] | Anticipo 30%: $[anticipo]
 📦 ¿Entrega inmediata o liquidar en 20 días?
 ¿Confirmas? 🙏🏻"
 
+La frase "válido hoy" es importante — previene que un "sí" enviado días después
+se interprete como confirmación de un pedido anterior.
+
 SOLO después de que el cliente responda con "sí", "confirmo", "dale", "va", "Sii", "claro", "listo":
 → intent: create_order con orderHints completos.
 
-Si el cliente dice que quiere algo pero no ha confirmado → usa intent: general con el resumen de confirmación.
+Si el cliente dice que quiere algo pero no ha confirmado → usa intent: general con el resumen.
 NUNCA uses create_order sin confirmación explícita del cliente en el mensaje actual.
 
 ─── CUÁNDO ESCALAR AL DUEÑO — needs_human ─────────────────────────────────────
@@ -708,10 +674,18 @@ async function runAgenticLoop(
         .filter((b): b is Anthropic.TextBlock => b.type === "text")
         .map((b) => b.text)
         .join("");
+      // Deduplicate by URL — multi-tool-call turns can accumulate duplicate images
+      // when two searches return overlapping products.
+      const seenUrls = new Set<string>();
+      const dedupedImages = accumulatedImages.filter((img) => {
+        if (seenUrls.has(img.url)) return false;
+        seenUrls.add(img.url);
+        return true;
+      });
       return {
         text,
         stopReason: message.stop_reason ?? "unknown",
-        productImages: accumulatedImages,
+        productImages: dedupedImages,
       };
     }
 
@@ -834,23 +808,29 @@ async function runAgenticLoop(
     }
   }
 
-  // NOTE on accumulatedImages: images are pushed once per successful tool call.
-  // callOnce retries only on the Claude API call itself (before tool results are
-  // processed), so duplicate pushes are not possible today. If retry logic ever
-  // expands to the loop level, add URL-based deduplication here before returning.
+  // Deduplicate accumulated images by URL — prevents the same product gallery
+  // from being sent twice when the customer asks for multiple products and Claude
+  // makes 2 tool calls that return overlapping results (e.g. "sudaderas y jerseys"
+  // where both searches return the same product).
+  const seenUrls = new Set<string>();
+  const dedupedImages = accumulatedImages.filter((img) => {
+    if (seenUrls.has(img.url)) return false;
+    seenUrls.add(img.url);
+    return true;
+  });
 
   // If the loop exhausted but images were accumulated from earlier iterations,
   // return a partial result rather than SAFE_FALLBACK — the customer should
   // see the products found so far instead of a waiting message.
-  if (accumulatedImages.length > 0) {
+  if (dedupedImages.length > 0) {
     logger.warn(
-      { imagesAccumulated: accumulatedImages.length },
+      { imagesAccumulated: dedupedImages.length },
       "runAgenticLoop — tool_loop_exhausted but returning partial result with accumulated images",
     );
     return {
       text: '{"intent":"product_search","response":"Sipi! Ahorita te muestro lo que encontré ✨"}',
       stopReason: "tool_loop_exhausted_partial",
-      productImages: accumulatedImages,
+      productImages: dedupedImages,
     };
   }
 
