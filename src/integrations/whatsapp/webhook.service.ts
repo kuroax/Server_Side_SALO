@@ -680,6 +680,14 @@ export const handleIncomingMessage = async (
       ? payload.messageId.trim()
       : null;
 
+  // Detected by Extract Message node when WhatsApp message has context.id
+  // (customer replied directly to one of the gallery images). The prefix is
+  // prepended in n8n so the backend can gate image suppression independently
+  // of Claude's intent decision.
+  const isGalleryReply = message.startsWith(
+    "[El cliente está respondiendo a una imagen del gallery anterior]",
+  );
+
   // ── 0. Guards ─────────────────────────────────────────────────────────────
 
   if (!from) {
@@ -1160,6 +1168,33 @@ export const handleIncomingMessage = async (
   // payment_info later pushes the bank image into this array; without the spread,
   // that push would corrupt the original processMessage return value.
   const productImages: ProductImage[] = [...result.productImages];
+
+  // ── Gallery reply — suppress images unless Claude explicitly re-searched ───
+  // When the customer replies to a gallery image and asks a name/price/info
+  // question, Claude may still call search_products (PASO 2c fallback) and
+  // accumulate images. But the customer didn't ask for a new gallery — they
+  // asked about a specific product they already saw.
+  //
+  // Rule: if this is a gallery reply AND the intent is not product_search
+  // (i.e. Claude answered from history, not from a new search), strip images
+  // before returning so n8n's IF Has Product Images branch doesn't fire.
+  //
+  // If Claude returned product_search intent, it found something new and
+  // sending images is intentional — allow it through.
+  if (isGalleryReply && result.intent !== "product_search") {
+    if (productImages.length > 0) {
+      logger.info(
+        {
+          customerId,
+          messageId,
+          intent: result.intent,
+          suppressedImages: productImages.length,
+        },
+        "Gallery reply — suppressing product images (customer asked info, not new catalog)",
+      );
+      productImages.length = 0;
+    }
+  }
 
   if (result.intent === "product_search") {
     logger.info(
