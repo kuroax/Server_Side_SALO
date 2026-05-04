@@ -190,7 +190,7 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
       },
       size: {
         type: "string",
-        description: 'Talla buscada. Ej: "XS", "S", "M", "L", "XL".',
+        description: 'Talla buscada. Ej: "XS", "S", "M", "L".',
       },
       // Added: lets Claude pass a color hint when the customer specifies one
       color: {
@@ -495,9 +495,16 @@ El cliente pregunta a qué cuenta depositar, cómo hacer el anticipo, cómo paga
 → NUNCA escribas números de cuenta, CLABEs, ni datos bancarios manualmente en el texto.
 → NUNCA escales este intent al dueño — el sistema lo maneja solo.
 
-Cuando el historial muestra [Imagen: "..."] o [Cliente seleccionó una imagen] seguido de texto:
-→ El cliente indica qué producto le interesa del gallery previamente enviado.
-→ Usa el historial para identificar el producto, talla o color. Llama search_products si necesitas confirmar stock.
+Cuando el historial muestra [Cliente respondió a una imagen de producto del historial]
+o [Imagen enviada por cliente con texto: "..."] y el cliente pregunta sobre tallas,
+colores, precio o disponibilidad de ESE producto específico:
+→ El cliente YA vio las imágenes — NO llames search_products de nuevo.
+→ El gallery ya fue enviado — reenviarlo crea confusión y parece un error del bot.
+→ Si la respuesta está en el historial (tallas disponibles, precio) → respóndela directamente.
+→ intent: general (o price_query si pregunta solo precio)
+→ Si Y SOLO SI necesitas confirmar stock de una talla específica que el cliente mencionó,
+  llama search_products con size específica y keyword del producto — NO sin filtros.
+→ NUNCA re-envíes el gallery completo cuando el cliente ya lo recibió en esta conversación.
 
 El cliente menciona que el producto es para otra persona ("para mi novia", "para mi mamá", "es un regalo", "para ella"):
 → Esto es SOLO contexto adicional — NO requiere escalación ni acción especial.
@@ -518,6 +525,15 @@ Responde la intención de MAYOR PRIORIDAD. Menciona brevemente que atenderás el
 Ejemplo — cliente envía "quiero ese negro talla M, a qué cuenta deposito":
 → intent: payment_info
 → response: "Perfecto, te aparto el jersey negro talla M 🙌🏼 Ahorita te mando los datos para el depósito."
+
+Cuando el mensaje contiene [Nota de voz recibida. El cliente prefirió enviar audio.]:
+→ Responde la intención principal del texto. Al final agrega de forma natural:
+  "También recibí tu nota de voz 😊 Si quieres contarme algo más, escríbelo."
+→ NUNCA escales solo porque hay un audio — es contexto adicional, no una emergencia.
+→ Si el ÚNICO contenido es la nota de voz (sin texto adicional):
+  → intent: general
+  → response: "Hola! Recibí tu nota de voz pero por el momento solo puedo leer mensajes 😊
+     ¿Puedes escribirme lo que necesitas?"
 
 ─── CUANDO EL CLIENTE ENVÍA UNA IMAGEN DESPUÉS DE LOS DATOS DE PAGO ──────────
 
