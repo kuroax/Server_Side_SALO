@@ -1003,6 +1003,77 @@ export const handleIncomingMessage = async (
     );
   }
 
+  // ── 3a. Broad catalog fast-path ───────────────────────────────────────────
+  // Intercepts messages like "que productos tienes disponibles", "que manejas",
+  // "que hay", "muestrame todo" BEFORE calling Claude.
+  //
+  // WHY: Claude sometimes misroutes broad catalog questions — no keyword →
+  // tries search_products with vague terms → 0 results → retry → iteration
+  // cap → SAFE_FALLBACK. This pattern is 100% predictable so the backend
+  // handles it directly with zero API cost and zero failure risk.
+  //
+  // Pattern: optional greeting + broad availability/catalog question.
+  // Does NOT fire when the message contains a specific product noun
+  // (suéter, legging, bra, etc.) — those go to Claude normally.
+  const specificProductPattern =
+    /legging|bra|top|jersey|suéter|sudader|short|jogger|set\b|calcet|sock|chaqueta|playera|blusa|pantalón|hoodie|crop|conjunto|outfit|prenda/i;
+
+  const broadCatalogPattern =
+    /^(?:hola+[!¡]?\s*)?(?:qu[eé]\s+(?:productos?|tienes?|hay|manejas?|vendes?|tienen|tienen\s+disponible)|qu[eé]\s+tienes?|muestrame\s+todo|qu[eé]\s+hay\s+disponible|qu[eé]\s+tienen?\s+disponible|tienen?\s+algo\s+disponible|tienes?\s+algo|qu[eé]\s+venden?)/i;
+
+  const isBroadCatalog =
+    broadCatalogPattern.test(message) && !specificProductPattern.test(message);
+
+  if (isBroadCatalog) {
+    const catalogReply =
+      customerGender === "male"
+        ? "¡Hola amigo! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon y Wiskii 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?"
+        : "¡Hola bonita! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon y Wiskii 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?";
+
+    logger.info(
+      { customerId, messageId, message },
+      "Broad catalog question — fast-path response, skipping Claude",
+    );
+
+    await ConversationModel.findOneAndUpdate(
+      { customerId, channel: "whatsapp" },
+      {
+        $push: {
+          turns: {
+            $each: [
+              {
+                role: "user" as const,
+                content: message,
+                createdAt: new Date(),
+              },
+              {
+                role: "assistant" as const,
+                content: catalogReply,
+                createdAt: new Date(),
+              },
+            ],
+            $slice: -MAX_CONVERSATION_TURNS,
+          },
+        },
+        $set: { lastMessageAt: new Date() },
+      },
+      { upsert: true, returnDocument: "after" },
+    );
+
+    return toSafeResult(
+      {
+        reply: catalogReply,
+        escalate: false,
+        customerPhone: from,
+        customerName,
+        productImages: [],
+      },
+      from,
+      customerName,
+      customerGender,
+    );
+  }
+
   // NOTE: add { customerId: 1, createdAt: -1 } compound index on orders if
   // this sort becomes slow when order volume grows beyond pilot scale.
   const recentOrder = await OrderModel.findOne({ customerId })
