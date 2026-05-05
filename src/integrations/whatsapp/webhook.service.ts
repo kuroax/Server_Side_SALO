@@ -694,14 +694,12 @@ export const handleIncomingMessage = async (
   //             merge because it comes from the WhatsApp API, not text manipulation)
   //
   // Either signal is sufficient — OR logic covers both paths.
-  // contextMessageId is passed by n8n but not yet in the WebhookPayload Zod
-  // schema (webhook.validation.ts). Cast through unknown to access it safely
-  // without breaking the build. Add it to WebhookPayload post-demo.
-  const rawPayload = payload as unknown as Record<string, unknown>;
+  // contextMessageId is set by Extract Message node when the customer replies
+  // to a specific WhatsApp message. Defined in WebhookPayload via webhook.validation.ts.
   const contextMessageId =
-    typeof rawPayload.contextMessageId === "string" &&
-    rawPayload.contextMessageId.trim().length > 0
-      ? rawPayload.contextMessageId.trim()
+    typeof payload.contextMessageId === "string" &&
+    payload.contextMessageId.trim().length > 0
+      ? payload.contextMessageId.trim()
       : null;
 
   const isGalleryReply =
