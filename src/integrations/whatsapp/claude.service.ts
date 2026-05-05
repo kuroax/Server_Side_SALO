@@ -120,13 +120,6 @@ const orderHintSchema = z.object({
   quantity: z.number().int().positive().max(100),
 });
 
-const searchHintsSchema = z.object({
-  keyword: z.string().min(1),
-  gender: z.enum(["female", "male", "unknown"]).optional(),
-  size: z.string().optional(),
-  color: z.string().optional(),
-});
-
 const claudeResultSchema = z.union([
   z.object({
     intent: z.literal("create_order"),
@@ -746,6 +739,17 @@ Prioriza en este orden:
 5. product_search
 6. general
 
+MENSAJES MERGEADOS CON AGRADECIMIENTO + SOLICITUD:
+Cuando el buffer une varios mensajes del cliente y el resultado contiene
+una frase de cortenía ('okay', 'gracias', 'muchas gracias', 'de nada',
+'entendido', 'perfecto', 'oye', 'entonces') junto con una solicitud real:
+→ Ignora la frase de cortenía. No es un intent a procesar.
+→ Enfócate en la solicitud real. Aplica el intent de mayor prioridad.
+Ejemplo: 'Soy S Okay muchas gracias Me puedes mandar a que cuenta depositar'
+  → 'Soy S' = talla, 'muchas gracias' = cortenía (ignorar), 'cuenta depositar' = payment_info
+  → intent: payment_info con verificación de disponibilidad talla S.
+
+
 ─── FLUJO DE CONFIRMACIÓN DE PEDIDO — OBLIGATORIO ────────────────────────────
 
 ANTES de usar intent create_order, SIEMPRE pide confirmación explícita:
@@ -830,6 +834,13 @@ NUNCA uses needs_human para:
 IMPORTANTE: Este contrato aplica para TODOS los mensajes.
 La respuesta es SIEMPRE y ÚNICAMENTE JSON puro.
 Sin markdown. Sin texto antes o después del JSON. Sin comentarios.
+
+REGLA DE FORMATO DE STRING — CRÍTICA:
+Nunca uses saltos de línea literales dentro de los valores de string del JSON.
+Usa la secuencia de escape \\n para separar líneas dentro de un valor de string.
+✅ CORRECTO:   {"response": "⭐️Jersey Accolade | Talla S | $1,990\\nAnticipo: $597"}
+❌ INCORRECTO: {"response": "⭐️Jersey Accolade | Talla S | $1,990\n              Anticipo: $597"}
+El segundo ejemplo produce JSON inválido que rompe el sistema completamente.
 
 Para intent create_order (orderHints OBLIGATORIO y no vacío):
 {
@@ -1211,14 +1222,21 @@ INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_prod
   });
 
   if (dedupedImages.length > 0) {
+    // Images were accumulated before the loop exhausted — but we have no valid
+    // Claude response to pair them with. Sending the hardcoded product_search
+    // announcement with images is wrong when the exhaustion happened during a
+    // payment or receipt flow. Return SAFE_FALLBACK with no images: the owner
+    // escalation will cover any pending action, and the customer gets a neutral
+    // "un momento" reply rather than a confusing catalog announcement.
     logger.warn(
       { imagesAccumulated: dedupedImages.length },
-      "runAgenticLoop — tool_loop_exhausted but returning partial result with accumulated images",
+      "runAgenticLoop — tool_loop_exhausted with accumulated images, discarding images and returning SAFE_FALLBACK",
     );
+    // Return a special sentinel so processMessage can log the exhaustion reason.
     return {
-      text: '{"intent":"product_search","response":"Sipi! Ahorita te muestro lo que encontré ✨"}',
-      stopReason: "tool_loop_exhausted_partial",
-      productImages: dedupedImages,
+      text: "__TOOL_LOOP_EXHAUSTED_WITH_IMAGES__",
+      stopReason: "tool_loop_exhausted",
+      productImages: [],
     };
   }
 
@@ -1243,10 +1261,11 @@ export const processMessage = async (
     businessInfo,
   } = context;
 
-  const requestTimeoutMs = Math.min(
-    BASE_TIMEOUT_MS + conversationHistory.length * 1_000,
-    MAX_TIMEOUT_MS,
-  );
+  // Timeout: base + fixed headroom for tool calls.
+  // A flat +5s (not per-turn) because Claude API latency is dominated by
+  // generation time, not context length. Per-turn growth adds 20s at MAX_TURNS
+  // and makes WhatsApp UX unacceptably slow.
+  const requestTimeoutMs = Math.min(BASE_TIMEOUT_MS + 5_000, MAX_TIMEOUT_MS);
 
   const sanitizedMessage = incomingMessage.slice(0, 2000);
 
@@ -1353,10 +1372,68 @@ INFORMACIÓN DEL NEGOCIO:
     return SAFE_FALLBACK(customerGender);
   }
 
+  // Handle the tool_loop_exhausted_with_images sentinel: MAX_TOOL_ITERATIONS
+  // exhausted with accumulated images but no valid Claude response. Using
+  // SAFE_FALLBACK is safer than sending a hardcoded product announcement
+  // which would be wrong in payment or receipt flows.
+  if (agenticResult.text === "__TOOL_LOOP_EXHAUSTED_WITH_IMAGES__") {
+    logger.warn(
+      {
+        historyTurns: conversationHistory.length,
+        failureReason: "tool_loop_exhausted_with_images",
+      },
+      "Tool loop exhausted with images — discarding images, returning safe fallback",
+    );
+    return SAFE_FALLBACK(customerGender);
+  }
+
   let parsed: unknown;
 
+  // Pre-process: escape any literal newlines/carriage returns inside JSON string
+  // values before parsing. Claude occasionally generates multi-line content
+  // (e.g. ⭐️ order summaries) with bare \n characters inside a JSON string
+  // instead of the escaped \\n sequence, producing invalid JSON that
+  // JSON.parse rejects and triggers SAFE_FALLBACK.
+  //
+  // A regex-based approach fails when a string contains 2+ newlines because
+  // the alternation [^"\\\n] forbids newlines, so the pattern can only match
+  // strings with exactly one bare newline. The correct solution is a
+  // character-by-character state machine that tracks whether we are inside a
+  // quoted string and escapes any bare control characters it encounters there.
+  function sanitizeJsonNewlines(raw: string): string {
+    let result = "";
+    let inString = false;
+    let i = 0;
+    while (i < raw.length) {
+      const char = raw[i];
+      if (!inString) {
+        if (char === '"') inString = true;
+        result += char;
+      } else {
+        if (char === "\\" && i + 1 < raw.length) {
+          // Escape sequence — pass both chars through unchanged so we don't
+          // double-escape sequences Claude already escaped correctly.
+          result += char + raw[i + 1];
+          i++;
+        } else if (char === '"') {
+          inString = false;
+          result += char;
+        } else if (char === "\n") {
+          result += "\\n";
+        } else if (char === "\r") {
+          result += "\\r";
+        } else {
+          result += char;
+        }
+      }
+      i++;
+    }
+    return result;
+  }
+  const sanitizedText = sanitizeJsonNewlines(agenticResult.text);
+
   try {
-    parsed = JSON.parse(agenticResult.text);
+    parsed = JSON.parse(sanitizedText);
   } catch {
     const rawTextPreview =
       agenticResult.text.length > 200
@@ -1367,8 +1444,9 @@ INFORMACIÓN DEL NEGOCIO:
         failureReason: "non_json_response",
         rawTextPreview,
         rawTextLength: agenticResult.text.length,
+        sanitizedPreview: sanitizedText.slice(0, 200),
       },
-      "Claude returned non-JSON — returning safe fallback",
+      "Claude returned non-JSON (after sanitization) — returning safe fallback",
     );
     return SAFE_FALLBACK(customerGender);
   }
@@ -1399,9 +1477,13 @@ INFORMACIÓN DEL NEGOCIO:
   // ─── Hallucinated-promise detection ─────────────────────────────────────────
   const suspiciousPattern =
     /d[eé]j[ae]me?\s+revisar|lo estoy (checando|revisando)|ahorita lo checo|te (confirmo|aviso)|en breve te (digo|confirmo)|estoy revisando disponibilidad|dame un momento|en un momento te/i;
+  // payment_info is also excluded because its correct responses often contain
+  // "te aviso" and "te confirmo" as part of the payment summary instructions,
+  // which would otherwise produce false-positive "hallucinated promise" warnings.
   const isEscalating =
     validated.data.intent === "needs_human" ||
-    validated.data.intent === "payment_receipt";
+    validated.data.intent === "payment_receipt" ||
+    validated.data.intent === "payment_info";
   if (!isEscalating && suspiciousPattern.test(validated.data.response)) {
     logger.warn(
       {
