@@ -257,29 +257,35 @@ function buildReceiptAck(
   gender: "female" | "male" | "unknown",
   cart: CartItem[],
 ): string {
-  const pronoun = gender === "male" ? "amigo" : "bonita";
+  // Use the real Luis receipt acknowledgment phrase — taken directly from
+  // real customer chats. Warm, enthusiastic, uniquely SALO.
+  const gratitude = "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫";
 
   if (cart.length === 0) {
+    // No product context found — acknowledge receipt and ask for clarification.
+    // Do NOT confirm payment. Do NOT list products we don't know about.
     return (
-      `¡Recibido ${pronoun}! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia. ` +
-      `En cuanto confirmen, te escribo de inmediato 🙏🏻\n` +
-      `¿Me confirmas qué producto, talla y color quieres apartar?`
+      `${gratitude}\n\n` +
+      `Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y, ` +
+      `en cuanto esté confirmado, te aviso para continuar con tu pedido 🙏🏻\n\n` +
+      `¿Me confirmas de qué producto es este comprobante?`
     );
   }
 
   const itemLines = cart
-    .map((item, i) => {
+    .map((item) => {
       const priceStr = item.price
-        ? ` — $${item.price.toLocaleString("es-MX")}`
+        ? ` $${item.price.toLocaleString("es-MX")}`
         : "";
-      return `${i + 1}. ${item.description}${priceStr}`;
+      return `⭐️${item.description}${priceStr}`;
     })
     .join("\n");
 
   return (
-    `¡Recibido ${pronoun}! 🙌🏼 Ya le avisé al equipo para que verifiquen tu transferencia.\n\n` +
-    `Tengo esto para apartarte:\n${itemLines}\n\n` +
-    `¿Confirmas que está correcto? En cuanto verifiquen el pago te confirmo 🙏🏻`
+    `${gratitude}\n\n` +
+    `Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y, ` +
+    `en cuanto esté confirmado, te aviso para continuar con tu pedido 🙏🏻\n\n` +
+    `${itemLines}`
   );
 }
 
