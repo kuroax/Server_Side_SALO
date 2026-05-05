@@ -6,6 +6,7 @@ import {
   ConversationModel,
   MAX_CONVERSATION_TURNS,
 } from "#/modules/conversations/conversation.model.js";
+import { SentImageModel } from "#/modules/sentImages/sentImage.model.js";
 import { createOrder } from "#/modules/orders/order.service.js";
 import { processMessage } from "#/integrations/whatsapp/claude.service.js";
 import { searchProductsByImage } from "#/integrations/whatsapp/image-search.service.js";
@@ -1107,6 +1108,62 @@ export const handleIncomingMessage = async (
     .sort({ createdAt: -1 })
     .lean();
 
+  // ── Exact product resolution via SentImage mapping ────────────────────────
+  // When the customer replied to a specific gallery image (isGalleryReply=true
+  // and contextMessageId is set), look up the exact product that was in that
+  // WhatsApp message. The mapping was stored by the n8n "Log Sent Image" node
+  // after each Send Image API response.
+  //
+  // If a match is found, replace the generic gallery hint in the message with
+  // a precise product identifier so Claude answers the exact product — name,
+  // price, color — without inferring from the full gallery list.
+  //
+  // Falls back gracefully: if no mapping exists (feature not yet active, or
+  // the image was sent before this feature was deployed), the message remains
+  // unchanged and Claude uses the [Productos enviados] note from history.
+  let incomingMessageForClaude = message;
+
+  if (isGalleryReply && contextMessageId) {
+    try {
+      const sentImage = await SentImageModel.findOne({
+        sentMessageId: contextMessageId,
+      }).lean();
+
+      if (sentImage?.caption) {
+        // Replace the generic gallery hint with the exact product context.
+        // Claude's gallery reply protocol (PASO 1) reads this tag and skips
+        // the [Productos enviados] note lookup entirely — one product, direct answer.
+        const exactContext = `[Producto exacto seleccionado por el cliente: ${sentImage.caption}]`;
+        incomingMessageForClaude = message.replace(
+          /\[El cliente está respondiendo a una imagen del gallery anterior\]/,
+          exactContext,
+        );
+
+        logger.info(
+          {
+            customerId,
+            messageId,
+            contextMessageId,
+            caption: sentImage.caption,
+          },
+          "Gallery reply — exact product resolved from SentImage mapping",
+        );
+      } else {
+        logger.info(
+          { customerId, messageId, contextMessageId },
+          "Gallery reply — no SentImage mapping found, falling back to history inference",
+        );
+      }
+    } catch (err) {
+      // Non-fatal: log and continue with the original message.
+      // Claude will still answer correctly using the [Productos enviados] note.
+      logger.warn(
+        { err, customerId, contextMessageId },
+        "Gallery reply — SentImage lookup failed, falling back to history inference",
+      );
+    }
+  }
+
   const rawResult = await processMessage({
     customerName,
     customerGender,
@@ -1118,7 +1175,7 @@ export const handleIncomingMessage = async (
         }
       : null,
     searchProducts: searchProductsForClaude,
-    incomingMessage: message,
+    incomingMessage: incomingMessageForClaude,
     conversationHistory,
     businessInfo: BUSINESS_INFO,
   });
