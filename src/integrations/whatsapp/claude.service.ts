@@ -100,6 +100,11 @@ export type ClaudeContext = {
     paymentMethods: string;
     depositPercent: number;
     paymentDays: number;
+    // Human-readable delivery information shown when customer asks "¿cuándo llega?" or
+    // "¿en cuánto tiempo me llegaría?". Free-text so the owner can express realistic
+    // timelines without hardcoding a number.
+    // e.g. "3 a 5 días hábiles una vez confirmado el pago"
+    deliveryInfo: string;
     // Active promotion to mention proactively when relevant, e.g. "30% Off Alo Yoga hasta el 10 de mayo".
     // Leave undefined/empty when no promotion is active.
     activePromotion?: string;
@@ -428,8 +433,19 @@ El género del cliente sirve para el TONO, no para filtrar productos.
 Después de recibir el resultado de search_products, tu ÚNICA respuesta posible
 es un objeto JSON válido. Sin introducción. Sin texto antes. Sin texto después.
 
-✅ CORRECTO:
-{"intent":"product_search","response":"¡Perfecto amigo! Te muestro las sudaderas Alo que tengo ✨"}
+QUÉ INTENT USAR DESPUÉS DE UN TOOL CALL:
+
+CASO A — búsqueda de catálogo fresca (cliente pidió VER productos, sin talla especificada):
+→ El resultado te dirá "Encontré X producto(s)" con instrucción de anunciar imágenes.
+→ intent: product_search
+✅ {"intent":"product_search","response":"¡Perfecto amigo! Te muestro las sudaderas Alo que tengo ✨"}
+
+CASO B — verificación de disponibilidad (cliente ya eligió producto y preguntó por talla):
+→ El resultado te dirá "DISPONIBILIDAD CONFIRMADA" con instrucción de NO anunciar imágenes.
+→ Si el mensaje original contenía "cuenta", "depositar", "dónde pago", "cómo pago" → intent: payment_info
+→ Si solo confirmó talla sin pedir datos de pago → intent: price_query
+→ NUNCA uses intent: product_search para una verificación de disponibilidad
+✅ {"intent":"payment_info","response":"¡Sí bonita, tengo disponible la talla M! El jersey está a $1,990. Para apartarlo depositas el 30%, $597, y liquidas en 20 días 🙌🏼 Te mando los datos ahorita 💫"}
 
 ❌ INCORRECTO (causa fallo total del sistema):
 ¡Perfecto amigo! Te muestro las sudaderas Alo que tengo ✨
@@ -568,6 +584,34 @@ REGLAS ABSOLUTAS para payment_receipt:
 ✗ NUNCA uses intent payment_info
 ✗ NUNCA uses create_order — el pedido lo confirma el dueño
 ✗ NUNCA inventes productos que no aparezcan en el historial
+
+─── PROTOCOLO POST-COTIZACIÓN — CONTINUIDAD DE COMPRA ──────────────────────────
+
+Cuándo aplica: el historial muestra que ya cotizaste un producto (diste precio + anticipo)
+Y el siguiente mensaje del cliente contiene cualquier combinación de:
+  - Talla:          "soy M", "talla S", "quiero la M", "en M"
+  - Disponibilidad: "hay disponibilidad", "tienes", "está disponible"
+  - Pago:           "a qué cuenta", "dónde deposito", "cómo pago", "datos de depósito"
+  - Entrega:        "cuánto tarda", "cuándo llega", "en cuánto tiempo", "cómo recibo"
+
+FLUJO OBLIGATORIO:
+1. Llama search_products con el keyword del producto del historial + la talla mencionada.
+   El resultado del tool te dirá "DISPONIBILIDAD CONFIRMADA" si hay stock.
+2. Redacta UNA sola respuesta que cubra TODAS las preguntas del mensaje.
+3. Estructura sugerida (adapta el tono, no copies literalmente):
+   "¡Sí [bonita/amigo], tengo disponible la talla [X]! 🙌🏼
+    El [producto] está a $[precio]. Para apartarlo depositas el [%]%, equivalente a $[anticipo],
+    y liquidas el resto dentro de [días] días.
+    Después de hacer tu transferencia, mándame el comprobante por aquí 🙏🏻
+    Cuando se confirme queda registrado tu pedido — el tiempo de entrega es de [deliveryInfo].
+    Ahorita te mando los datos de depósito 💫"
+4. intent: payment_info — el sistema enviará los datos bancarios automáticamente.
+5. NO uses needs_human para disponibilidad, datos de pago ni preguntas de entrega estándar.
+6. NO anuncies imágenes ni vuelvas a enviar el catálogo.
+
+Si la talla no está disponible:
+→ Di exactamente qué tallas SÍ hay. Pregunta si alguna le funciona. intent: general.
+→ NO escales a needs_human solo por falta de talla.
 
 ─── CUANDO EL CLIENTE ENVÍA MÚLTIPLES INTENCIONES ────────────────────────────
 
@@ -836,6 +880,7 @@ async function runAgenticLoop(
   timeoutMs: number,
   searchProducts: SearchProductsFn,
   depositPercent: number,
+  paymentDays: number,
 ): Promise<AgenticResult> {
   const messages: Anthropic.MessageParam[] = [
     ...(baseParams.messages as Anthropic.MessageParam[]),
@@ -928,22 +973,49 @@ async function runAgenticLoop(
         ? "\nSET COMPLETION: Este producto es un top/bra/tank. Después de anunciar los resultados, pregunta si quiere también el legging, pants o short a juego."
         : "";
 
+      const sizeWasSpecified = Boolean(hints.size);
+
       const singleProductInstruction = (p: ProductSearchItem) => {
         const deposit = Math.ceil(p.price * depositRate).toLocaleString(
           "es-MX",
         );
+        if (sizeWasSpecified) {
+          // The search was an AVAILABILITY CHECK — the customer already saw this
+          // product and asked whether size X is in stock. Do NOT announce images.
+          // The customer may have also asked for payment info and delivery in the
+          // same message. Respond comprehensively and use payment_info intent if
+          // the original message contained payment/delivery signals.
+          return (
+            `DISPONIBILIDAD CONFIRMADA: ${p.name} talla ${hints.size} — $${p.price.toLocaleString("es-MX")} MXN disponible [entrega inmediata]. ` +
+            `Anticipo ${depositPercent}% = $${deposit} MXN. Liquidar en ${paymentDays} días. ` +
+            `
+
+INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_products de nuevo. NO anuncies imágenes. ` +
+            `Redacta UNA respuesta que cubra TODAS las preguntas del mensaje: disponibilidad ✓, precio, anticipo, entrega, siguiente paso. ` +
+            `Si el mensaje contiene "cuenta", "depositar", "dónde pago" o preguntas de entrega → usa intent: payment_info (el sistema enviará los datos bancarios automáticamente). ` +
+            `Si solo confirmó talla sin pedir datos de pago → usa intent: price_query. ` +
+            `Respuesta modelo: "¡Sí bonita, tengo disponible la talla [X]! El [producto] está a $[precio]. Para apartarlo depositas el [%]%, equivalente a $[anticipo], y liquidas dentro de [días] días 🙌🏼 El tiempo de entrega es de [deliveryInfo]. Ahorita te mando los datos para el depósito 💫"` +
+            setCompletionHint
+          );
+        }
+        // Fresh catalog search — standard gallery announcement
         return (
           `INSTRUCCIÓN: Anuncia que vienen las imágenes y menciona el precio y anticipo: ` +
-          `"Puedes ordenar con el ${depositPercent}% equivalente a $${deposit} y liquidar dentro de ${Math.round((1 / depositRate) * 0.67)} días 🙌🏼". ` +
+          `"Puedes ordenar con el ${depositPercent}% equivalente a $${deposit} y liquidar dentro de ${paymentDays} días 🙌🏼". ` +
           `Si quedan pocas unidades (resultado único), añade urgencia: "Es la última disponible en esa talla — apártala ahora 🙏🏻". ` +
           `Si no se mencionó talla, pregúntala.${setCompletionHint}`
         );
       };
 
-      const multiProductInstruction =
-        `INSTRUCCIÓN: Anuncia que vienen las imágenes. NO menciones un anticipo específico todavía — hay varios productos a distintos precios. ` +
-        `Pregunta cuál le interesa más: "¿Cuál de estas opciones te llama más la atención? 😊 Cuéntame para darte el detalle del precio y el anticipo."` +
-        setCompletionHint;
+      const multiProductInstruction = sizeWasSpecified
+        ? // Multiple results for an availability check — rare but possible (e.g. same jersey in 2 colors, size M)
+          `DISPONIBILIDAD: encontré ${limitedItems.length} variantes disponibles en talla ${hints.size}. ` +
+          `INSTRUCCIÓN: NO anuncies imágenes. Describe brevemente las opciones y pregunta cuál prefiere. ` +
+          `Si el mensaje original pedía datos de pago → usa intent: payment_info.`
+        : // Fresh multi-product catalog search
+          `INSTRUCCIÓN: Anuncia que vienen las imágenes. NO menciones un anticipo específico todavía — hay varios productos a distintos precios. ` +
+          `Pregunta cuál le interesa más: "¿Cuál de estas opciones te llama más la atención? 😊 Cuéntame para darte el detalle del precio y el anticipo."` +
+          setCompletionHint;
 
       // ── Color-swap hint (0 results with color specified) ─────────────────
       const colorSwapHint = hints.color
@@ -1072,7 +1144,8 @@ INFORMACIÓN DEL NEGOCIO:
 - Horarios: ${businessInfo.businessHours}
 - Envío nacional express: $${businessInfo.shippingPrice} MXN
 - Formas de pago: ${businessInfo.paymentMethods}
-- Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días${promotionLine}`;
+- Anticipo mínimo: ${businessInfo.depositPercent}% — liquidar en ${businessInfo.paymentDays} días
+- Tiempo de entrega: ${businessInfo.deliveryInfo}${promotionLine}`;
 
   const fullSystemPrompt = `${SYSTEM_PROMPT}${contextSection}`;
 
@@ -1107,6 +1180,7 @@ INFORMACIÓN DEL NEGOCIO:
       requestTimeoutMs,
       searchProducts,
       businessInfo.depositPercent,
+      businessInfo.paymentDays,
     );
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "TimeoutError";

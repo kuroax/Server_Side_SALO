@@ -385,6 +385,10 @@ const BUSINESS_INFO = {
     "Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.",
   depositPercent: 30,
   paymentDays: 20,
+  // Human-readable delivery window shown when the customer asks "¿cuándo llega?" or
+  // "¿en cuánto tiempo me llegaría?". Update this whenever fulfillment timelines change.
+  // The bot uses this string verbatim — keep it natural and customer-friendly.
+  deliveryInfo: "3 a 7 días hábiles una vez confirmado el pago",
   // Set to a non-empty string to have Luis mention the promotion once per
   // conversation when the customer is browsing or hesitating.
   // e.g. "30% Off Alo Yoga hasta el 10 de mayo"
