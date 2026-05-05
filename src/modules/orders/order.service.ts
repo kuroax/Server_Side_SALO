@@ -1,12 +1,12 @@
-import { Types } from 'mongoose';
-import { logger } from '#/config/logger.js';
-import { BadRequestError, NotFoundError } from '#/shared/errors/index.js';
-import { OrderModel } from '#/modules/orders/order.model.js';
-import { CounterModel } from '#/shared/models/counter.model.js';
-import { ProductModel } from '#/modules/products/product.model.js';
-import { CustomerModel } from '#/modules/customers/customer.model.js';
-import { InventoryModel } from '#/modules/inventory/inventory.model.js';
-import { ORDER_NUMBER_PREFIX } from '#/modules/orders/order.types.js';
+import { Types } from "mongoose";
+import { logger } from "#/config/logger.js";
+import { BadRequestError, NotFoundError } from "#/shared/errors/index.js";
+import { OrderModel } from "#/modules/orders/order.model.js";
+import { CounterModel } from "#/shared/models/counter.model.js";
+import { ProductModel } from "#/modules/products/product.model.js";
+import { CustomerModel } from "#/modules/customers/customer.model.js";
+import { InventoryModel } from "#/modules/inventory/inventory.model.js";
+import { ORDER_NUMBER_PREFIX } from "#/modules/orders/order.types.js";
 import type {
   OrderChannel,
   OrderItemSnapshot,
@@ -15,7 +15,7 @@ import type {
   OrderStatus,
   PaymentStatus,
   SafeOrder,
-} from '#/modules/orders/order.types.js';
+} from "#/modules/orders/order.types.js";
 import {
   addOrderNoteSchema,
   assignCustomerSchema,
@@ -27,15 +27,15 @@ import {
   orderFilterSchema,
   updateOrderStatusSchema,
   updatePaymentStatusSchema,
-} from '#/modules/orders/order.validation.js';
+} from "#/modules/orders/order.validation.js";
 
 // ─── State machine ────────────────────────────────────────────────────────────
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  pending: ['confirmed', 'cancelled'],
-  confirmed: ['processing', 'cancelled'],
-  processing: ['shipped', 'cancelled'],
-  shipped: ['delivered'],
+  pending: ["confirmed", "cancelled"],
+  confirmed: ["processing", "cancelled"],
+  processing: ["shipped", "cancelled"],
+  shipped: ["delivered"],
   delivered: [],
   cancelled: [],
 };
@@ -53,10 +53,10 @@ function assertValidTransition(from: OrderStatus, to: OrderStatus): void {
 function makeSystemNote(message: string): {
   message: string;
   createdBy: null;
-  kind: 'system';
+  kind: "system";
   createdAt: Date;
 } {
-  return { message, createdBy: null, kind: 'system', createdAt: new Date() };
+  return { message, createdBy: null, kind: "system", createdAt: new Date() };
 }
 
 // ─── Financial computation ────────────────────────────────────────────────────
@@ -169,9 +169,9 @@ function isMongoDuplicateKeyError(
   err: unknown,
 ): err is { code: number; keyPattern?: Record<string, unknown> } {
   return (
-    typeof err === 'object' &&
+    typeof err === "object" &&
     err !== null &&
-    'code' in err &&
+    "code" in err &&
     (err as { code: unknown }).code === 11000
   );
 }
@@ -185,10 +185,13 @@ async function resolveCreateOrderDuplicate(
   const kp = err.keyPattern ?? {};
 
   if (kp.orderNumber) {
-    throw new BadRequestError('Order number collision — please retry');
+    throw new BadRequestError("Order number collision — please retry");
   }
 
-  if (args.sourceMessageId && (kp.sourceMessageId || (kp.channel && kp.sourceMessageId))) {
+  if (
+    args.sourceMessageId &&
+    (kp.sourceMessageId || (kp.channel && kp.sourceMessageId))
+  ) {
     const existing = await OrderModel.findOne({
       channel: args.channel,
       sourceMessageId: args.sourceMessageId,
@@ -201,29 +204,63 @@ async function resolveCreateOrderDuplicate(
           sourceMessageId: args.sourceMessageId,
           orderNumber: existing.orderNumber,
         },
-        'Duplicate createOrder request resolved by returning existing order',
+        "Duplicate createOrder request resolved by returning existing order",
       );
       return mapOrder(existing);
     }
 
     throw new BadRequestError(
-      'Duplicate source message detected, but existing order lookup failed',
+      "Duplicate source message detected, but existing order lookup failed",
     );
   }
 
   throw err;
 }
 
+// ─── Lifetime value helper ────────────────────────────────────────────────────
+
+// Keeps customer.lifetimeValue in sync whenever an order is created or cancelled.
+// Non-fatal: a failure here never affects the order operation itself.
+//
+// Rules:
+//   +total on createOrder  (new order only — not duplicate recovery)
+//   -total on cancelOrder  (regardless of payment status)
+//   -total on deleteOrder  (only when status !== 'cancelled')
+//
+// $inc on an undefined field sets it to the delta — correct for first-time
+// customers where lifetimeValue starts as undefined (not 0).
+async function safeUpdateLifetimeValue(
+  customerId: Types.ObjectId | null | undefined,
+  delta: number,
+  context: string,
+): Promise<void> {
+  if (!customerId) return;
+  try {
+    await CustomerModel.updateOne(
+      { _id: customerId },
+      { $inc: { lifetimeValue: delta } },
+    );
+    logger.info({ customerId: customerId.toString(), delta }, context);
+  } catch (err) {
+    // Non-fatal: LTV cache may be temporarily stale but the order operation
+    // must never fail because of a secondary write.
+    logger.warn(
+      { err, customerId: customerId.toString(), delta },
+      `${context} — LTV update failed (non-fatal)`,
+    );
+  }
+}
+
 // ─── Order number generation ──────────────────────────────────────────────────
 
 async function buildUniqueOrderNumber(): Promise<string> {
   const counter = await CounterModel.findOneAndUpdate(
-    { _id: 'orderNumber' },
+    { _id: "orderNumber" },
     { $inc: { seq: 1 } },
     { new: true, upsert: true },
   ).lean<{ seq: number } | null>();
 
-  if (!counter) throw new Error('Failed to generate order number');
+  if (!counter) throw new Error("Failed to generate order number");
 
   return `${ORDER_NUMBER_PREFIX}-${counter.seq}`;
 }
@@ -242,7 +279,7 @@ async function fetchProductSnapshots(
   const uniqueIds = [...new Set(productIds)];
   const objectIds = uniqueIds.map((id) => new Types.ObjectId(id));
   const products = await ProductModel.find({ _id: { $in: objectIds } })
-    .select('name slug')
+    .select("name slug")
     .lean<ProductSnapshotLike[]>();
 
   const found = new Map(
@@ -261,14 +298,16 @@ async function fetchProductSnapshots(
 export async function getOrderById(input: unknown): Promise<SafeOrder> {
   const { orderId } = getOrderByIdSchema.parse(input);
   const order = await OrderModel.findById(orderId).lean<OrderLike>();
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
   return mapOrder(order);
 }
 
-export async function getOrderByOrderNumber(input: unknown): Promise<SafeOrder> {
+export async function getOrderByOrderNumber(
+  input: unknown,
+): Promise<SafeOrder> {
   const { orderNumber } = getOrderByOrderNumberSchema.parse(input);
   const order = await OrderModel.findOne({ orderNumber }).lean<OrderLike>();
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
   return mapOrder(order);
 }
 
@@ -276,7 +315,8 @@ export async function listOrders(input: unknown): Promise<SafeOrder[]> {
   const filter = orderFilterSchema.parse(input);
   const query: Record<string, unknown> = {};
 
-  if (filter.customerId) query.customerId = new Types.ObjectId(filter.customerId);
+  if (filter.customerId)
+    query.customerId = new Types.ObjectId(filter.customerId);
   if (filter.status) query.status = filter.status;
   if (filter.paymentStatus) query.paymentStatus = filter.paymentStatus;
   if (filter.channel) query.channel = filter.channel;
@@ -312,7 +352,7 @@ export async function createOrder(
   const data = createOrderSchema.parse(input);
 
   const normalizedSourceMessageId =
-    typeof sourceMessageId === 'string' && sourceMessageId.trim()
+    typeof sourceMessageId === "string" && sourceMessageId.trim()
       ? sourceMessageId.trim()
       : null;
 
@@ -320,7 +360,7 @@ export async function createOrder(
     const customerExists = await CustomerModel.exists({
       _id: new Types.ObjectId(data.customerId),
     });
-    if (!customerExists) throw new NotFoundError('Customer not found');
+    if (!customerExists) throw new NotFoundError("Customer not found");
   }
 
   const productIds = data.items.map((item) => item.productId);
@@ -332,7 +372,11 @@ export async function createOrder(
     productSlug: snapshots.get(item.productId)!.slug,
   }));
 
-  const { items: computedItems, subtotal, total } = computeOrderFinancials(enrichedItems);
+  const {
+    items: computedItems,
+    subtotal,
+    total,
+  } = computeOrderFinancials(enrichedItems);
 
   const orderNumber = await buildUniqueOrderNumber();
 
@@ -343,7 +387,7 @@ export async function createOrder(
       kind: note.kind,
       createdAt: new Date(),
     })),
-    makeSystemNote('Order created.'),
+    makeSystemNote("Order created."),
   ];
 
   const order = new OrderModel({
@@ -385,7 +429,15 @@ export async function createOrder(
       channel: data.channel,
       sourceMessageId: normalizedSourceMessageId,
     },
-    'Order created',
+    "Order created",
+  );
+
+  // Update cached lifetime value — non-fatal, never blocks order creation.
+  // Only fires for genuinely new orders (duplicate-recovery returns early above).
+  await safeUpdateLifetimeValue(
+    order.customerId,
+    order.total,
+    "Order created — incremented customer lifetimeValue",
   );
 
   return mapOrder(order.toObject() as OrderLike);
@@ -395,11 +447,11 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
   const { orderId, status } = updateOrderStatusSchema.parse(input);
 
   const order = await OrderModel.findById(orderId);
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
 
   assertValidTransition(order.status as OrderStatus, status);
 
-  if (status === 'confirmed' && !order.inventoryApplied) {
+  if (status === "confirmed" && !order.inventoryApplied) {
     const insufficientItems: string[] = [];
 
     for (const item of order.items) {
@@ -408,7 +460,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
         size: item.size,
         color: item.color,
       })
-        .select('quantity')
+        .select("quantity")
         .lean<{ quantity: number } | null>();
 
       if (!current || current.quantity < item.quantity) {
@@ -421,7 +473,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
 
     if (insufficientItems.length > 0) {
       throw new BadRequestError(
-        `Insufficient stock for: ${insufficientItems.join('; ')}`,
+        `Insufficient stock for: ${insufficientItems.join("; ")}`,
       );
     }
 
@@ -456,7 +508,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
             .catch((rollbackErr: unknown) => {
               logger.error(
                 { rollbackErr, orderId },
-                'Inventory rollback failed — manual correction required',
+                "Inventory rollback failed — manual correction required",
               );
             });
         }
@@ -466,7 +518,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
           size: item.size,
           color: item.color,
         })
-          .select('quantity')
+          .select("quantity")
           .lean<{ quantity: number } | null>();
 
         const available = current?.quantity ?? 0;
@@ -484,15 +536,20 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
     }
 
     order.inventoryApplied = true;
-    order.notes.push(makeSystemNote('Inventory deducted on order confirmation.'));
-    logger.info({ orderId, items: order.items.length }, 'Inventory deducted on confirm');
+    order.notes.push(
+      makeSystemNote("Inventory deducted on order confirmation."),
+    );
+    logger.info(
+      { orderId, items: order.items.length },
+      "Inventory deducted on confirm",
+    );
   }
 
   order.status = status;
   order.notes.push(makeSystemNote(`Order status changed to '${status}'.`));
   await order.save();
 
-  logger.info({ orderId, status }, 'Order status updated');
+  logger.info({ orderId, status }, "Order status updated");
   return mapOrder(order.toObject() as OrderLike);
 }
 
@@ -500,17 +557,21 @@ export async function updatePaymentStatus(input: unknown): Promise<SafeOrder> {
   const { orderId, paymentStatus } = updatePaymentStatusSchema.parse(input);
 
   const order = await OrderModel.findById(orderId);
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
 
-  if (order.status === 'cancelled') {
-    throw new BadRequestError('Cannot update payment status of a cancelled order');
+  if (order.status === "cancelled") {
+    throw new BadRequestError(
+      "Cannot update payment status of a cancelled order",
+    );
   }
 
   order.paymentStatus = paymentStatus;
-  order.notes.push(makeSystemNote(`Payment status changed to '${paymentStatus}'.`));
+  order.notes.push(
+    makeSystemNote(`Payment status changed to '${paymentStatus}'.`),
+  );
   await order.save();
 
-  logger.info({ orderId, paymentStatus }, 'Order payment status updated');
+  logger.info({ orderId, paymentStatus }, "Order payment status updated");
   return mapOrder(order.toObject() as OrderLike);
 }
 
@@ -518,12 +579,12 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
   const { orderId } = cancelOrderSchema.parse(input);
 
   const order = await OrderModel.findById(orderId);
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
 
-  assertValidTransition(order.status as OrderStatus, 'cancelled');
+  assertValidTransition(order.status as OrderStatus, "cancelled");
 
-  order.status = 'cancelled';
-  order.notes.push(makeSystemNote('Order cancelled.'));
+  order.status = "cancelled";
+  order.notes.push(makeSystemNote("Order cancelled."));
 
   if (order.inventoryApplied) {
     for (const item of order.items) {
@@ -534,13 +595,23 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
       ).lean();
     }
     order.inventoryApplied = false;
-    order.notes.push(makeSystemNote('Inventory restored on cancellation.'));
-    logger.info({ orderId, items: order.items.length }, 'Inventory restored on cancel');
+    order.notes.push(makeSystemNote("Inventory restored on cancellation."));
+    logger.info(
+      { orderId, items: order.items.length },
+      "Inventory restored on cancel",
+    );
   }
 
   await order.save();
 
-  logger.info({ orderId }, 'Order cancelled');
+  logger.info({ orderId }, "Order cancelled");
+
+  // Decrement cached lifetime value — order is no longer counted as revenue.
+  await safeUpdateLifetimeValue(
+    order.customerId,
+    -order.total,
+    "Order cancelled — decremented customer lifetimeValue",
+  );
   return mapOrder(order.toObject() as OrderLike);
 }
 
@@ -563,32 +634,34 @@ export async function addOrderNote(
     { new: true },
   ).lean<OrderLike>();
 
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
 
-  logger.info({ orderId, kind: note.kind }, 'Note added to order');
+  logger.info({ orderId, kind: note.kind }, "Note added to order");
   return mapOrder(order);
 }
 
-export async function assignCustomerToOrder(input: unknown): Promise<SafeOrder> {
+export async function assignCustomerToOrder(
+  input: unknown,
+): Promise<SafeOrder> {
   const { orderId, customerId } = assignCustomerSchema.parse(input);
 
   const customerExists = await CustomerModel.exists({
     _id: new Types.ObjectId(customerId),
   });
-  if (!customerExists) throw new NotFoundError('Customer not found');
+  if (!customerExists) throw new NotFoundError("Customer not found");
 
   const order = await OrderModel.findById(orderId);
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
 
   if (order.customerId !== null) {
-    throw new BadRequestError('Order already has a customer assigned');
+    throw new BadRequestError("Order already has a customer assigned");
   }
 
   order.customerId = new Types.ObjectId(customerId);
-  order.notes.push(makeSystemNote('Customer assigned to order.'));
+  order.notes.push(makeSystemNote("Customer assigned to order."));
   await order.save();
 
-  logger.info({ orderId, customerId }, 'Customer assigned to order');
+  logger.info({ orderId, customerId }, "Customer assigned to order");
   return mapOrder(order.toObject() as OrderLike);
 }
 
@@ -596,7 +669,7 @@ export async function deleteOrder(input: unknown): Promise<boolean> {
   const { orderId } = cancelOrderSchema.parse(input);
 
   const order = await OrderModel.findById(orderId);
-  if (!order) throw new NotFoundError('Order not found');
+  if (!order) throw new NotFoundError("Order not found");
 
   if (order.inventoryApplied) {
     for (const item of order.items) {
@@ -606,12 +679,27 @@ export async function deleteOrder(input: unknown): Promise<boolean> {
         { new: true },
       ).lean();
     }
-    logger.info({ orderId, items: order.items.length }, 'Inventory restored on delete');
+    logger.info(
+      { orderId, items: order.items.length },
+      "Inventory restored on delete",
+    );
   }
 
   await OrderModel.findByIdAndDelete(orderId);
 
-  logger.info({ orderId, orderNumber: order.orderNumber }, 'Order hard-deleted');
+  logger.info(
+    { orderId, orderNumber: order.orderNumber },
+    "Order hard-deleted",
+  );
+
+  // Decrement LTV only if not already cancelled (cancelOrder decrements on cancel).
+  if (order.status !== "cancelled") {
+    await safeUpdateLifetimeValue(
+      order.customerId,
+      -order.total,
+      "Order hard-deleted (non-cancelled) — decremented customer lifetimeValue",
+    );
+  }
   return true;
 }
 
@@ -637,20 +725,20 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
     {
       $match: {
         createdAt: { $gte: from },
-        status: { $ne: 'cancelled' },
+        status: { $ne: "cancelled" },
       },
     },
     {
       $group: {
         _id: {
-          year: { $year: '$createdAt' },
-          month: { $month: '$createdAt' },
+          year: { $year: "$createdAt" },
+          month: { $month: "$createdAt" },
         },
-        revenue: { $sum: '$total' },
+        revenue: { $sum: "$total" },
         orderCount: { $sum: 1 },
       },
     },
-    { $sort: { '_id.year': 1, '_id.month': 1 } },
+    { $sort: { "_id.year": 1, "_id.month": 1 } },
   ]);
 
   const series: MonthRevenue[] = [];
@@ -662,7 +750,7 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
     series.push({
       year,
       month,
-      label: d.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' }),
+      label: d.toLocaleDateString("es-MX", { month: "short", year: "numeric" }),
       revenue: found?.revenue ?? 0,
       orderCount: found?.orderCount ?? 0,
     });
@@ -705,20 +793,20 @@ export async function getRevenueDetail(
     {
       $match: {
         createdAt: { $gte: from },
-        status: { $ne: 'cancelled' },
+        status: { $ne: "cancelled" },
       },
     },
     {
       $group: {
         _id: {
-          year: { $year: '$createdAt' },
-          month: { $month: '$createdAt' },
+          year: { $year: "$createdAt" },
+          month: { $month: "$createdAt" },
         },
-        revenue: { $sum: '$total' },
+        revenue: { $sum: "$total" },
         orderCount: { $sum: 1 },
       },
     },
-    { $sort: { '_id.year': 1, '_id.month': 1 } },
+    { $sort: { "_id.year": 1, "_id.month": 1 } },
   ]);
 
   const monthlyStats: MonthRevenue[] = [];
@@ -726,11 +814,13 @@ export async function getRevenueDetail(
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const year = d.getFullYear();
     const month = d.getMonth() + 1;
-    const found = monthlyRaw.find((r) => r._id.year === year && r._id.month === month);
+    const found = monthlyRaw.find(
+      (r) => r._id.year === year && r._id.month === month,
+    );
     monthlyStats.push({
       year,
       month,
-      label: d.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' }),
+      label: d.toLocaleDateString("es-MX", { month: "short", year: "numeric" }),
       revenue: found?.revenue ?? 0,
       orderCount: found?.orderCount ?? 0,
     });
@@ -741,12 +831,12 @@ export async function getRevenueDetail(
     count: number;
     revenue: number;
   }>([
-    { $match: { status: { $ne: 'cancelled' } } },
+    { $match: { status: { $ne: "cancelled" } } },
     {
       $group: {
-        _id: '$paymentStatus',
+        _id: "$paymentStatus",
         count: { $sum: 1 },
-        revenue: { $sum: '$total' },
+        revenue: { $sum: "$total" },
       },
     },
   ]);
@@ -761,16 +851,16 @@ export async function getRevenueDetail(
     revenue: number;
     unitsSold: number;
   }>([
-    { $match: { status: { $ne: 'cancelled' } } },
-    { $unwind: '$items' },
+    { $match: { status: { $ne: "cancelled" } } },
+    { $unwind: "$items" },
     {
       $group: {
         _id: {
-          productId: { $toString: '$items.productId' },
-          productName: '$items.productName',
+          productId: { $toString: "$items.productId" },
+          productName: "$items.productName",
         },
-        revenue: { $sum: '$items.lineTotal' },
-        unitsSold: { $sum: '$items.quantity' },
+        revenue: { $sum: "$items.lineTotal" },
+        unitsSold: { $sum: "$items.quantity" },
       },
     },
     { $sort: { revenue: -1 } },
@@ -780,9 +870,9 @@ export async function getRevenueDetail(
   return {
     monthlyStats,
     paymentBreakdown: {
-      paid: getBreakdown('paid'),
-      partial: getBreakdown('partial'),
-      unpaid: getBreakdown('unpaid'),
+      paid: getBreakdown("paid"),
+      partial: getBreakdown("partial"),
+      unpaid: getBreakdown("unpaid"),
     },
     topProducts: productsRaw.map((p) => ({
       productId: p._id.productId,

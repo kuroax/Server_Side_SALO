@@ -165,15 +165,17 @@ type ConversationTurn = { role: string; content: string };
 // Scans the last 10 turns — enough to cover a full payment exchange without
 // reaching back into an unrelated prior session.
 function hasRecentPaymentInfoContext(turns: ConversationTurn[]): boolean {
-  const recentTurns = turns.slice(-10);
-  // Primary check: sentinel tag appended when payment_info intent is stored.
-  // This is immune to wording changes in Claude's response text.
+  // Check ALL stored turns — not just the last 10.
+  // With MAX_CONVERSATION_TURNS = 20 we now keep up to 20 turns in the DB.
+  // Hardcoding slice(-10) would miss the [payment_info_sent] sentinel if
+  // more than 10 turns arrived after payment_info (follow-up questions about
+  // color, delivery, size, etc. between the bank account send and the receipt).
+  // Since hasRecentPaymentInfoContext is only a boolean gate (did we ever send
+  // payment info in this conversation?), scanning all stored turns is correct.
   const sentinelPattern = /\[payment_info_sent\]/;
-  // Legacy fallback: phrase patterns from earlier versions (kept so turns stored
-  // before the sentinel was introduced are still detected correctly).
   const legacyPattern =
     /datos.*pago|ahorita te mando.*datos|datos para.*dep[oó]sito|datos bancarios|te mando los datos|informaci[oó]n.*pago|bancarios para tu dep[oó]sito|aqu[ií].*te los comparto|aqu[ií].*van los datos/i;
-  return recentTurns.some(
+  return turns.some(
     (t) =>
       t.role === "assistant" &&
       (sentinelPattern.test(t.content) || legacyPattern.test(t.content)),

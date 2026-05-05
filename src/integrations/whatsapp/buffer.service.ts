@@ -1,5 +1,5 @@
-import { ConversationBufferModel } from '#/modules/conversations/conversation-buffer.model.js';
-import { logger } from '#/config/logger.js';
+import { ConversationBufferModel } from "#/modules/conversations/conversation-buffer.model.js";
+import { logger } from "#/config/logger.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -15,7 +15,7 @@ const parseElapsedThresholdMs = (): number => {
   if (!Number.isFinite(parsed) || parsed < 0) {
     logger.warn(
       { raw, fallback: DEFAULT_ELAPSED_THRESHOLD_MS },
-      'Invalid WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS; using default',
+      "Invalid WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS; using default",
     );
     return DEFAULT_ELAPSED_THRESHOLD_MS;
   }
@@ -28,15 +28,15 @@ const ELAPSED_THRESHOLD_MS = parseElapsedThresholdMs();
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type PushPayload = {
-  from:          string;
-  message:       string;
-  executionId:   string;
-  messageId?:    string;
-  messageType?:  string;
+  from: string;
+  message: string;
+  executionId: string;
+  messageId?: string;
+  messageType?: string;
   imageMediaId?: string | null;
   imageCaption?: string;
-  contactName?:  string;
-  timestamp?:    string | number | null;
+  contactName?: string;
+  timestamp?: string | number | null;
 };
 
 export type PushResult =
@@ -44,11 +44,11 @@ export type PushResult =
   | { ok: true; duplicate: true };
 
 export type ClaimSkipReason =
-  | 'buffer_not_found'
-  | 'elapsed_too_short'
-  | 'not_owner'
-  | 'empty_merged_message'
-  | 'claim_not_granted';
+  | "buffer_not_found"
+  | "elapsed_too_short"
+  | "not_owner"
+  | "empty_merged_message"
+  | "claim_not_granted";
 
 export type ClaimResult =
   | { skip: true; reason: ClaimSkipReason }
@@ -57,6 +57,14 @@ export type ClaimResult =
       shouldRespond: true;
       mergedMessage: string;
       messageCount: number;
+      // Aggregated media context resolved across ALL buffered messages.
+      // Critical: when the customer sends an image then text (e.g. receipt +
+      // "Aqui esta el deposito"), the text execution wins ownership. Without
+      // these fields, imageMediaId is silently lost and receipt detection fails.
+      messageType: string; // "image" if ANY buffered message was an image
+      imageMediaId: string | null; // First non-null imageMediaId across all messages
+      imageCaption: string; // Caption from the image message (or empty string)
+      contactName: string | null; // Contact name from the first message that has one
     };
 
 // ─── Push ─────────────────────────────────────────────────────────────────────
@@ -70,7 +78,9 @@ export type ClaimResult =
 // True hard idempotency is still best enforced with a dedicated
 // unique-message store at the business layer.
 
-export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> => {
+export const pushToBuffer = async (
+  payload: PushPayload,
+): Promise<PushResult> => {
   const {
     from,
     message,
@@ -84,22 +94,20 @@ export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> =>
   } = payload;
 
   const normalizedMessageId =
-    typeof messageId === 'string' && messageId.trim()
-      ? messageId.trim()
-      : null;
+    typeof messageId === "string" && messageId.trim() ? messageId.trim() : null;
 
   // Launch-week duplicate guard:
   // if the same messageId is already buffered for this sender, no-op safely.
   if (normalizedMessageId) {
     const duplicateExists = await ConversationBufferModel.exists({
       from,
-      'messages.messageId': normalizedMessageId,
+      "messages.messageId": normalizedMessageId,
     });
 
     if (duplicateExists) {
       logger.info(
         { from, executionId, messageId: normalizedMessageId },
-        'Buffer push — duplicate messageId ignored',
+        "Buffer push — duplicate messageId ignored",
       );
 
       return { ok: true, duplicate: true };
@@ -111,13 +119,13 @@ export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> =>
     {
       $push: {
         messages: {
-          text:         message,
-          messageId:    normalizedMessageId,
-          messageType:  messageType  ?? 'text',
+          text: message,
+          messageId: normalizedMessageId,
+          messageType: messageType ?? "text",
           imageMediaId: imageMediaId ?? null,
-          imageCaption: imageCaption ?? '',
-          contactName:  contactName  ?? 'Cliente',
-          timestamp:    timestamp    ?? null,
+          imageCaption: imageCaption ?? "",
+          contactName: contactName ?? "Cliente",
+          timestamp: timestamp ?? null,
           executionId,
         },
       },
@@ -131,7 +139,7 @@ export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> =>
 
   logger.info(
     { from, executionId, messageId: normalizedMessageId, messageType },
-    'Buffer push — message appended',
+    "Buffer push — message appended",
   );
 
   return { ok: true, duplicate: false };
@@ -146,7 +154,7 @@ export const pushToBuffer = async (payload: PushPayload): Promise<PushResult> =>
 // is atomic for the owner/cutoff condition.
 
 export const claimBuffer = async (
-  from:        string,
+  from: string,
   executionId: string,
 ): Promise<ClaimResult> => {
   const cutoff = new Date(Date.now() - ELAPSED_THRESHOLD_MS);
@@ -166,65 +174,92 @@ export const claimBuffer = async (
       .lean();
 
     if (!current) {
-      logger.info({ from, executionId }, 'Claim — no buffer found, skip');
-      return { skip: true, reason: 'buffer_not_found' };
+      logger.info({ from, executionId }, "Claim — no buffer found, skip");
+      return { skip: true, reason: "buffer_not_found" };
     }
 
     const elapsed = current.lastSeen
       ? Date.now() - new Date(current.lastSeen).getTime()
       : null;
 
-    if (typeof elapsed === 'number' && elapsed < ELAPSED_THRESHOLD_MS) {
+    if (typeof elapsed === "number" && elapsed < ELAPSED_THRESHOLD_MS) {
       logger.info(
         { from, executionId, elapsed, threshold: ELAPSED_THRESHOLD_MS },
-        'Claim — elapsed too short, skip',
+        "Claim — elapsed too short, skip",
       );
-      return { skip: true, reason: 'elapsed_too_short' };
+      return { skip: true, reason: "elapsed_too_short" };
     }
 
     if (current.ownerExecutionId !== executionId) {
       logger.info(
         { from, executionId, owner: current.ownerExecutionId },
-        'Claim — not owner, skip',
+        "Claim — not owner, skip",
       );
-      return { skip: true, reason: 'not_owner' };
+      return { skip: true, reason: "not_owner" };
     }
 
     logger.warn(
       { from, executionId },
-      'Claim — atomic claim not granted despite ownership diagnostics',
+      "Claim — atomic claim not granted despite ownership diagnostics",
     );
-    return { skip: true, reason: 'claim_not_granted' };
+    return { skip: true, reason: "claim_not_granted" };
   }
 
-  const mergedParts = (claimedBuffer.messages ?? [])
-    .map((m) => (typeof m.text === 'string' ? m.text.trim() : ''))
+  const messages = claimedBuffer.messages ?? [];
+
+  // ── Aggregate media context across all buffered messages ─────────────────
+  // The owning execution is the LAST one to push, which may be a plain text
+  // message even when an earlier message in the same burst was an image.
+  // We scan all messages to surface the imageMediaId so n8n can include it
+  // in the webhook POST regardless of which execution claimed the buffer.
+  const imageMessage = messages.find(
+    (m) => m.messageType === "image" && m.imageMediaId,
+  );
+  const aggregatedMessageType = imageMessage ? "image" : "text";
+  const aggregatedImageMediaId = imageMessage?.imageMediaId ?? null;
+  const aggregatedImageCaption = imageMessage?.imageCaption ?? "";
+  const aggregatedContactName =
+    messages.find((m) => m.contactName && m.contactName !== "Cliente")
+      ?.contactName ?? null;
+
+  // ── Build merged text ─────────────────────────────────────────────────────
+  // Exclude empty text entries (image-only messages have no text).
+  const mergedParts = messages
+    .map((m) => (typeof m.text === "string" ? m.text.trim() : ""))
     .filter(Boolean);
 
-  const mergedMessage = mergedParts.join('\n').trim();
+  // If an image was buffered but the text parts are empty, keep the response
+  // going — the webhook will handle it as an image message via imageMediaId.
+  const mergedMessage = mergedParts.join("\n").trim();
 
-  if (!mergedMessage) {
+  if (!mergedMessage && !aggregatedImageMediaId) {
     logger.info(
       { from, executionId },
-      'Claim — buffer claimed but merged message was empty, skip',
+      "Claim — buffer claimed but merged message was empty and no imageMediaId, skip",
     );
-    return { skip: true, reason: 'empty_merged_message' };
+    return { skip: true, reason: "empty_merged_message" };
   }
 
   logger.info(
     {
       from,
       executionId,
-      messageCount: mergedParts.length,
+      messageCount: messages.length,
+      aggregatedMessageType,
+      hasImageMediaId: !!aggregatedImageMediaId,
       threshold: ELAPSED_THRESHOLD_MS,
     },
-    'Claim — buffer claimed and cleared',
+    "Claim — buffer claimed and cleared",
   );
 
   return {
     skip: false,
     shouldRespond: true,
     mergedMessage,
-    messageCount: mergedParts.length,
+    messageCount: messages.length,
+    messageType: aggregatedMessageType,
+    imageMediaId: aggregatedImageMediaId,
+    imageCaption: aggregatedImageCaption,
+    contactName: aggregatedContactName,
   };
 };

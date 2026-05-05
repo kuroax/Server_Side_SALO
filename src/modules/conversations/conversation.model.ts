@@ -1,4 +1,9 @@
-import { Schema, model, type InferSchemaType, type HydratedDocument } from 'mongoose';
+import {
+  Schema,
+  model,
+  type InferSchemaType,
+  type HydratedDocument,
+} from "mongoose";
 
 // ─── Subdocument ──────────────────────────────────────────────────────────────
 
@@ -6,9 +11,9 @@ const conversationTurnSchema = new Schema(
   {
     // 'user'      = incoming customer message
     // 'assistant' = outgoing bot reply
-    role:      { type: String, required: true, enum: ['user', 'assistant'] },
-    content:   { type: String, required: true, trim: true },
-    createdAt: { type: Date,   required: true, default: () => new Date() },
+    role: { type: String, required: true, enum: ["user", "assistant"] },
+    content: { type: String, required: true, trim: true },
+    createdAt: { type: Date, required: true, default: () => new Date() },
   },
   { _id: false },
 );
@@ -20,28 +25,28 @@ const conversationSchema = new Schema(
     // One conversation document per customer+channel pair.
     // Indexed together for fast lookup on every incoming message.
     customerId: {
-      type:     Schema.Types.ObjectId,
-      ref:      'Customer',
+      type: Schema.Types.ObjectId,
+      ref: "Customer",
       required: true,
     },
 
     channel: {
-      type:     String,
+      type: String,
       required: true,
-      enum:     ['whatsapp', 'instagram'],
+      enum: ["whatsapp", "instagram"],
     },
 
     // Rolling window of the last MAX_TURNS turns.
     // Older turns are sliced off in the service layer before saving,
     // so this array never grows unboundedly.
     turns: {
-      type:    [conversationTurnSchema],
+      type: [conversationTurnSchema],
       default: [],
     },
 
     // Updated on every exchange — makes it easy to find stale conversations.
     lastMessageAt: {
-      type:    Date,
+      type: Date,
       default: () => new Date(),
     },
   },
@@ -66,23 +71,33 @@ conversationSchema.index(
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ConversationTurn = {
-  role:      'user' | 'assistant';
-  content:   string;
+  role: "user" | "assistant";
+  content: string;
   createdAt: Date;
 };
 
 export type ConversationSchemaType = InferSchemaType<typeof conversationSchema>;
-export type ConversationDocument    = HydratedDocument<ConversationSchemaType>;
+export type ConversationDocument = HydratedDocument<ConversationSchemaType>;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 // How many turns (user + assistant pairs) to keep in the rolling window.
 // 10 turns = 5 exchanges = enough context without bloating the prompt.
-export const MAX_CONVERSATION_TURNS = 10;
+//
+// Why 20 and not 10:
+//   hasRecentPaymentInfoContext (webhook.service.ts) searches stored turns for
+//   the [payment_info_sent] sentinel to detect receipt images. If the window is
+//   too small, the sentinel is evicted before the customer sends their receipt
+//   (after several follow-up messages). When that happens, searchProductsByImage
+//   runs on a bank receipt → SAFE_FALLBACK fires instead of the receipt ack.
+//   With 20 turns there is room for ~9 follow-up exchanges after payment_info.
+//   Claude still only receives MAX_HISTORY_TURNS_FOR_AI = 10 turns per request
+//   (set in webhook.service.ts) — storage increase does NOT affect prompt size.
+export const MAX_CONVERSATION_TURNS = 20;
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
 export const ConversationModel = model<ConversationSchemaType>(
-  'Conversation',
+  "Conversation",
   conversationSchema,
 );
