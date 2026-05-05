@@ -196,6 +196,20 @@ const order = await OrderModel.findById(id).lean<OrderLike>();
 
 Define a `*Like` type matching the raw Mongoose document shape and pass it as the generic to `.lean<T>()`.
 
+### Casting lean documents to extended shapes
+
+When the webhook reads optional fields from a strongly-typed Mongoose lean document,
+cast through `unknown` first — direct `as Record<string, unknown>` on a typed document
+causes `ts(2352)`:
+
+```ts
+// WRONG — ts(2352): Index signature missing
+(recentOrder as Record<string, unknown>).trackingNumber(
+  // CORRECT — double-cast through unknown
+  recentOrder as unknown as Record<string, unknown>,
+).trackingNumber as string | undefined;
+```
+
 ### Mappers
 
 Every module has a `mapOrder()` / `mapProduct()` etc. function that converts raw `OrderLike` (ObjectIds as `Types.ObjectId`) to `SafeOrder` (all IDs as strings). Resolvers always return mapped types, never raw documents.
@@ -215,77 +229,71 @@ Enforced via `VALID_TRANSITIONS` map — `assertValidTransition()` throws `BadRe
 
 ### Inventory lifecycle
 
-- **Deducted** atomically when order moves to `confirmed` (`inventoryApplied = true`)
-- **Restored** when order is cancelled or hard-deleted (only if `inventoryApplied === true`)
-- Uses `$gte` guard in `findOneAndUpdate` to prevent negative stock — fails with clear error message
+Inventory is reserved when an order moves to `confirmed` and released on `cancelled`. The `inventoryApplied` boolean on the order document guards against double-decrement. Gates V2 RESERVE/RELEASE operations.
 
-### Order number format
+### Order schema — current fields
 
-`SALO-100001` — globally sequential, collision-safe via MongoDB atomic counter.
-
-**`ORDER_NUMBER_PREFIX = 'SALO'` — never change this constant without migrating all existing `orderNumber` values in MongoDB. Changing it creates two incompatible formats in the same collection.**
-
-### System notes
-
-All service-level events append a system note automatically:
+The order schema includes three fulfillment fields added to support the Luis bot's
+`order_status` and `order_summary` intents. They are all optional (`default: undefined`)
+so existing orders are unaffected:
 
 ```ts
-makeSystemNote("Inventory deducted on order confirmation.");
-// { message, createdBy: null, kind: 'system', createdAt: Date }
+outstandingBalance?: number   // Running balance owed. Updated by owner on each partial payment.
+                              // Bot says "Tu saldo pendiente es $X" when present.
+
+trackingNumber?: string       // Carrier guide number. Set by owner when package ships.
+                              // Bot surfaces this when customer asks "¿ya mandaste?"
+
+estimatedDelivery?: string    // Free-text delivery window, e.g. "Jueves 8 de mayo".
+                              // Kept as string (not Date) to match how the owner communicates.
 ```
 
-### Order idempotency via `sourceMessageId`
+**When adding items to the order schema, note the field is `productName`, not `name`.**
+The `orderItemSchema` stores `productName: String` (a snapshot of the product name at
+time of order). Any code that maps order items to Claude's `OrderItem` shape must use
+`i.productName`, not `i.name`.
 
-Bot-created orders store the inbound WhatsApp `messageId` as `sourceMessageId` on the order document. A compound unique index enforces at most one order per inbound message per channel:
+### Updating `outstandingBalance` correctly
+
+`outstandingBalance` is NOT computed automatically. The owner updates it manually each
+time they confirm a transfer. The formula is:
+
+```
+outstandingBalance = order.total - sum(all confirmed payments received)
+```
+
+Update via:
 
 ```ts
-orderSchema.index(
-  { channel: 1, sourceMessageId: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { sourceMessageId: { $type: "string" } },
-    name: "channel_sourceMessageId_unique",
-  },
-);
+await OrderModel.findByIdAndUpdate(orderId, {
+  $set: { outstandingBalance: remainingAmount },
+});
 ```
 
-`createOrder()` accepts `sourceMessageId` as an optional third parameter (default `null`). When a duplicate is detected, `resolveCreateOrderDuplicate()` returns the existing order silently — `createOrder()` is idempotent for bot flows. Manual orders leave `sourceMessageId: null` and are never included in the unique index (partial filter excludes non-strings).
+### MongoDB indexes on orders
 
-**`sourceMessageId` is internal** — not exposed in the GraphQL API and not accepted in `createOrderSchema`. It is passed directly from `webhook.service.ts` to `createOrder()` as a service-layer concern.
+Verify all three indexes exist after deploy:
 
-### Revenue stats query
-
-```graphql
-revenueStats(months: Int): [MonthRevenue!]!
+```js
+db.orders.getIndexes();
+// Expected:
+// { key: { _id: 1 } }                                          — default
+// { key: { channel: 1, sourceMessageId: 1 }, unique: true,
+//   partialFilterExpression: { sourceMessageId: { $type: 'string' } },
+//   name: 'channel_sourceMessageId_unique' }                   — idempotency
+// { key: { customerId: 1, createdAt: -1 },
+//   name: 'customerId_createdAt_desc' }                        — webhook perf
 ```
 
-Uses MongoDB aggregation (`$group` by year/month). Excludes cancelled orders. Fills zeroes for months with no sales. Used by the dashboard for the 3-month revenue bar chart.
+The `customerId_createdAt_desc` index is critical — `webhook.service.ts` runs
+`OrderModel.findOne({ customerId }).sort({ createdAt: -1 })` on every incoming
+WhatsApp message. Without this index MongoDB does a full collection scan per message.
 
 ---
 
 ## Customer module specifics
 
 ### Phone normalization
-
-Phone numbers are stored in **digits-only canonical format** — no `+`, spaces, hyphens, or parentheses.
-
-Example: `+52 (332) 820-5715` → `5213328205715`
-
-**Three layers enforce this:**
-
-1. **`customer.model.ts` pre-save hook** — normalizes on `create()` / `save()` calls
-2. **`customer.service.ts`** — `normalizePhoneForLookup()` applied before every query and `findByIdAndUpdate` write (hooks don't run on update calls)
-3. **`webhook.service.ts`** — `normalizePhoneForLookup()` applied to `payload.from` before the customer upsert query
-
-**Rule:** any code that queries or writes `phone` must normalize first. Pre-save hooks are a safety net, not the primary normalization path.
-
-### `isActive` semantics
-
-`isActive` is a soft-delete flag — one canonical document per customer, never replaced. `isActive: false` means the customer was deactivated by the owner. Deactivated customers are excluded from active lookups but their record and history are preserved. If a deactivated customer contacts via WhatsApp, the existing record is reused — reactivation requires manual owner action.
-
-### Customer upsert pattern (WhatsApp)
-
-`webhook.service.ts` uses an atomic upsert to avoid the race condition where two concurrent executions for a brand-new customer both attempt `create()`:
 
 ```ts
 const normalizedPhone = from.replace(/\D/g, '');
@@ -299,15 +307,179 @@ await CustomerModel.findOneAndUpdate(
 
 `$setOnInsert` only writes on document creation — existing customers are never modified by this operation.
 
+### Customer schema — current fields
+
+The customer schema includes a `lifetimeValue` field added to support VIP detection
+in the Luis bot without running an aggregation on every WhatsApp message:
+
+```ts
+lifetimeValue?: number   // Cached sum of all non-cancelled order totals (MXN).
+                         // undefined for customers with no orders yet — NOT 0.
+                         // Updated by order.service.ts on order create/complete/cancel.
+```
+
+**VIP thresholds used by Luis (`buildVipContext` in `claude.service.ts`):**
+
+- `≥ $50,000 MXN` → VIP: maximum payment flexibility, priority treatment
+- `≥ $10,000 MXN` → returning customer: warm confident tone
+- `undefined` / `0` → new customer: standard onboarding tone
+
+### Maintaining `lifetimeValue` in `order.service.ts`
+
+This field is a write-through cache — it must be updated whenever an order changes total:
+
+```ts
+// On order created or completed — increment:
+await CustomerModel.updateOne(
+  { _id: customerId },
+  { $inc: { lifetimeValue: order.total } },
+);
+
+// On order cancelled — decrement:
+await CustomerModel.updateOne(
+  { _id: customerId },
+  { $inc: { lifetimeValue: -order.total } },
+);
+```
+
+Without these writes, `lifetimeValue` stays `undefined` forever and VIP detection
+never activates — even for Natalia-tier customers with $150k+ in orders.
+
+### MongoDB indexes on customers
+
+```js
+db.customers.getIndexes();
+// Expected:
+// { key: { _id: 1 } }
+// { key: { phone: 1 }, unique: true, sparse: true }
+// { key: { instagramHandle: 1 }, unique: true, sparse: true }
+// { key: { isActive: 1, contactChannel: 1 } }
+// { key: { tags: 1 } }
+// { key: { lifetimeValue: -1 } }    — dashboard sort + future VIP queries
+```
+
 ---
 
 ## WhatsApp bot (Luis)
 
+### Identity and persona
+
 - **Model:** `claude-sonnet-4-20250514`
-- **Persona:** warm, uses apodos (bonita, bella, corazón), Spanish only
+- **Persona:** warm, casual, boutique salesperson — Spanish only
+- **Gender-adaptive tone:**
+  - Female / unknown → `"bonita"`, `"bella"`, `"corazón"`, `"linda"`
+  - Male (explicit signal detected) → `"amigo"`, `"bro"`, never feminine nicknames
+- **Gender detection:** real-time from message content, not just stored `customer.gender`
 - **Memory:** 10-turn conversation history via `conversations` collection
 - **Escalation:** service returns `escalate: true` → n8n sends owner alert
 - **Key rule:** backend never touches the WhatsApp API directly — all Meta credentials live in n8n
+
+### Brands handled
+
+Luis knows and searches for: **Alo Yoga, Lululemon, Wiskii, 437, Better Me, Skims**.
+Do not hardcode a shorter list anywhere — all 6 brands must appear in catalog replies
+and any brand-list strings in the codebase.
+
+### Lululemon sizing convention
+
+Luis applies this automatically when sizing guidance is needed:
+
+- `XS` = talla 4
+- `S` = talla 6
+- `M` = talla 8
+
+### Intent system — complete enum
+
+`ClaudeIntent` in `claude.service.ts` has exactly these values:
+
+```ts
+type ClaudeIntent =
+  | "catalog_query" // Customer asked broadly what the store carries — ask for specifics
+  | "product_search" // search_products tool was called and returned results
+  | "price_query" // Customer asked for a price — answer directly
+  | "create_order" // Customer confirmed a product + size + color — create the order
+  | "order_status" // Customer asked about their order, shipping, or tracking
+  | "order_summary" // Customer asked to see their full accumulated order list
+  | "showroom_visit" // Customer wants to visit the boutique in person
+  | "payment_info" // Customer asked how/where to pay — send banking image
+  | "payment_receipt" // Customer announced or sent a payment comprobante
+  | "needs_human" // Requires owner decision (negotiation, dispute, tight delivery)
+  | "general"; // Greetings, reactions, ambiguous messages
+```
+
+**Never add or remove intents from this enum without updating ALL of the following:**
+
+1. `claude.service.ts` — `ClaudeIntent` type + `claudeResultSchema` Zod union
+2. `webhook.service.ts` — `processMessageResultSchema` Zod enum + intent handler blocks
+3. This document
+
+### ClaudeContext shape — complete current definition
+
+```ts
+type ClaudeContext = {
+  customerName: string | null;
+  customerGender: "female" | "male" | "unknown";
+  customerLifetimeValue?: number; // From customer.lifetimeValue — drives VIP tone
+  recentOrder: {
+    orderNumber: string;
+    status: string;
+    total: number;
+    outstandingBalance?: number; // Remaining balance after partial payments
+    trackingNumber?: string; // Carrier guide number — shown in order_status
+    estimatedDelivery?: string; // Human-readable delivery window
+    items?: OrderItem[]; // Line items — powers order_summary
+  } | null;
+  searchProducts: SearchProductsFn;
+  incomingMessage: string;
+  conversationHistory: ConversationTurnInput[];
+  businessInfo: {
+    showroomAddress: string;
+    businessHours: string;
+    shippingPrice: number;
+    paymentMethods: string;
+    depositPercent: number;
+    paymentDays: number;
+    activePromotion?: string; // e.g. "30% Off Alo Yoga hasta el 10 de mayo"
+    // Currently hardcoded undefined in BUSINESS_INFO.
+    // DEFERRED: wire to ACTIVE_PROMOTION env var.
+  };
+};
+
+type OrderItem = {
+  name: string; // Maps from orderItemSchema.productName — NOT productName.name
+  size: string;
+  color: string;
+  quantity: number;
+  price: number; // Maps from orderItemSchema.unitPrice
+};
+```
+
+### Sales behavior — key techniques baked into the system prompt
+
+The following behaviors are intentional and must not be regressed by prompt edits:
+
+| Technique                  | Trigger                                                   | Behavior                                                                                             |
+| -------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Scarcity close             | `search_products` returns 1 result                        | Adds urgency: "última disponible — apártala ahora 🙏🏻"                                                |
+| Set completion upsell      | Customer selects a top / bra / tank                       | Bot asks if they want the matching bottom (legging / pants / short) and searches for it              |
+| Color swap protocol        | 0 results with color specified                            | Re-calls `search_products` without color, frames as "ese color no está, pero mira qué tonos tenemos" |
+| Color recommendation       | Customer hesitates between two colors                     | Recommends the scarcer / newer color explicitly                                                      |
+| Delivery urgency detection | Customer mentions a trip/event/date                       | Bot commits to ship date or escalates if date is too tight                                           |
+| Negotiation detection      | "cerramos en X", "me lo dejas en X", "me haces descuento" | Always `needs_human` — never accept or reject on bot's own                                           |
+| Partial payment acceptance | Customer offers partial deposit                           | Bot accepts warmly: "con $X te la aparto 🙌🏼"                                                         |
+| Accessory upsell           | Order about to be confirmed                               | Offers calcetas / guantes / viseras as add-on — one item only                                        |
+| Emotional close            | After `create_order`                                      | "Todo lo que escogiste está divino! Te va a encantar! ✨"                                            |
+| Promotion mention          | `activePromotion` is set                                  | Mentioned once per conversation when customer is browsing or hesitating                              |
+
+### Intent handling rules — must not change without review
+
+- `catalog_query` → never calls `search_products`. Always asks what type of garment.
+- `payment_info` → never escalates to owner. System sends banking image automatically.
+- `payment_receipt` with 8+ items → does NOT list all items (hallucination risk). Defers to owner.
+- `needs_human` → fires for: negotiation, dispute, tight delivery date, post-delivery exchange, showroom visit coordination.
+- `showroom_visit` → escalates so owner knows a visit is coming. Claude already replied with address + hours.
+- `order_summary` → compiles from `recentOrder.items` if available, otherwise scans conversation history. Never calls `search_products`.
+- `general` → stickers, reactions, ambiguous messages — continue the sale naturally.
 
 ### Message flow
 
@@ -435,28 +607,6 @@ db.conversationbuffers.createIndex(
 );
 ```
 
-### MongoDB indexes on orders
-
-Verify the `sourceMessageId` idempotency index exists after first deploy:
-
-```js
-db.orders.getIndexes();
-// Expected among others:
-// { key: { channel: 1, sourceMessageId: 1 }, unique: true,
-//   partialFilterExpression: { sourceMessageId: { $type: 'string' } },
-//   name: 'channel_sourceMessageId_unique' }
-```
-
-### Known technical debt
-
-| Item                                                 | Risk                                                     | Status                                                                        |
-| ---------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Dedup in Extract Message uses n8n static data        | Lost on container restart — Meta retries may reprocess   | Open — move to MongoDB with unique messageId index                            |
-| Only first product image per item sent               | Customer sees one angle only                             | Intentional — revisit if UX requires it                                       |
-| Products fetched unconditionally before intent known | Wasteful for general/order_status intents                | Open — add pagination or lazy fetch when catalog exceeds ~500 items           |
-| Customer creation race condition                     | Two concurrent executions for new customer could collide | **Resolved** — atomic upsert with `$setOnInsert` in `webhook.service.ts`      |
-| Order idempotency was note-based                     | Non-atomic check, notes overloaded as idempotency keys   | **Resolved** — `sourceMessageId` compound unique index on `orders` collection |
-
 ---
 
 ## GraphQL schema structure
@@ -485,7 +635,32 @@ Optional vars with defaults:
 WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS   # Default: 55000. Set to 5000 for local testing.
 ```
 
+**Deferred — not yet wired (planned):**
+
+```
+ACTIVE_PROMOTION   # e.g. "30% Off Alo Yoga hasta el 10 de mayo"
+                   # When set, Luis mentions it once per conversation while customer browses.
+                   # Currently hardcoded as undefined in BUSINESS_INFO in webhook.service.ts.
+                   # To activate: add to env.ts (z.string().optional()), import in webhook.service.ts,
+                   # assign to businessInfo.activePromotion. No code change needed after that.
+```
+
 Never access `process.env` directly outside of `env.ts` — always import the validated config object. Exception: `buffer.service.ts` reads `WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS` directly at module load time since it is intentionally runtime-configurable without a full env validation cycle.
+
+---
+
+## Known technical debt
+
+| Item                                                      | Risk                                                              | Status                                                                           |
+| --------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Dedup in Extract Message uses n8n static data             | Lost on container restart — Meta retries may reprocess            | Open — move to MongoDB with unique messageId index                               |
+| Only first product image per item sent                    | Customer sees one angle only                                      | Intentional — revisit if UX requires it                                          |
+| Products fetched unconditionally before intent known      | Wasteful for general/order_status intents                         | Open — add pagination or lazy fetch when catalog exceeds ~500 items              |
+| Customer creation race condition                          | Two concurrent executions for new customer could collide          | **Resolved** — atomic upsert with `$setOnInsert`                                 |
+| Order idempotency was note-based                          | Non-atomic check, notes overloaded as idempotency keys            | **Resolved** — `sourceMessageId` compound unique index on orders                 |
+| LTV computed via aggregation on every WhatsApp message    | Full orders collection scan per request at scale                  | **Resolved** — cached as `customer.lifetimeValue`, updated by `order.service.ts` |
+| `activePromotion` requires code change + Railway redeploy | Cannot toggle a sale without a deploy                             | **Deferred** — wire to `ACTIVE_PROMOTION` env var when ready                     |
+| n8n `showroom_visit` escalation has no dedicated branch   | Owner sees generic wall of text instead of "confirm visit" prompt | **Deferred** — add IF node in n8n routing on escalationMessage content           |
 
 ---
 
@@ -504,3 +679,10 @@ Never access `process.env` directly outside of `env.ts` — always import the va
 - Never change `ORDER_NUMBER_PREFIX` without migrating all existing `orderNumber` values in MongoDB
 - Never query or write `customer.phone` without normalizing to digits-only first — pre-save hooks do not run on `findByIdAndUpdate` or `findOneAndUpdate`
 - Never add `sourceMessageId` to `createOrderSchema` — it is a service-layer parameter, not a client input field
+- Never add or remove a `ClaudeIntent` value without updating `claude.service.ts`, `webhook.service.ts`, and this document
+- Never call `search_products` for `order_summary` — compile from `recentOrder.items` or conversation history
+- Never escalate `payment_info` to the owner — the system handles it automatically
+- Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown` first to avoid `ts(2352)`
+- Never read `customer.lifetimeValue` as `0` to mean "new customer" — it is `undefined` for customers with no orders; `0` is a genuinely zero-sum order
+- Never reference order item names as `i.name` — the schema field is `productName` (snapshot field)
+- Never hardcode only "Alo Yoga, Lululemon, Wiskii" as the brand list — the current catalog includes **437, Better Me, and Skims** as well
