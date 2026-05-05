@@ -166,10 +166,17 @@ type ConversationTurn = { role: string; content: string };
 // reaching back into an unrelated prior session.
 function hasRecentPaymentInfoContext(turns: ConversationTurn[]): boolean {
   const recentTurns = turns.slice(-10);
-  const paymentPattern =
-    /datos.*pago|ahorita te mando.*datos|datos para.*dep[oó]sito|datos bancarios|te mando los datos|informaci[oó]n.*pago|bancarios para tu dep[oó]sito/i;
+  // Primary check: sentinel tag appended when payment_info intent is stored.
+  // This is immune to wording changes in Claude's response text.
+  const sentinelPattern = /\[payment_info_sent\]/;
+  // Legacy fallback: phrase patterns from earlier versions (kept so turns stored
+  // before the sentinel was introduced are still detected correctly).
+  const legacyPattern =
+    /datos.*pago|ahorita te mando.*datos|datos para.*dep[oó]sito|datos bancarios|te mando los datos|informaci[oó]n.*pago|bancarios para tu dep[oó]sito|aqu[ií].*te los comparto|aqu[ií].*van los datos/i;
   return recentTurns.some(
-    (t) => t.role === "assistant" && paymentPattern.test(t.content),
+    (t) =>
+      t.role === "assistant" &&
+      (sentinelPattern.test(t.content) || legacyPattern.test(t.content)),
   );
 }
 
@@ -200,28 +207,40 @@ function extractCartFromHistory(turns: ConversationTurn[]): CartItem[] {
   for (const turn of recentTurns) {
     if (turn.role !== "assistant") continue;
 
+    // ── Primary: ⭐️ confirmed order lines (create_order format) ────────────────
     const starLines = turn.content.match(/⭐️\s*([^\n]+)/g) ?? [];
     for (const raw of starLines) {
       const line = raw.replace(/^⭐️\s*/, "").trim();
-
-      // Skip template placeholders ("[Producto]...") and Total lines
       if (/^\[|\bTotal\b/i.test(line)) continue;
-
-      // Extract trailing price: "$2,190" or "— $2,190"
       const priceMatch = line.match(/\$\s*([\d,]+)\s*$/);
       const price = priceMatch
         ? parseInt(priceMatch[1].replace(/,/g, ""), 10)
         : undefined;
-
-      // Strip price suffix and normalize whitespace
       const description = line
         .replace(/[-–—]?\s*\$[\d,.\s]+$/, "")
         .replace(/\s+/g, " ")
         .trim();
-
       if (!description || seen.has(description)) continue;
       seen.add(description);
       items.push({ description, price });
+    }
+
+    // ── Secondary: product mentions in price_query / payment_info turns ────────
+    // When the purchase flow goes gallery reply → price_query → payment_info
+    // without create_order, there are no ⭐️ lines. Extract from natural language:
+    // "El jersey Alo que te interesa está a $1,990" or "El jersey está a $1,990."
+    if (items.length === 0) {
+      const priceContextMatch = turn.content.match(
+        /(?:el|la|los)\s+([A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]+?(?:Alo|Lululemon|Wiskii|Skims|437|Better Me)[A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]*?)\s+(?:est[aá]|cuesta|vale)\s+a?\s*\$\s*([\d,]+)/i,
+      );
+      if (priceContextMatch) {
+        const description = priceContextMatch[1].trim().replace(/\s+/g, " ");
+        const price = parseInt(priceContextMatch[2].replace(/,/g, ""), 10);
+        if (description && !seen.has(description)) {
+          seen.add(description);
+          items.push({ description, price: isNaN(price) ? undefined : price });
+        }
+      }
     }
   }
 
@@ -885,14 +904,37 @@ export const handleIncomingMessage = async (
     }
 
     // ── 2a. Payment receipt detection ─────────────────────────────────────
-    // If the customer was shown bank account data in a recent turn, an incoming
-    // image is almost certainly a payment receipt — not a product photo.
-    // Skip searchProductsByImage entirely and return a direct acknowledgment.
+    // An incoming image is treated as a payment receipt if EITHER:
     //
-    // This is checked BEFORE the product search so the receipt is never routed
-    // into image-based catalog search, which would return 0 results and produce
-    // a generic fallback reply ("Permíteme un momento").
-    if (hasRecentPaymentInfoContext(allTurns)) {
+    //   Signal A — Conversation context: a payment_info turn exists in the
+    //   last 10 turns (bank account info was recently sent). Detected via
+    //   [payment_info_sent] sentinel or legacy phrase patterns.
+    //
+    //   Signal B — Message caption: the customer's text alongside the image
+    //   contains explicit payment language ("aquí está el depósito", "ya pagué",
+    //   "comprobante", etc.). This catches cases where the payment_info turn is
+    //   outside the detection window or the sentinel is missing (pre-deploy turns).
+    //
+    // Both signals skip searchProductsByImage, which would otherwise run a
+    // catalog search on a bank receipt photo and return 0 results → SAFE_FALLBACK.
+    const receiptCaptionPattern =
+      /comprobante|ya pagu[eé]|ya deposit[eé]|aqu[ií] est[aá] el dep[oó]sito|aqu[ií] el dep[oó]sito|aqu[ií] el pago|te mand[oé] el dep[oó]sito|hice el dep[oó]sito|hice la transferencia|realic[eé] el pago|ya transfer[ií]/i;
+    const isReceiptByContext = hasRecentPaymentInfoContext(allTurns);
+    const isReceiptByCaption = receiptCaptionPattern.test(message);
+    const isLikelyReceipt = isReceiptByContext || isReceiptByCaption;
+
+    logger.info(
+      {
+        customerId,
+        messageId,
+        isReceiptByContext,
+        isReceiptByCaption,
+        isLikelyReceipt,
+      },
+      "Payment receipt detection signals",
+    );
+
+    if (isLikelyReceipt) {
       logger.info(
         { customerId, mediaId: payload.imageMediaId, messageId },
         "Image message after payment_info context — treating as payment receipt, skipping product search",
@@ -1715,6 +1757,15 @@ ${incomingMessageForClaude}`;
   //   ""  (secondary images — no caption)
   // Filtering to non-empty captions gives one line per unique product.
   let storedAssistantContent = result.response;
+
+  // Append sentinel when payment_info fires so hasRecentPaymentInfoContext
+  // can reliably detect it on the next turn (receipt image detection).
+  // The tag is invisible to Claude — it's only used by the backend guard.
+  // This must not be appended to the customer-facing reply — only to the
+  // stored conversation turn.
+  if (result.intent === "payment_info") {
+    storedAssistantContent = result.response + " [payment_info_sent]";
+  }
 
   if (productImages.length > 0 && result.intent === "product_search") {
     const uniqueProducts = productImages
