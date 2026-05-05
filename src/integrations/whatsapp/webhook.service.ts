@@ -840,8 +840,16 @@ export const handleIncomingMessage = async (
           t.content.includes("[Productos enviados al cliente en este turn:"),
       );
 
+    // Word-order variants covered:
+    //   "me interesa este" (original), "Este me interesa" (reversed — common customer phrasing)
+    //   "que precio tiene / cuesta / vale" (direct price ask about a shown product)
+    //   "lo quiero / me lo llevo / lo aparto" (selection confirmation)
+    //   "ese suéter / este jersey / esa prenda" (demonstrative + garment noun)
     const hasDemonstrativeProductIntent =
-      /\bme interesa (este|ese|esta|esa)\b/i.test(message) ||
+      /\b(este|ese|esta|esa)\s+me\s+interesa\b/i.test(message) || // "Este me interesa"
+      /\bme\s+interesa\s+(este|ese|esta|esa)\b/i.test(message) || // "me interesa este"
+      /\bqu[eé]\s+precio\b.{0,25}(tiene|cuesta|vale|cobras?)/i.test(message) || // "que precio tiene"
+      /\b(lo|la)\s+(quiero|llevo|pido|aparto)\b/i.test(message) || // "lo quiero"
       /\b(este|ese|esta|esa)\b.{0,40}(suéter|jersey|bra|top|legging|producto|prenda|modelo|ropa)/i.test(
         message,
       );
@@ -943,116 +951,137 @@ export const handleIncomingMessage = async (
       );
     }
 
-    // ── 2b. Product image search (existing flow) ───────────────────────────
-
-    logger.info(
-      { customerId, mediaId: payload.imageMediaId, messageId },
-      "Image message — running visual search",
-    );
-
-    const fallbackReply = buildErrorReply(customerGender);
-
-    try {
-      const rawSearchResult = await searchProductsByImage(
-        payload.imageMediaId as string,
+    // ── 2b. Gallery reply via image ───────────────────────────────────────────
+    // When the customer sends an image while responding to a previous gallery
+    // (isGalleryReply=true), they are selecting or asking about a product already
+    // shown — NOT doing a new visual search. Calling searchProductsByImage here
+    // would re-run the catalog query and return the full gallery again (the exact
+    // bug reported: customer says "Este me interesa / Que precio tiene" and gets
+    // all products again instead of the specific price).
+    //
+    // Fix: skip searchProductsByImage, inject the gallery reply tag into the
+    // message, and fall through to section 3 (Claude text flow) where the
+    // [Productos enviados] note and SentImage lookup resolve the exact product.
+    if (isGalleryReply) {
+      logger.info(
+        { customerId, mediaId: payload.imageMediaId, messageId },
+        "Image message is a gallery reply — skipping searchProductsByImage, routing to Claude text flow",
       );
-      const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
-      if (!searchResult.success) {
-        throw new Error(
-          `searchProductsByImage returned unexpected shape: ${JSON.stringify(searchResult.error.issues)}`,
+      // Fall through to section 3 below — do NOT return here.
+      // incomingMessageForClaude will receive the gallery prefix in section 3.
+    } else {
+      // ── 2c. Product image search — fresh search (not a gallery reply) ──────
+
+      logger.info(
+        { customerId, mediaId: payload.imageMediaId, messageId },
+        "Image message — running visual search",
+      );
+
+      const fallbackReply = buildErrorReply(customerGender);
+
+      try {
+        const rawSearchResult = await searchProductsByImage(
+          payload.imageMediaId as string,
         );
-      }
+        const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
+        if (!searchResult.success) {
+          throw new Error(
+            `searchProductsByImage returned unexpected shape: ${JSON.stringify(searchResult.error.issues)}`,
+          );
+        }
 
-      const { reply, productImages: rawProductImages } = searchResult.data;
-      const productImages = normalizeProductImages(rawProductImages);
+        const { reply, productImages: rawProductImages } = searchResult.data;
+        const productImages = normalizeProductImages(rawProductImages);
 
-      await ConversationModel.findOneAndUpdate(
-        { customerId, channel: "whatsapp" },
-        {
-          $push: {
-            turns: {
-              $each: [
-                {
-                  role: "user" as const,
-                  content: "[Imagen enviada por el cliente]",
-                  createdAt: new Date(),
-                },
-                {
-                  role: "assistant" as const,
-                  content: reply,
-                  createdAt: new Date(),
-                },
-              ],
-              $slice: -MAX_CONVERSATION_TURNS,
+        await ConversationModel.findOneAndUpdate(
+          { customerId, channel: "whatsapp" },
+          {
+            $push: {
+              turns: {
+                $each: [
+                  {
+                    role: "user" as const,
+                    content: "[Imagen enviada por el cliente]",
+                    createdAt: new Date(),
+                  },
+                  {
+                    role: "assistant" as const,
+                    content: reply,
+                    createdAt: new Date(),
+                  },
+                ],
+                $slice: -MAX_CONVERSATION_TURNS,
+              },
             },
+            $set: { lastMessageAt: new Date() },
           },
-          $set: { lastMessageAt: new Date() },
-        },
-        { upsert: true, returnDocument: "after" },
-      );
+          { upsert: true, returnDocument: "after" },
+        );
 
-      return toSafeResult(
-        {
-          reply,
-          escalate: false,
-          customerPhone: from,
-          customerName,
-          productImages,
-        },
-        from,
-        customerName,
-      );
-    } catch (err) {
-      logger.error(
-        { err, customerId, mediaId: payload.imageMediaId, messageId },
-        "Image search failed",
-      );
-
-      await ConversationModel.findOneAndUpdate(
-        { customerId, channel: "whatsapp" },
-        {
-          $push: {
-            turns: {
-              $each: [
-                {
-                  role: "user" as const,
-                  content: "[Imagen enviada por el cliente]",
-                  createdAt: new Date(),
-                },
-                {
-                  role: "assistant" as const,
-                  content: fallbackReply,
-                  createdAt: new Date(),
-                },
-              ],
-              $slice: -MAX_CONVERSATION_TURNS,
-            },
-          },
-          $set: { lastMessageAt: new Date() },
-        },
-        { upsert: true, returnDocument: "after" },
-      );
-
-      return toSafeResult(
-        {
-          reply: fallbackReply,
-          escalate: true,
-          customerPhone: from,
-          customerName,
-          productImages: [],
-          escalationMessage: buildEscalationMessage({
+        return toSafeResult(
+          {
+            reply,
+            escalate: false,
             customerPhone: from,
             customerName,
-            customerMessage: "[Imagen enviada por el cliente]",
-            reason: "La búsqueda visual por imagen falló con un error interno.",
-            suggestedAction:
-              "Revisar logs de Railway. Responder al cliente manualmente con productos similares a la imagen enviada.",
-          }),
-        },
-        from,
-        customerName,
-      );
-    }
+            productImages,
+          },
+          from,
+          customerName,
+        );
+      } catch (err) {
+        logger.error(
+          { err, customerId, mediaId: payload.imageMediaId, messageId },
+          "Image search failed",
+        );
+
+        await ConversationModel.findOneAndUpdate(
+          { customerId, channel: "whatsapp" },
+          {
+            $push: {
+              turns: {
+                $each: [
+                  {
+                    role: "user" as const,
+                    content: "[Imagen enviada por el cliente]",
+                    createdAt: new Date(),
+                  },
+                  {
+                    role: "assistant" as const,
+                    content: fallbackReply,
+                    createdAt: new Date(),
+                  },
+                ],
+                $slice: -MAX_CONVERSATION_TURNS,
+              },
+            },
+            $set: { lastMessageAt: new Date() },
+          },
+          { upsert: true, returnDocument: "after" },
+        );
+
+        return toSafeResult(
+          {
+            reply: fallbackReply,
+            escalate: true,
+            customerPhone: from,
+            customerName,
+            productImages: [],
+            escalationMessage: buildEscalationMessage({
+              customerPhone: from,
+              customerName,
+              customerMessage: "[Imagen enviada por el cliente]",
+              reason:
+                "La búsqueda visual por imagen falló con un error interno.",
+              suggestedAction:
+                "Revisar logs de Railway. Responder al cliente manualmente con productos similares a la imagen enviada.",
+            }),
+          },
+          from,
+          customerName,
+        );
+      }
+    } // end else — fresh visual search (not a gallery reply)
   }
 
   // ── 3. Text message — Luis flow ───────────────────────────────────────────
@@ -1166,6 +1195,28 @@ export const handleIncomingMessage = async (
   // the image was sent before this feature was deployed), the message remains
   // unchanged and Claude uses the [Productos enviados] note from history.
   let incomingMessageForClaude = message;
+
+  // When the gallery reply was detected via Method C (image message path, no
+  // contextMessageId — e.g. customer forwarded a photo + "Este me interesa"),
+  // the message doesn't carry the gallery reply prefix that Methods A/B inject.
+  // Add it here so Claude's gallery reply protocol fires correctly and it knows
+  // to look at [Productos enviados] in history instead of calling search_products.
+  if (
+    isGalleryReply &&
+    !incomingMessageForClaude.includes(
+      "[El cliente está respondiendo a una imagen del gallery anterior]",
+    ) &&
+    !incomingMessageForClaude.includes(
+      "[Producto exacto seleccionado por el cliente:",
+    )
+  ) {
+    incomingMessageForClaude = `[El cliente está respondiendo a una imagen del gallery anterior]
+${incomingMessageForClaude}`;
+    logger.info(
+      { customerId, messageId },
+      "Injected gallery reply prefix into incomingMessageForClaude (Method C / image path)",
+    );
+  }
 
   if (isGalleryReply && contextMessageId) {
     try {
