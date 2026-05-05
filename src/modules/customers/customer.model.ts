@@ -1,17 +1,27 @@
-import { Schema, model, type InferSchemaType, type HydratedDocument, type Model } from 'mongoose';
-import { CUSTOMER_CHANNELS, CUSTOMER_TAGS, CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
+import {
+  Schema,
+  model,
+  type InferSchemaType,
+  type HydratedDocument,
+  type Model,
+} from "mongoose";
+import {
+  CUSTOMER_CHANNELS,
+  CUSTOMER_TAGS,
+  CUSTOMER_GENDERS,
+} from "#/modules/customers/customer.types.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const normalizePhone = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.replace(/\D/g, '');
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\D/g, "");
   return normalized || undefined;
 };
 
 const normalizeInstagramHandle = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.replace(/^@/, '').trim().toLowerCase();
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/^@/, "").trim().toLowerCase();
   return normalized || undefined;
 };
 
@@ -75,6 +85,28 @@ const customerSchema = new Schema(
       default: CUSTOMER_GENDERS.UNKNOWN,
     },
 
+    // Cached sum of all non-cancelled order totals for this customer (MXN).
+    // Updated by order.service.ts whenever an order is created, completed,
+    // or cancelled — never computed on the fly.
+    //
+    // Why cached and not aggregated:
+    //   webhook.service.ts reads this on every incoming WhatsApp message to
+    //   give Luis VIP vs. new-customer context. An aggregation on every message
+    //   is a full orders-collection scan per request. The cache makes it free.
+    //
+    // Thresholds used by Luis (claude.service.ts buildVipContext):
+    //   ≥ $50,000 MXN → VIP treatment, maximum payment flexibility
+    //   ≥ $10,000 MXN → returning customer, warm confident tone
+    //   undefined / 0  → new customer, standard onboarding tone
+    //
+    // Undefined (not 0) for customers who have no orders yet — lets the bot
+    // distinguish "never ordered" from "ordered but total is genuinely $0".
+    lifetimeValue: {
+      type: Number,
+      min: 0,
+      default: undefined,
+    },
+
     // Soft-delete flag. One canonical document per customer — never replaced.
     // isActive: false means the customer has been deactivated by the owner.
     // Deactivated customers are excluded from active lookups but their
@@ -95,7 +127,7 @@ const customerSchema = new Schema(
 // Applies only on direct save() calls.
 // Query/upsert paths must normalize in the application layer before querying.
 
-customerSchema.pre('save', function () {
+customerSchema.pre("save", function () {
   this.phone = normalizePhone(this.phone);
   this.instagramHandle = normalizeInstagramHandle(this.instagramHandle);
 });
@@ -105,12 +137,19 @@ customerSchema.pre('save', function () {
 customerSchema.index({ isActive: 1, contactChannel: 1 });
 customerSchema.index({ tags: 1 });
 
+// Supports sorting / filtering customers by spend in the SALO dashboard.
+// Also used if a future query ever needs to find all VIP customers directly.
+customerSchema.index({ lifetimeValue: -1 });
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type CustomerSchemaType = InferSchemaType<typeof customerSchema>;
-export type CustomerDocument   = HydratedDocument<CustomerSchemaType>;
-export type CustomerModelType  = Model<CustomerSchemaType>;
+export type CustomerDocument = HydratedDocument<CustomerSchemaType>;
+export type CustomerModelType = Model<CustomerSchemaType>;
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
-export const CustomerModel = model<CustomerSchemaType>('Customer', customerSchema);
+export const CustomerModel = model<CustomerSchemaType>(
+  "Customer",
+  customerSchema,
+);

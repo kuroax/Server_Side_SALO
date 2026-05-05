@@ -1208,26 +1208,14 @@ export const handleIncomingMessage = async (
     }
   }
 
-  // Compute approximate lifetime value for VIP detection.
-  // Aggregates total across all non-cancelled orders for this customer.
-  // Single aggregation — result is undefined (not 0) when no orders exist,
-  // so claude.service.ts buildVipContext correctly skips the VIP label for new customers.
-  let customerLifetimeValue: number | undefined;
-  try {
-    const ltvAgg = await OrderModel.aggregate([
-      { $match: { customerId: customer._id, status: { $ne: "cancelled" } } },
-      { $group: { _id: null, total: { $sum: "$total" } } },
-    ]);
-    if (ltvAgg.length > 0 && ltvAgg[0].total > 0) {
-      customerLifetimeValue = ltvAgg[0].total as number;
-    }
-  } catch (err) {
-    // Non-critical — VIP detection degrades gracefully without this value.
-    logger.warn(
-      { err, customerId },
-      "LTV aggregation failed — skipping VIP context",
-    );
-  }
+  // Read cached lifetime value from the customer document — free, no extra query.
+  // Populated and maintained by order.service.ts on order create/complete/cancel.
+  // Undefined for customers with no orders yet (distinct from 0).
+  // claude.service.ts buildVipContext uses this to set VIP vs. new-customer tone.
+  const customerLifetimeValue: number | undefined =
+    typeof customer.lifetimeValue === "number" && customer.lifetimeValue > 0
+      ? customer.lifetimeValue
+      : undefined;
 
   const rawResult = await processMessage({
     customerName,
