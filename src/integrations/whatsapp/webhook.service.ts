@@ -230,18 +230,54 @@ function extractCartFromHistory(turns: ConversationTurn[]): CartItem[] {
     // ── Secondary: product mentions in price_query / payment_info turns ────────
     // When the purchase flow goes gallery reply → price_query → payment_info
     // without create_order, there are no ⭐️ lines. Extract from natural language:
-    // "El jersey Alo que te interesa está a $1,990" or "El jersey está a $1,990."
+    // "El jersey Accolade Negro en talla M está a $1,990" or "El jersey está a $1,990."
+    // Brand name is NOT required — matches any product name adjacent to a price.
     if (items.length === 0) {
       const priceContextMatch = turn.content.match(
-        /(?:el|la|los)\s+([A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]+?(?:Alo|Lululemon|Wiskii|Skims|437|Better Me)[A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]*?)\s+(?:est[aá]|cuesta|vale)\s+a?\s*\$\s*([\d,]+)/i,
+        /(?:el|la|los|disponible\s+el?)\s+([A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ][A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]+?)(?:\s+en\s+talla\s+\w+)?\s*[!.]?\s*(?:Está|está|cuesta|vale)\s+a?\s*\$\s*([\d,]+)/i,
       );
       if (priceContextMatch) {
         const description = priceContextMatch[1].trim().replace(/\s+/g, " ");
         const price = parseInt(priceContextMatch[2].replace(/,/g, ""), 10);
-        if (description && !seen.has(description)) {
+        if (description.length > 2 && !seen.has(description)) {
           seen.add(description);
           items.push({ description, price: isNaN(price) ? undefined : price });
         }
+      }
+    }
+  }
+
+  // ── Tertiary: [Producto exacto seleccionado por el cliente: NAME] tag ─────────
+  // This tag is injected by webhook.service.ts when a gallery reply is detected.
+  // It is the most reliable source of product context when no ⭐️ lines or price
+  // mentions exist — e.g. when the customer sent the receipt image before the bot
+  // had a chance to produce a ⭐️-formatted confirmation.
+  if (items.length === 0) {
+    for (const turn of recentTurns) {
+      if (turn.role !== "user") continue;
+      const tagMatch = turn.content.match(
+        /\[Producto exacto seleccionado por el cliente:\s*([^\]]+)\]/,
+      );
+      if (tagMatch) {
+        const productName = tagMatch[1].trim();
+        if (productName && !seen.has(productName)) {
+          // Find the price from the first assistant turn that mentions a dollar amount
+          let foundPrice: number | undefined;
+          for (const t of recentTurns) {
+            if (t.role !== "assistant") continue;
+            const priceMatch = t.content.match(/\$\s*([\d,]+)/);
+            if (priceMatch) {
+              const p = parseInt(priceMatch[1].replace(/,/g, ""), 10);
+              if (!isNaN(p) && p > 0) {
+                foundPrice = p;
+                break;
+              }
+            }
+          }
+          seen.add(productName);
+          items.push({ description: productName, price: foundPrice });
+        }
+        break;
       }
     }
   }
@@ -262,13 +298,14 @@ function buildReceiptAck(
   const gratitude = "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫";
 
   if (cart.length === 0) {
-    // No product context found — acknowledge receipt and ask for clarification.
-    // Do NOT confirm payment. Do NOT list products we don't know about.
+    // No product context found — acknowledge warmly, do NOT ask which product.
+    // The context fallback below (tertiary in extractCartFromHistory) should
+    // rarely reach here after the tertiary tag-based extraction was added.
+    // If it does, just acknowledge without asking — the owner escalation covers it.
     return (
       `${gratitude}\n\n` +
-      `Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y, ` +
-      `en cuanto esté confirmado, te aviso para continuar con tu pedido 🙏🏻\n\n` +
-      `¿Me confirmas de qué producto es este comprobante?`
+      `Ya recibí tu comprobante. Déjame revisar el depósito y, ` +
+      `en cuanto esté confirmado, te aviso para continuar con tu pedido 🙏🏻`
     );
   }
 
@@ -283,7 +320,7 @@ function buildReceiptAck(
 
   return (
     `${gratitude}\n\n` +
-    `Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y, ` +
+    `Ya recibí tu comprobante. Déjame revisar el depósito y, ` +
     `en cuanto esté confirmado, te aviso para continuar con tu pedido 🙏🏻\n\n` +
     `${itemLines}`
   );

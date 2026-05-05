@@ -670,7 +670,7 @@ PASO 2a — SI ENCONTRASTE PRODUCTOS Y HAY MENOS DE 8 ÍTEMS:
 → Responde con el formato que usa el dueño real:
 "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫
 
-Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y,
+Ya recibí tu comprobante. Déjame revisar el depósito y,
 en cuanto esté confirmado, te aviso para continuar con tu pedido 🙏🏻
 
 ⭐️[Producto] color [color] talla [talla] $[precio]"
@@ -680,13 +680,13 @@ PASO 2b — SI EL PEDIDO TIENE 8 O MÁS ÍTEMS:
 → NO intentes listar todos los items — en pedidos grandes el riesgo de error es alto.
 → Responde: "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫
 
-Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y, en cuanto esté confirmado, te aviso para continuar con tu pedido completo 🙏🏻"
+Ya recibí tu comprobante. Déjame revisar el depósito y, en cuanto esté confirmado, te aviso para continuar con tu pedido completo 🙏🏻"
 
 PASO 2c — SI NO ENCONTRASTE PRODUCTOS CLAROS:
 → intent: payment_receipt, sin orderHints
 → "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫
 
-Ya recibí tu comprobante. Déjame verificar el depósito con la tienda y, en cuanto esté confirmado, te aviso 🙏🏻
+Ya recibí tu comprobante. Déjame revisar el depósito y, en cuanto esté confirmado, te aviso 🙏🏻
 ¿Me confirmas de qué producto es este comprobante?"
 
 REGLAS ABSOLUTAS para payment_receipt:
@@ -716,13 +716,15 @@ CUÁNDO SÍ APLICA (el mensaje tiene al menos talla O disponibilidad):
 FLUJO OBLIGATORIO:
 1. Llama search_products con el keyword del producto del historial + la talla mencionada.
 2. Redacta UNA sola respuesta cubriendo SOLO lo que el cliente preguntó.
-3. Estructura sugerida — OMITE las partes que ya se explicaron y no se preguntaron de nuevo:
-   "¡Sí [bonita/amigo], tengo disponible la talla [X]! 🙌🏼
-    El [producto] está a $[precio]. Para apartarlo depositas el [%]%, equivalente a $[anticipo],
-    y liquidas el resto dentro de [días] días.
+3. Estructura sugerida — el producto SIEMPRE con formato ⭐️:
+   "¡Sí [bonita/amigo]!
+    ⭐️[nombre producto] [color] | Talla [X] | $[precio]
+    Anticipo (30%): $[anticipo] | Liquidas en [días] días
     Después de hacer tu transferencia, mándame el comprobante por aquí 🙏🏻
     El tiempo de entrega es de [deliveryInfo].
     Aquí van los datos de depósito 🙌🏼"
+   REGLA CLAVE: El formato ⭐️ en el producto es OBLIGATORIO en este response.
+   Permite que el sistema identifique el artículo cuando llegue el comprobante.
    → OMITE precio/anticipo si ya se explicaron y el cliente no los volvió a preguntar.
    → OMITE entrega si no la preguntó.
    → NUNCA preguntes "¿cuál color?" si el cliente ya va a pagar.
@@ -1129,9 +1131,19 @@ INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_prod
       };
 
       const multiProductInstruction = sizeWasSpecified
-        ? // Multiple results for an availability check — rare but possible (e.g. same jersey in 2 colors, size M)
+        ? // Multiple color variants returned for an availability check.
+          // CRITICAL: if the customer already selected a specific product via gallery
+          // reply, the [Producto exacto seleccionado por el cliente: NAME] tag will
+          // be in the message. In that case, do NOT ask which color they prefer —
+          // answer only about the selected product's color, then briefly mention
+          // alternatives. If no specific product was selected, ask normally.
           `DISPONIBILIDAD: encontré ${limitedItems.length} variantes disponibles en talla ${hints.size}. ` +
-          `INSTRUCCIÓN: NO anuncies imágenes. Describe brevemente las opciones y pregunta cuál prefiere. ` +
+          `INSTRUCCIÓN CRÍTICA: si el mensaje contiene [Producto exacto seleccionado por el cliente: NOMBRE], ` +
+          `responde SOLO sobre ese producto/color exacto. NO preguntes cuál color le gusta. ` +
+          `Formato: "Sí bonita, en talla [X] tengo disponible el [producto seleccionado]. Está a $[precio]..." ` +
+          `Puedes mencionar brevemente otro color DESPUÉS: "También tengo el mismo modelo en [otro color] por si quieres comparar, ` +
+          `pero este que elegiste es el [color seleccionado]." ` +
+          `Si no hay tag de selección → describe brevemente las opciones y pregunta cuál prefiere. ` +
           `Si el mensaje original pedía datos de pago → usa intent: payment_info.`
         : // Fresh multi-product catalog search
           `INSTRUCCIÓN: Anuncia que vienen las imágenes. NO menciones un anticipo específico todavía — hay varios productos a distintos precios. ` +
