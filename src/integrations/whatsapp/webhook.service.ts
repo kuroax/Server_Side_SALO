@@ -1385,31 +1385,39 @@ ${incomingMessageForClaude}`;
   // that push would corrupt the original processMessage return value.
   const productImages: ProductImage[] = [...result.productImages];
 
-  // ── Gallery reply — suppress images unless Claude explicitly re-searched ───
-  // When the customer replies to a gallery image and asks a name/price/info
-  // question, Claude may still call search_products (PASO 2c fallback) and
-  // accumulate images. But the customer didn't ask for a new gallery — they
-  // asked about a specific product they already saw.
+  // ── Product image suppression — only send images for product_search intent ─
+  // Product images are accumulated by the agentic loop whenever search_products
+  // is called — including availability checks that are internal tool calls
+  // (post-cotización protocol, gallery reply resolution, etc.).
   //
-  // Rule: if this is a gallery reply AND the intent is not product_search
-  // (i.e. Claude answered from history, not from a new search), strip images
-  // before returning so n8n's IF Has Product Images branch doesn't fire.
+  // Sending product images is ONLY correct when the customer explicitly asked
+  // to SEE products (catalog browse = product_search intent). For every other
+  // intent, accumulated images are a side effect of availability verification
+  // and must not flow to the customer:
   //
-  // If Claude returned product_search intent, it found something new and
-  // sending images is intentional — allow it through.
-  if (isGalleryReply && result.intent !== "product_search") {
-    if (productImages.length > 0) {
-      logger.info(
-        {
-          customerId,
-          messageId,
-          intent: result.intent,
-          suppressedImages: productImages.length,
-        },
-        "Gallery reply — suppressing product images (customer asked info, not new catalog)",
-      );
-      productImages.length = 0;
-    }
+  //   payment_info  → bank account image is sent separately; product images confuse
+  //   price_query   → text answer only
+  //   general       → context recall / follow-up; no images unless explicitly asked
+  //   catalog_query → asking clarifying question; no images yet
+  //   create_order  → order confirmation; no images
+  //   order_status  → status text; no images
+  //   needs_human   → escalation; no images
+  //   etc.
+  //
+  // This replaces the previous gallery-only guard (isGalleryReply &&
+  // intent !== product_search) with a universal rule that is simpler,
+  // safer, and correct for all conversation flows including demo stability.
+  if (result.intent !== "product_search" && productImages.length > 0) {
+    logger.info(
+      {
+        customerId,
+        messageId,
+        intent: result.intent,
+        suppressedImages: productImages.length,
+      },
+      "Non-product_search intent — suppressing accumulated product images (availability check or context recall side effect)",
+    );
+    productImages.length = 0;
   }
 
   if (result.intent === "product_search") {
