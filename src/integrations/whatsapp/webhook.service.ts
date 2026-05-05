@@ -334,6 +334,8 @@ const processMessageResultSchema = z.object({
     "price_query",
     "create_order",
     "order_status",
+    "order_summary", // NEW: customer asked for their full accumulated order list
+    "showroom_visit", // NEW: customer wants to visit the showroom in person
     "payment_info",
     "payment_receipt",
     "needs_human",
@@ -383,6 +385,11 @@ const BUSINESS_INFO = {
     "Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.",
   depositPercent: 30,
   paymentDays: 20,
+  // Set to a non-empty string to have Luis mention the promotion once per
+  // conversation when the customer is browsing or hesitating.
+  // e.g. "30% Off Alo Yoga hasta el 10 de mayo"
+  // Leave undefined or empty string when no promotion is active.
+  activePromotion: undefined as string | undefined,
 } as const;
 
 // ─── Image message idempotency ────────────────────────────────────────────────
@@ -1092,8 +1099,8 @@ export const handleIncomingMessage = async (
   if (isBroadCatalog) {
     const catalogReply =
       customerGender === "male"
-        ? "¡Hola amigo! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon y Wiskii 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?"
-        : "¡Hola bonita! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon y Wiskii 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?";
+        ? "¡Hola amigo! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon, Wiskii, 437, Better Me y Skims 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?"
+        : "¡Hola bonita! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon, Wiskii, 437, Better Me y Skims 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?";
 
     logger.info(
       { customerId, messageId, message },
@@ -1201,14 +1208,67 @@ export const handleIncomingMessage = async (
     }
   }
 
+  // Compute approximate lifetime value for VIP detection.
+  // Aggregates total across all non-cancelled orders for this customer.
+  // Single aggregation — result is undefined (not 0) when no orders exist,
+  // so claude.service.ts buildVipContext correctly skips the VIP label for new customers.
+  let customerLifetimeValue: number | undefined;
+  try {
+    const ltvAgg = await OrderModel.aggregate([
+      { $match: { customerId: customer._id, status: { $ne: "cancelled" } } },
+      { $group: { _id: null, total: { $sum: "$total" } } },
+    ]);
+    if (ltvAgg.length > 0 && ltvAgg[0].total > 0) {
+      customerLifetimeValue = ltvAgg[0].total as number;
+    }
+  } catch (err) {
+    // Non-critical — VIP detection degrades gracefully without this value.
+    logger.warn(
+      { err, customerId },
+      "LTV aggregation failed — skipping VIP context",
+    );
+  }
+
   const rawResult = await processMessage({
     customerName,
     customerGender,
+    customerLifetimeValue,
     recentOrder: recentOrder
       ? {
           orderNumber: recentOrder.orderNumber,
           status: recentOrder.status,
           total: recentOrder.total,
+          // Pass optional fields if they exist on the order document.
+          // These are typed as optional in ClaudeContext so undefined is safe.
+          outstandingBalance: (
+            recentOrder as unknown as Record<string, unknown>
+          ).outstandingBalance as number | undefined,
+          trackingNumber: (recentOrder as unknown as Record<string, unknown>)
+            .trackingNumber as string | undefined,
+          estimatedDelivery: (recentOrder as unknown as Record<string, unknown>)
+            .estimatedDelivery as string | undefined,
+          // Map order line items to the OrderItem shape expected by Claude.
+          // Falls back to undefined if the order model doesn't have an items array.
+          items: Array.isArray(
+            (recentOrder as unknown as Record<string, unknown>).items,
+          )
+            ? (
+                (recentOrder as unknown as Record<string, unknown>)
+                  .items as Array<{
+                  name?: string;
+                  size?: string;
+                  color?: string;
+                  quantity?: number;
+                  unitPrice?: number;
+                }>
+              ).map((i) => ({
+                name: i.name ?? "Producto",
+                size: i.size ?? "?",
+                color: i.color ?? "?",
+                quantity: i.quantity ?? 1,
+                price: i.unitPrice ?? 0,
+              }))
+            : undefined,
         }
       : null,
     searchProducts: searchProductsForClaude,
@@ -1327,6 +1387,28 @@ export const handleIncomingMessage = async (
         "Product search 0 results — escalating",
       );
     }
+  }
+
+  // ── order_summary ─────────────────────────────────────────────────────────
+  // Claude compiled the customer's accumulated order list from history.
+  // No special backend action needed — Claude's response is the answer.
+  // No escalation, no images. Falls through to the persist/return path below.
+  if (result.intent === "order_summary") {
+    logger.info(
+      { customerId, messageId },
+      "order_summary intent — passing Claude response through, no backend action required",
+    );
+  }
+
+  // ── showroom_visit ────────────────────────────────────────────────────────
+  // Customer wants to visit in person. Claude already replied with address +
+  // hours. Escalate so the owner knows a visit is coming and can prepare.
+  if (result.intent === "showroom_visit") {
+    escalate = true;
+    logger.info(
+      { customerId, messageId },
+      "showroom_visit intent — escalating so owner is aware of upcoming visit",
+    );
   }
 
   // ── payment_receipt — customer sent or announced a payment comprobante ────
@@ -1487,6 +1569,10 @@ export const handleIncomingMessage = async (
           "El asistente detectó que la situación requiere una decisión humana.";
         suggestedAction =
           "Revisar el mensaje del cliente y responder directamente.";
+      } else if (intent === "showroom_visit") {
+        reason = "El cliente quiere visitar el showroom en persona.";
+        suggestedAction =
+          "Confirmar disponibilidad y preparar la visita. Contactar al cliente para acordar hora si es necesario.";
       } else if (intent === "payment_info") {
         reason =
           "El cliente preguntó por los datos de pago pero BANK_ACCOUNT_IMAGE_URL no está configurado en Railway.";
