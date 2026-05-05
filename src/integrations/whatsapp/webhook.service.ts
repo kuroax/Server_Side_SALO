@@ -703,7 +703,7 @@ export const handleIncomingMessage = async (
       ? payload.contextMessageId.trim()
       : null;
 
-  const isGalleryReply =
+  let isGalleryReply =
     message.includes(
       "[El cliente está respondiendo a una imagen del gallery anterior]",
     ) || contextMessageId !== null;
@@ -810,6 +810,43 @@ export const handleIncomingMessage = async (
 
   const allTurns = conversation?.turns ?? [];
   const lastMessageAt = conversation?.lastMessageAt;
+
+  // ── Method C — refine isGalleryReply using conversation history ───────────
+  // Methods A and B (above) cover single-message gallery replies correctly.
+  // They fail when multiple rapid messages are buffered together: the buffer
+  // merge may drop the [El cliente está respondiendo] prefix AND
+  // Normalize Claim Response may not forward contextMessageId correctly.
+  //
+  // Method C catches the case where:
+  //   - recent history shows a [Productos enviados] note (gallery was sent)
+  //   - the merged message contains demonstrative language pointing at a
+  //     specific product ("me interesa este", "ese suéter", "esta prenda")
+  //
+  // This is intentionally conservative — requires BOTH signals to avoid
+  // false-positives on messages like "quiero ese estilo" with no gallery context.
+  if (!isGalleryReply) {
+    const hasRecentGallery = allTurns
+      .slice(-6)
+      .some(
+        (t) =>
+          t.role === "assistant" &&
+          t.content.includes("[Productos enviados al cliente en este turn:"),
+      );
+
+    const hasDemonstrativeProductIntent =
+      /\bme interesa (este|ese|esta|esa)\b/i.test(message) ||
+      /\b(este|ese|esta|esa)\b.{0,40}(suéter|jersey|bra|top|legging|producto|prenda|modelo|ropa)/i.test(
+        message,
+      );
+
+    if (hasRecentGallery && hasDemonstrativeProductIntent) {
+      isGalleryReply = true;
+      logger.info(
+        { customerId, messageId },
+        "isGalleryReply=true via Method C (demonstrative language + recent gallery history)",
+      );
+    }
+  }
 
   // 24h reset: if the customer's last message was over 24 hours ago, treat as
   // a fresh session — don't send yesterday's product gallery context to Claude.
