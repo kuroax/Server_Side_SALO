@@ -1255,14 +1255,14 @@ export const handleIncomingMessage = async (
             ? (
                 (recentOrder as unknown as Record<string, unknown>)
                   .items as Array<{
-                  name?: string;
+                  productName?: string; // schema field name — NOT "name"
                   size?: string;
                   color?: string;
                   quantity?: number;
                   unitPrice?: number;
                 }>
               ).map((i) => ({
-                name: i.name ?? "Producto",
+                name: i.productName ?? "Producto",
                 size: i.size ?? "?",
                 color: i.color ?? "?",
                 quantity: i.quantity ?? 1,
