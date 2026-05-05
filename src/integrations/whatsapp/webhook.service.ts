@@ -684,9 +684,30 @@ export const handleIncomingMessage = async (
   // (customer replied directly to one of the gallery images). The prefix is
   // prepended in n8n so the backend can gate image suppression independently
   // of Claude's intent decision.
-  const isGalleryReply = message.startsWith(
-    "[El cliente está respondiendo a una imagen del gallery anterior]",
-  );
+  //
+  // TWO detection methods — both checked because the buffer merge (Normalize
+  // Claim Response) may concatenate messages in a way that moves the prefix
+  // away from position 0, causing startsWith to miss it:
+  //
+  //   Method A: message starts with the prefix (single message, not buffered)
+  //   Method B: contextMessageId is present in the payload (survives buffer
+  //             merge because it comes from the WhatsApp API, not text manipulation)
+  //
+  // Either signal is sufficient — OR logic covers both paths.
+  // contextMessageId is passed by n8n but not yet in the WebhookPayload Zod
+  // schema (webhook.validation.ts). Cast through unknown to access it safely
+  // without breaking the build. Add it to WebhookPayload post-demo.
+  const rawPayload = payload as unknown as Record<string, unknown>;
+  const contextMessageId =
+    typeof rawPayload.contextMessageId === "string" &&
+    rawPayload.contextMessageId.trim().length > 0
+      ? rawPayload.contextMessageId.trim()
+      : null;
+
+  const isGalleryReply =
+    message.includes(
+      "[El cliente está respondiendo a una imagen del gallery anterior]",
+    ) || contextMessageId !== null;
 
   // ── 0. Guards ─────────────────────────────────────────────────────────────
 
