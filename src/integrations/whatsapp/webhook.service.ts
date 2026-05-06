@@ -206,10 +206,13 @@ function extractCartFromHistory(turns: ConversationTurn[]): CartItem[] {
   const seen = new Set<string>();
   const items: CartItem[] = [];
 
+  // ── PASS 1: ⭐️ confirmed order lines across ALL turns ──────────────────────────
+  // Complete this pass before running any secondary extraction. Previously,
+  // secondary ran per-turn inside the loop with "if (items.length === 0)",
+  // which caused it to extract from turn A (no ⭐️ yet) while primary later
+  // extracted from turn B (⭐️ present) — producing duplicate product entries.
   for (const turn of recentTurns) {
     if (turn.role !== "assistant") continue;
-
-    // ── Primary: ⭐️ confirmed order lines (create_order format) ────────────────
     const starLines = turn.content.match(/⭐️\s*([^\n]+)/g) ?? [];
     for (const raw of starLines) {
       const line = raw.replace(/^⭐️\s*/, "").trim();
@@ -226,59 +229,60 @@ function extractCartFromHistory(turns: ConversationTurn[]): CartItem[] {
       seen.add(description);
       items.push({ description, price });
     }
+  }
 
-    // ── Secondary: product mentions in price_query / payment_info turns ────────
-    // When the purchase flow goes gallery reply → price_query → payment_info
-    // without create_order, there are no ⭐️ lines. Extract from natural language:
-    // "El jersey Accolade Negro en talla M está a $1,990" or "El jersey está a $1,990."
-    // Brand name is NOT required — matches any product name adjacent to a price.
-    if (items.length === 0) {
-      const priceContextMatch = turn.content.match(
-        /(?:el|la|los|disponible\s+el?)\s+([A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ][A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]+?)(?:\s+en\s+talla\s+\w+)?\s*[!.]?\s*(?:Está|está|cuesta|vale)\s+a?\s*\$\s*([\d,]+)/i,
-      );
-      if (priceContextMatch) {
-        const description = priceContextMatch[1].trim().replace(/\s+/g, " ");
-        const price = parseInt(priceContextMatch[2].replace(/,/g, ""), 10);
-        if (description.length > 2 && !seen.has(description)) {
-          seen.add(description);
-          items.push({ description, price: isNaN(price) ? undefined : price });
-        }
+  // Primary found items — stop here, do not run secondary/tertiary.
+  if (items.length > 0) return items;
+
+  // ── PASS 2: secondary — natural language price mentions ─────────────────────
+  // Only runs when PASS 1 found nothing (no ⭐️ lines in any turn).
+  // Handles gallery reply → price_query → payment_info flows where create_order
+  // was never called, so no ⭐️ lines were produced.
+  for (const turn of recentTurns) {
+    if (turn.role !== "assistant") continue;
+    const priceContextMatch = turn.content.match(
+      /(?:el|la|los|disponible\s+el?)\s+([A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ][A-Za-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]+?)(?:\s+en\s+talla\s+\w+)?\s*[!.]?\s*(?:Está|está|cuesta|vale)\s+a?\s*\$\s*([\d,]+)/i,
+    );
+    if (priceContextMatch) {
+      const description = priceContextMatch[1].trim().replace(/\s+/g, " ");
+      const price = parseInt(priceContextMatch[2].replace(/,/g, ""), 10);
+      if (description.length > 2 && !seen.has(description)) {
+        seen.add(description);
+        items.push({ description, price: isNaN(price) ? undefined : price });
+        break; // one product from natural language is enough
       }
     }
   }
 
-  // ── Tertiary: [Producto exacto seleccionado por el cliente: NAME] tag ─────────
-  // This tag is injected by webhook.service.ts when a gallery reply is detected.
-  // It is the most reliable source of product context when no ⭐️ lines or price
-  // mentions exist — e.g. when the customer sent the receipt image before the bot
-  // had a chance to produce a ⭐️-formatted confirmation.
-  if (items.length === 0) {
-    for (const turn of recentTurns) {
-      if (turn.role !== "user") continue;
-      const tagMatch = turn.content.match(
-        /\[Producto exacto seleccionado por el cliente:\s*([^\]]+)\]/,
-      );
-      if (tagMatch) {
-        const productName = tagMatch[1].trim();
-        if (productName && !seen.has(productName)) {
-          // Find the price from the first assistant turn that mentions a dollar amount
-          let foundPrice: number | undefined;
-          for (const t of recentTurns) {
-            if (t.role !== "assistant") continue;
-            const priceMatch = t.content.match(/\$\s*([\d,]+)/);
-            if (priceMatch) {
-              const p = parseInt(priceMatch[1].replace(/,/g, ""), 10);
-              if (!isNaN(p) && p > 0) {
-                foundPrice = p;
-                break;
-              }
+  if (items.length > 0) return items;
+
+  // ── PASS 3: tertiary — [Producto exacto seleccionado] tag ───────────────────
+  // Injected by webhook.service.ts on gallery replies. Most reliable source
+  // when the customer sent the receipt before any ⭐️ summary was produced.
+  for (const turn of recentTurns) {
+    if (turn.role !== "user") continue;
+    const tagMatch = turn.content.match(
+      /\[Producto exacto seleccionado por el cliente:\s*([^\]]+)\]/,
+    );
+    if (tagMatch) {
+      const productName = tagMatch[1].trim();
+      if (productName && !seen.has(productName)) {
+        let foundPrice: number | undefined;
+        for (const t of recentTurns) {
+          if (t.role !== "assistant") continue;
+          const priceMatch = t.content.match(/\$\s*([\d,]+)/);
+          if (priceMatch) {
+            const p = parseInt(priceMatch[1].replace(/,/g, ""), 10);
+            if (!isNaN(p) && p > 0) {
+              foundPrice = p;
+              break;
             }
           }
-          seen.add(productName);
-          items.push({ description: productName, price: foundPrice });
         }
-        break;
+        seen.add(productName);
+        items.push({ description: productName, price: foundPrice });
       }
+      break;
     }
   }
 
@@ -350,10 +354,12 @@ function buildPaymentReceiptEscalation({
   customerPhone,
   customerName,
   cart,
+  shippingPrice,
 }: {
   customerPhone: string;
   customerName: string | null;
   cart: CartItem[];
+  shippingPrice: number;
 }): string {
   const lines: string[] = [
     "🧾 Comprobante de pago recibido",
@@ -369,6 +375,19 @@ function buildPaymentReceiptEscalation({
         ? ` — $${item.price.toLocaleString("es-MX")}`
         : "";
       lines.push(`  • ${item.description}${priceStr}`);
+    }
+    // Financial summary — helps the owner verify the deposit amount immediately
+    const subtotal = cart.reduce((s, i) => s + (i.price ?? 0), 0);
+    if (subtotal > 0) {
+      const total = subtotal + shippingPrice;
+      const expectedDeposit = Math.ceil(total * 0.3);
+      lines.push(
+        "",
+        `  Subtotal:              $${subtotal.toLocaleString("es-MX")}`,
+        `  Envío nacional:       $${shippingPrice.toLocaleString("es-MX")}`,
+        `  Total:                 $${total.toLocaleString("es-MX")}`,
+        `  Primer pago esperado:  $${expectedDeposit.toLocaleString("es-MX")} (30%)`,
+      );
     }
   } else {
     lines.push(
@@ -1034,6 +1053,7 @@ export const handleIncomingMessage = async (
             customerPhone: from,
             customerName,
             cart,
+            shippingPrice: BUSINESS_INFO.shippingPrice,
           }),
         },
         from,
@@ -1694,6 +1714,7 @@ ${incomingMessageForClaude}`;
         customerPhone: from,
         customerName,
         cart,
+        shippingPrice: BUSINESS_INFO.shippingPrice,
       });
     } else {
       // All other escalation reasons use the general builder
@@ -1733,6 +1754,7 @@ ${incomingMessageForClaude}`;
           customerPhone: from,
           customerName,
           cart,
+          shippingPrice: BUSINESS_INFO.shippingPrice,
         });
       } else if (intent === "product_search" && productImages.length === 0) {
         const keyword = searchHints?.keyword ?? "producto no especificado";

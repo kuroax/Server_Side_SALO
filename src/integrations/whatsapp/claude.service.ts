@@ -712,13 +712,14 @@ FLUJO OBLIGATORIO:
 3. Estructura sugerida — el producto SIEMPRE con formato ⭐️:
    "¡Sí [bonita/amigo]!
     ⭐️[nombre producto] [color] | Talla [X] | $[precio]
-    Anticipo (30%): $[anticipo] | Liquidas en [días] días
+    Envío nacional: $[shippingPrice]
+    Total: $[precio + shippingPrice]
+    Anticipo (30%): $[anticipo redondeado] | Liquidas en [días] días
     Después de hacer tu transferencia, mándame el comprobante por aquí 🙏🏻
-    El tiempo de entrega es de [deliveryInfo].
     Aquí van los datos de depósito 🙌🏼"
    REGLA CLAVE: El formato ⭐️ en el producto es OBLIGATORIO en este response.
    Permite que el sistema identifique el artículo cuando llegue el comprobante.
-   → OMITE precio/anticipo si ya se explicaron y el cliente no los volvió a preguntar.
+   → Incluye SIEMPRE el envío y el total — el cliente necesita saber exactamente cuánto debe en total.
    → OMITE entrega si no la preguntó.
    → NUNCA preguntes "¿cuál color?" si el cliente ya va a pagar.
 4. intent: payment_info — el sistema enviará los datos bancarios automáticamente.
