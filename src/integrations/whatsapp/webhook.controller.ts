@@ -63,6 +63,7 @@ export const whatsappWebhookHandler = async (
       customerPhone: result.customerPhone,
       customerName: result.customerName,
       productImages: result.productImages,
+      escalationMessage: result.escalationMessage,
     });
   } catch (err) {
     logger.error(

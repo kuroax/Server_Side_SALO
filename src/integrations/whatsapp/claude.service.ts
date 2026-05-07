@@ -989,8 +989,12 @@ type AgenticResult = {
 };
 
 const MAX_PRODUCTS_PER_SEARCH = 4;
-const MAX_IMAGES_PER_PRODUCT = 3;
-const MAX_IMAGES_TOTAL = 12;
+// MAX_IMAGES_PER_PRODUCT matches the product UI maximum of 5 images per product.
+// All uploaded images are shown to the customer — not just the first 3.
+// Raised from 3 to 5 to align with the product creation form (5-slot design).
+const MAX_IMAGES_PER_PRODUCT = 5;
+// MAX_IMAGES_TOTAL = MAX_PRODUCTS_PER_SEARCH × MAX_IMAGES_PER_PRODUCT = 4 × 5 = 20.
+const MAX_IMAGES_TOTAL = 20;
 
 // Garment keywords that are tops — triggers set-completion upsell hint
 const TOP_KEYWORDS = [

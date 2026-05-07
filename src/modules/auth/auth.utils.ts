@@ -7,7 +7,7 @@ import type { IUserDocument } from '#/modules/auth/auth.model.js';
 // ─── Password ─────────────────────────────────────────────────────────────────
 
 export const hashPassword = (password: string): Promise<string> => {
-  return bcrypt.hash(password, 12);
+  return bcrypt.hash(password, env.BCRYPT_SALT_ROUNDS);
 };
 
 export const comparePassword = (

@@ -44,7 +44,7 @@ function createDepthLimitRule(maxDepth: number): ValidationRule {
   });
 }
 import {
-  CORS_ORIGIN,
+  CORS_ORIGINS,
   IS_DEVELOPMENT,
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
@@ -69,7 +69,7 @@ export const createApp = async (): Promise<Application> => {
   // ─── CORS ─────────────────────────────────────────────────────────────────────
   app.use(
     cors({
-      origin:      CORS_ORIGIN === '*' ? true : CORS_ORIGIN,
+      origin:      CORS_ORIGINS,
       credentials: true,
     }),
   );

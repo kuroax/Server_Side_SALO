@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 import { logger } from '#/config/logger.js';
+import { env } from '#/config/env.js';
 
 // ─── Buffer secret middleware ─────────────────────────────────────────────────
 // Validates x-webhook-secret header using timing-safe comparison.
@@ -12,16 +13,9 @@ export const requireBufferWebhookSecret = (
   next: NextFunction,
 ): void => {
   const incoming = req.headers['x-webhook-secret'];
-  const expected = process.env.BUFFER_WEBHOOK_SECRET;
-
-  if (!expected) {
-    logger.error(
-      { path: req.path },
-      'BUFFER_WEBHOOK_SECRET is not set — rejecting buffer request',
-    );
-    res.status(500).json({ error: 'Server misconfiguration' });
-    return;
-  }
+  // env.ts validates BUFFER_WEBHOOK_SECRET as a min-16-character required
+  // string at startup, so it is guaranteed defined here.
+  const expected = env.BUFFER_WEBHOOK_SECRET;
 
   const incomingStr = typeof incoming === 'string' ? incoming : null;
 

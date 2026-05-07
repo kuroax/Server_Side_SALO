@@ -1,7 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { ProductModel } from '#/modules/products/product.model.js';
-import { ANTHROPIC_API_KEY, WHATSAPP_ACCESS_TOKEN } from '#/config/env.js';
-import { logger } from '#/config/logger.js';
+import Anthropic from "@anthropic-ai/sdk";
+import { ProductModel } from "#/modules/products/product.model.js";
+import { ANTHROPIC_API_KEY, WHATSAPP_ACCESS_TOKEN } from "#/config/env.js";
+import { logger } from "#/config/logger.js";
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
@@ -10,15 +10,15 @@ const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ClothingAttributes = {
-  categoryGroup:    string;
-  subcategory:      string;
-  gender:           string;
+  categoryGroup: string;
+  subcategory: string;
+  gender: string;
   colorDescription: string;
 };
 
 export type ImageSearchResult = {
-  reply:         string;
-  productImages: string[];
+  reply: string;
+  productImages: Array<{ url: string; caption?: string }>;
 };
 
 // ─── Step 1 — Download image from Meta API ────────────────────────────────────
@@ -47,9 +47,9 @@ async function downloadMetaImage(
     throw new Error(`Meta image download failed — status ${imgRes.status}`);
   }
 
-  const contentType = imgRes.headers.get('content-type') ?? 'image/jpeg';
-  const buffer      = await imgRes.arrayBuffer();
-  const base64      = Buffer.from(buffer).toString('base64');
+  const contentType = imgRes.headers.get("content-type") ?? "image/jpeg";
+  const buffer = await imgRes.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString("base64");
 
   return { base64, mediaType: contentType };
 }
@@ -57,26 +57,30 @@ async function downloadMetaImage(
 // ─── Step 2 — Analyze clothing with Claude Vision ─────────────────────────────
 
 async function analyzeClothingImage(
-  base64:    string,
+  base64: string,
   mediaType: string,
 ): Promise<ClothingAttributes> {
   const response = await client.messages.create({
-    model:      'claude-sonnet-4-20250514',
+    model: "claude-sonnet-4-20250514",
     max_tokens: 256,
     messages: [
       {
-        role: 'user',
+        role: "user",
         content: [
           {
-            type:   'image',
+            type: "image",
             source: {
-              type:       'base64',
-              media_type: mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-              data:       base64,
+              type: "base64",
+              media_type: mediaType as
+                | "image/jpeg"
+                | "image/png"
+                | "image/gif"
+                | "image/webp",
+              data: base64,
             },
           },
           {
-            type: 'text',
+            type: "text",
             text: `You are analyzing a clothing item for a boutique inventory search.
 Respond ONLY with a JSON object — no markdown, no explanation, no text before or after:
 {
@@ -92,9 +96,9 @@ Respond ONLY with a JSON object — no markdown, no explanation, no text before 
   });
 
   const raw = response.content
-    .filter((b) => b.type === 'text')
-    .map((b) => (b as { type: 'text'; text: string }).text)
-    .join('');
+    .filter((b) => b.type === "text")
+    .map((b) => (b as { type: "text"; text: string }).text)
+    .join("");
 
   return JSON.parse(raw) as ClothingAttributes;
 }
@@ -102,14 +106,14 @@ Respond ONLY with a JSON object — no markdown, no explanation, no text before 
 // ─── Step 3 — Search MongoDB by extracted attributes ──────────────────────────
 
 async function findMatchingProducts(attrs: ClothingAttributes) {
-  const query: Record<string, unknown> = { status: 'active' };
+  const query: Record<string, unknown> = { status: "active" };
 
   if (attrs.categoryGroup) {
-    query['categoryGroup'] = { $regex: attrs.categoryGroup, $options: 'i' };
+    query["categoryGroup"] = { $regex: attrs.categoryGroup, $options: "i" };
   }
 
-  if (attrs.gender && attrs.gender !== 'unisex') {
-    query['gender'] = attrs.gender;
+  if (attrs.gender && attrs.gender !== "unisex") {
+    query["gender"] = attrs.gender;
   }
 
   const subcategoryTerms = attrs.subcategory
@@ -117,14 +121,14 @@ async function findMatchingProducts(attrs: ClothingAttributes) {
     .filter((w) => w.length > 3);
 
   if (subcategoryTerms.length > 0) {
-    query['$or'] = [
-      { subcategory: { $regex: subcategoryTerms.join('|'), $options: 'i' } },
-      { name:        { $regex: subcategoryTerms.join('|'), $options: 'i' } },
+    query["$or"] = [
+      { subcategory: { $regex: subcategoryTerms.join("|"), $options: "i" } },
+      { name: { $regex: subcategoryTerms.join("|"), $options: "i" } },
     ];
   }
 
   return ProductModel.find(query)
-    .select('name price images description subcategory')
+    .select("name price images description subcategory")
     .limit(3)
     .lean();
 }
@@ -135,37 +139,62 @@ export async function searchProductsByImage(
   mediaId: string,
 ): Promise<ImageSearchResult> {
   try {
-    logger.info({ mediaId }, 'Starting image-based product search');
+    logger.info({ mediaId }, "Starting image-based product search");
 
     const { base64, mediaType } = await downloadMetaImage(mediaId);
-    const attrs                 = await analyzeClothingImage(base64, mediaType);
+    const attrs = await analyzeClothingImage(base64, mediaType);
 
-    logger.info({ attrs }, 'Clothing attributes extracted from image');
+    logger.info({ attrs }, "Clothing attributes extracted from image");
 
     const products = await findMatchingProducts(attrs);
 
     if (products.length === 0) {
-      logger.info({ attrs }, 'No matching products found for image');
+      logger.info({ attrs }, "No matching products found for image");
       return {
-        reply:         'Ahorita te confirmo eso bonita, dame un momento 🙏🏻',
+        reply:
+          "Ahorita te confirmo eso bonita, dame un momento \uD83D\uDE4F\uD83C\uDFFB",
         productImages: [],
       };
     }
 
-    const lines         = products.map((p) => `⭐️ ${p.name} — $${p.price} MXN`).join('\n');
-    const reply         = `Encontré estos productos similares bonita! 🙌🏼\n\n${lines}\n\n¿Alguno te llama la atención? 💫`;
-    const productImages = products.flatMap((p) => p.images ?? []).slice(0, 3) as string[];
+    const lines = products
+      .map((p) => `\u2B50\uFE0F ${p.name} \u2014 $${p.price} MXN`)
+      .join("\n");
+    const reply = `Encontr\u00E9 estos productos similares bonita! \uD83D\uDE4C\uD83C\uDFC0\n\n${lines}\n\n\u00BFAlguno te llama la atenci\u00F3n? \uD83D\uDCAB`;
+
+    // Build image objects for each product.
+    // Filter: skip any stored slot that is empty, null, or not a string —
+    // defensive against old data or direct DB writes that bypass Zod validation.
+    // Caption: only the first image per product carries the product name and price;
+    // subsequent angles are sent without caption to avoid repetitive text.
+    // Slice: visual similarity search is capped at 5 total to avoid overwhelming
+    // the customer. Matches the 5-image-per-product limit in the product UI.
+    const productImages: Array<{ url: string; caption?: string }> = products
+      .flatMap((p) => {
+        const caption = `\u2B50\uFE0F ${p.name} \u2014 $${p.price} MXN`;
+        return ((p.images ?? []) as string[])
+          .filter(
+            (url): url is string =>
+              typeof url === "string" && url.trim().length > 0,
+          )
+          .map((url, idx) => ({
+            url,
+            caption: idx === 0 ? caption : undefined,
+          }));
+      })
+      .slice(0, 5);
 
     logger.info(
       { productCount: products.length, imageCount: productImages.length },
-      'Image search completed',
+      "Image search completed",
     );
 
     return { reply, productImages };
   } catch (err) {
-    logger.error({ err }, 'Image search failed — returning safe fallback');
+    logger.error({ err }, "Image search failed — returning safe fallback");
     return {
-      reply:         'Ahorita te confirmo eso bonita, dame un momento 🙏🏻',
+      reply:
+        "Ahorita te confirmo eso bonita, dame un momento \uD83D\uDE4F\uD83C\uDFFB",
       productImages: [],
     };
   }

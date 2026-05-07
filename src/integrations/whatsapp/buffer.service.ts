@@ -1,29 +1,12 @@
 import { ConversationBufferModel } from "#/modules/conversations/conversation-buffer.model.js";
 import { logger } from "#/config/logger.js";
+import { env } from "#/config/env.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_ELAPSED_THRESHOLD_MS = 55_000;
-
-const parseElapsedThresholdMs = (): number => {
-  const raw = process.env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS;
-
-  if (!raw) return DEFAULT_ELAPSED_THRESHOLD_MS;
-
-  const parsed = Number(raw);
-
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    logger.warn(
-      { raw, fallback: DEFAULT_ELAPSED_THRESHOLD_MS },
-      "Invalid WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS; using default",
-    );
-    return DEFAULT_ELAPSED_THRESHOLD_MS;
-  }
-
-  return parsed;
-};
-
-const ELAPSED_THRESHOLD_MS = parseElapsedThresholdMs();
+// env.ts coerces, validates as a positive integer, and defaults to 55000 —
+// no defensive parsing needed here.
+const ELAPSED_THRESHOLD_MS = env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

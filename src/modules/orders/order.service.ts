@@ -1,4 +1,4 @@
-import { Types } from "mongoose";
+import mongoose, { Types } from "mongoose";
 import { logger } from "#/config/logger.js";
 import { BadRequestError, NotFoundError } from "#/shared/errors/index.js";
 import { OrderModel } from "#/modules/orders/order.model.js";
@@ -446,93 +446,88 @@ export async function createOrder(
 export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
   const { orderId, status } = updateOrderStatusSchema.parse(input);
 
+  // Cancellation must go through cancelOrder so inventory restoration and
+  // lifetime value decrement run together. Allowing cancellation via this
+  // endpoint silently corrupts both inventory and the cached LTV.
+  if (status === "cancelled") {
+    throw new BadRequestError(
+      "Use cancelOrder to cancel an order — updateOrderStatus does not run inventory restoration or lifetime value decrement.",
+    );
+  }
+
   const order = await OrderModel.findById(orderId);
   if (!order) throw new NotFoundError("Order not found");
 
   assertValidTransition(order.status as OrderStatus, status);
 
   if (status === "confirmed" && !order.inventoryApplied) {
-    const insufficientItems: string[] = [];
+    // Pre-check + deduct loops run inside a single MongoDB transaction so
+    // partial deductions cannot stick if any item fails. Throws inside the
+    // callback abort the transaction and roll back every prior deduction
+    // atomically — no manual per-item rollback needed.
+    //
+    // Requires a replica set / Atlas. If the connection is not replica-set
+    // aware, withTransaction throws a clear MongoServerError at runtime.
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const insufficientItems: string[] = [];
 
-    for (const item of order.items) {
-      const current = await InventoryModel.findOne({
-        productId: item.productId,
-        size: item.size,
-        color: item.color,
-      })
-        .select("quantity")
-        .lean<{ quantity: number } | null>();
+        for (const item of order.items) {
+          const current = await InventoryModel.findOne({
+            productId: item.productId,
+            size: item.size,
+            color: item.color,
+          })
+            .select("quantity")
+            .session(session)
+            .lean<{ quantity: number } | null>();
 
-      if (!current || current.quantity < item.quantity) {
-        const available = current?.quantity ?? 0;
-        insufficientItems.push(
-          `${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
-        );
-      }
-    }
-
-    if (insufficientItems.length > 0) {
-      throw new BadRequestError(
-        `Insufficient stock for: ${insufficientItems.join("; ")}`,
-      );
-    }
-
-    type DeductedItem = {
-      productId: Types.ObjectId;
-      size: string;
-      color: string;
-      quantity: number;
-    };
-
-    const deducted: DeductedItem[] = [];
-
-    for (const item of order.items) {
-      const result = await InventoryModel.findOneAndUpdate(
-        {
-          productId: item.productId,
-          size: item.size,
-          color: item.color,
-          quantity: { $gte: item.quantity },
-        },
-        { $inc: { quantity: -item.quantity } },
-        { new: true },
-      ).lean();
-
-      if (!result) {
-        for (const d of deducted) {
-          await InventoryModel.findOneAndUpdate(
-            { productId: d.productId, size: d.size, color: d.color },
-            { $inc: { quantity: d.quantity } },
-          )
-            .lean()
-            .catch((rollbackErr: unknown) => {
-              logger.error(
-                { rollbackErr, orderId },
-                "Inventory rollback failed — manual correction required",
-              );
-            });
+          if (!current || current.quantity < item.quantity) {
+            const available = current?.quantity ?? 0;
+            insufficientItems.push(
+              `${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
+            );
+          }
         }
 
-        const current = await InventoryModel.findOne({
-          productId: item.productId,
-          size: item.size,
-          color: item.color,
-        })
-          .select("quantity")
-          .lean<{ quantity: number } | null>();
+        if (insufficientItems.length > 0) {
+          throw new BadRequestError(
+            `Insufficient stock for: ${insufficientItems.join("; ")}`,
+          );
+        }
 
-        const available = current?.quantity ?? 0;
-        throw new BadRequestError(
-          `Insufficient stock for ${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
-        );
-      }
+        for (const item of order.items) {
+          const result = await InventoryModel.findOneAndUpdate(
+            {
+              productId: item.productId,
+              size: item.size,
+              color: item.color,
+              quantity: { $gte: item.quantity },
+            },
+            { $inc: { quantity: -item.quantity } },
+            { new: true, session },
+          ).lean();
 
-      deducted.push({
-        productId: item.productId,
-        size: item.size,
-        color: item.color,
-        quantity: item.quantity,
+          if (!result) {
+            const current = await InventoryModel.findOne({
+              productId: item.productId,
+              size: item.size,
+              color: item.color,
+            })
+              .select("quantity")
+              .session(session)
+              .lean<{ quantity: number } | null>();
+
+            const available = current?.quantity ?? 0;
+            throw new BadRequestError(
+              `Insufficient stock for ${item.productName} (${item.size} · ${item.color}): requested ${item.quantity}, available ${available}`,
+            );
+          }
+        }
       });
+    } finally {
+      await session.endSession();
     }
 
     order.inventoryApplied = true;
@@ -653,6 +648,8 @@ export async function assignCustomerToOrder(
   const order = await OrderModel.findById(orderId);
   if (!order) throw new NotFoundError("Order not found");
 
+  // The guard below confirms the order had no customer before this call —
+  // otherwise the BadRequestError fires and we never reach the LTV credit.
   if (order.customerId !== null) {
     throw new BadRequestError("Order already has a customer assigned");
   }
@@ -662,6 +659,19 @@ export async function assignCustomerToOrder(
   await order.save();
 
   logger.info({ orderId, customerId }, "Customer assigned to order");
+
+  // Credit the cached lifetime value now that the order finally has a customer.
+  // Bot-originated orders are commonly created without a customerId; without
+  // this credit the customer's lifetimeValue permanently understates VIP context.
+  // Skip cancelled orders — those should not contribute to LTV.
+  if (order.status !== "cancelled") {
+    await safeUpdateLifetimeValue(
+      order.customerId,
+      order.total,
+      "Customer assigned to order — credited customer lifetimeValue",
+    );
+  }
+
   return mapOrder(order.toObject() as OrderLike);
 }
 

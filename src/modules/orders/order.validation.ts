@@ -14,14 +14,18 @@ import {
 
 const orderItemInputSchema = z.object({
   productId: objectIdSchema,
+  // size and color must match the canonical casing used by the inventory module
+  // (uppercase size, lowercase color). Without these transforms, inventory
+  // findOne lookups in order.service.ts return null on confirmation for any
+  // non-canonical case from upstream callers (Claude/bot/manual entry).
   size: z
     .string({ error: 'Size must be a string' })
     .min(1, { error: 'Size is required' })
-    .transform(s => s.trim()),
+    .transform(s => s.trim().toUpperCase()),
   color: z
     .string({ error: 'Color must be a string' })
     .min(1, { error: 'Color is required' })
-    .transform(s => s.trim()),
+    .transform(s => s.trim().toLowerCase()),
   quantity: z
     .number({ error: 'Quantity must be a number' })
     .int({ error: 'Quantity must be an integer' })

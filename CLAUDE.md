@@ -448,7 +448,6 @@ ANTHROPIC_API_KEY
 WEBHOOK_SECRET
 BUFFER_WEBHOOK_SECRET
 BANK_ACCOUNT_IMAGE_URL        # WhatsApp-accessible URL for bank account image
-OWNER_WHATSAPP_NUMBER         # Owner phone for escalation alerts (E.164)
 PORT
 ```
 

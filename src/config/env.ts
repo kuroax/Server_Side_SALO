@@ -44,8 +44,11 @@ const envSchema = z
     RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(100),
 
     // CORS — no default intentionally: must be set explicitly in every environment.
-    // Wildcard is rejected in production at startup.
+    // Wildcard (*) is rejected in production at startup.
     // Multiple origins can be provided as a comma-separated string.
+    // CORS_ORIGINS (the parsed value) is typed string[] | true:
+    //   true        → allow all origins (development only)
+    //   string[]    → allow exactly these origins
     CORS_ORIGIN: requiredTrimmedString("CORS_ORIGIN"),
 
     // Integrations
@@ -95,16 +98,27 @@ const envSchema = z
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-  console.error("❌ Invalid environment variables:");
+  console.error("\u274c Invalid environment variables:");
   parsed.error.issues.forEach((issue) => {
     console.error(`   ${issue.path.join(".")}: ${issue.message}`);
   });
   process.exit(1);
 }
 
-const corsOrigins = parsed.data.CORS_ORIGIN.split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+// Parse CORS_ORIGIN into the shape the cors() middleware expects:
+//   "*"                        → true          (allow all — development only)
+//   "https://a.com,https://b.com" → string[]  (allow exactly these origins)
+//
+// The cors package accepts boolean true for wildcard, NOT ["*"].
+// Passing ["*"] would try to match the literal string "*" against the
+// request Origin header and block every real origin.
+const corsOrigins: string[] | true =
+  parsed.data.CORS_ORIGIN.trim() === "*"
+    ? true
+    : parsed.data.CORS_ORIGIN
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean);
 
 export const env = {
   ...parsed.data,
@@ -115,9 +129,10 @@ export const env = {
 } as const;
 
 // Hard fail in production for wildcard CORS.
-if (env.IS_PRODUCTION && env.CORS_ORIGINS.includes("*")) {
+// CORS_ORIGINS is true (not an array) when the env var is "*".
+if (env.IS_PRODUCTION && env.CORS_ORIGINS === true) {
   console.error(
-    "❌ CORS_ORIGIN cannot include wildcard (*) in production. Set explicit origins.",
+    "\u274c CORS_ORIGIN cannot be wildcard (*) in production. Set explicit origins.",
   );
   process.exit(1);
 }
@@ -135,8 +150,8 @@ export const {
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
   // CORS_ORIGIN is the raw comma-separated string from the environment variable.
-  // Prefer CORS_ORIGINS (parsed array) in middleware. CORS_ORIGIN retained for
-  // backwards compatibility — remove once all middleware uses CORS_ORIGINS.
+  // Prefer CORS_ORIGINS (parsed, typed string[] | true) in all middleware.
+  // CORS_ORIGIN is retained only for logging/debugging — do not pass it to cors().
   CORS_ORIGIN,
   CORS_ORIGINS,
   ANTHROPIC_API_KEY,
