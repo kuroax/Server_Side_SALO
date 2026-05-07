@@ -70,9 +70,9 @@ const subcategorySchema = z
   .min(2, "Subcategory must be at least 2 characters")
   .max(60, "Subcategory must be at most 60 characters");
 
-// Max 5 images matches the product creation UI (5-slot design).
-// The backend enforces the same limit as the frontend so API callers
-// cannot bypass the 5-image constraint.
+// Max 5 matches the product creation UI (5-slot design).
+// Enforces the same limit at the API level so callers cannot bypass
+// the frontend constraint.
 const imagesSchema = z
   .array(z.string().url("Each image must be a valid URL"))
   .max(5, "A product can have at most 5 images");

@@ -485,7 +485,7 @@ ACTIVE_PROMOTION   # Wire to env.ts as z.string().optional() when ready
 
 - Never put business logic in resolvers
 - Never put GraphQL types in service files
-- Never access `process.env` directly — use `env.ts` (exception: buffer.service.ts threshold)
+- Never access `process.env` directly — use `env.ts`
 - Never return raw Mongoose documents from services
 - Never use relative `../../` imports across module boundaries
 - Never skip `.js` extension in imports
