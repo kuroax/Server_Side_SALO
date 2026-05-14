@@ -11,7 +11,7 @@ import type {
   UpdateCustomerData,
   ListCustomersData,
 } from '#/modules/customers/customer.validation.js';
-import type { CustomerResponse } from '#/modules/customers/customer.types.js';
+import type { CustomerResponse, CustomerTag } from '#/modules/customers/customer.types.js';
 import { CUSTOMER_GENDERS } from '#/modules/customers/customer.types.js';
 import { logger } from '#/config/logger.js';
 import {
@@ -131,7 +131,7 @@ export const createCustomer = async (input: unknown): Promise<CustomerResponse> 
   try {
     const doc = await CustomerModel.create({
       ...data,
-      tags:     data.tags   ?? [],
+      tags:     (data.tags ?? []) as CustomerTag[],
       gender:   data.gender ?? CUSTOMER_GENDERS.UNKNOWN,
       isActive: true,
     });

@@ -6,7 +6,7 @@ import {
   productIdSchema,
   listProductsSchema,
 } from "#/modules/products/product.validation.js";
-import type { ProductResponse } from "#/modules/products/product.types.js";
+import type { ProductResponse, ProductStatus, Gender } from "#/modules/products/product.types.js";
 import { logger } from "#/config/logger.js";
 import { NotFoundError, BadRequestError } from "#/shared/errors/index.js";
 import { InventoryModel } from "#/modules/inventory/inventory.model.js";
@@ -210,6 +210,8 @@ export const createProduct = async (
   try {
     product = await ProductModel.create({
       ...validated,
+      status: validated.status as ProductStatus,
+      gender: validated.gender as Gender,
       slug,
       searchKeywords,
     });

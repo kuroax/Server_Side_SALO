@@ -85,7 +85,7 @@ export const register = async (
     username: validated.username,
     email:    validated.email,
     password: hashed,
-    role:     validated.role,
+    role:     validated.role as Role,
   });
 
   const payload: JWTPayload = {
