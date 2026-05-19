@@ -220,6 +220,25 @@ Direct cast to `Record<string, unknown>` on a typed document causes `ts(2352)`:
   | undefined;
 ```
 
+### Mongoose strict enum typing
+
+Mongoose 9 enforces strict literal union types on query/create fields. Zod outputs `string`
+for validated enum values, which Mongoose rejects. Cast to the domain type at the call site:
+
+```ts
+// auth.service.ts — role field
+role: validated.role as Role;
+
+// customer.service.ts — tags field
+tags: (data.tags ?? []) as CustomerTag[];
+
+// product.service.ts — status field in create()
+status: validated.status as ProductStatus;
+```
+
+These casts are correct — Zod has already validated the values. The assertions only satisfy
+Mongoose's generic type checker. Do not remove them.
+
 ### Mappers
 
 Every module has a `mapOrder()` / `mapProduct()` etc. function that converts raw `OrderLike` (ObjectIds as `Types.ObjectId`) to `SafeOrder` (all IDs as strings). Resolvers always return mapped types, never raw documents.
@@ -353,6 +372,13 @@ WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS  # default 55000 — must be < n8n Wait nod
 BANK_ACCOUNT_IMAGE_URL            # Cloudinary URL for bank account image card
 ```
 
+**Deferred — not yet wired:**
+
+```
+ACTIVE_PROMOTION   # Wire to env.ts as z.string().optional() when ready
+                   # Used by businessInfo.activePromotion in ClaudeContext
+```
+
 **CORS_ORIGINS** is computed from CORS_ORIGIN at startup:
 
 - `"*"` → exports `true` (allow all — development only, blocked in production)
@@ -366,7 +392,7 @@ The `cors()` middleware in `app.ts` receives `CORS_ORIGINS` (typed `string[] | t
 
 ### Identity and persona
 
-- **Model:** `claude-sonnet-4-20250514`
+- **Model:** `claude-sonnet-4-6`
 - **Persona:** warm, casual, boutique salesperson — Spanish only
 - **Memory:** 20-turn rolling window (`MAX_CONVERSATION_TURNS = 20`)
 - **Brands:** Alo Yoga, Lululemon, Wiskii, 437, Better Me, Skims — all 6 always
