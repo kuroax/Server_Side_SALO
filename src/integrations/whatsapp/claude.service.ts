@@ -1434,7 +1434,17 @@ INFORMACIÓN DEL NEGOCIO:
     }
     return result;
   }
-  const sanitizedText = sanitizeJsonNewlines(agenticResult.text);
+
+  function stripMarkdownFences(raw: string): string {
+    return raw
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
+  }
+
+  const sanitizedText = sanitizeJsonNewlines(
+    stripMarkdownFences(agenticResult.text),
+  );
 
   try {
     parsed = JSON.parse(sanitizedText);
