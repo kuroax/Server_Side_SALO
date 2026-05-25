@@ -1305,9 +1305,23 @@ INFORMACIÓN DEL NEGOCIO:
 
   const fullSystemPrompt = `${SYSTEM_PROMPT}${contextSection}`;
 
+  // Append a hard JSON reminder to every user message before sending to Claude.
+  // The system prompt already states the JSON contract, but Claude occasionally
+  // breaks it on emotionally-charged or multi-intent buffered messages (e.g.
+  // gallery reaction + purchase confirmation + payment question in one turn),
+  // responding in plain conversational Spanish instead of JSON. This reminder
+  // is injected at the message level — it is the last thing Claude reads before
+  // generating its response, making it much harder to ignore.
+  // Confirmed failure: Railway logs 2026-05-25 02:24:18 — rawTextPreview showed
+  // "¡Qué bonita elección! 😊 Antes de mandarte los da…" (pure text, no JSON).
+  const JSON_REMINDER =
+    "\n\n⚠️ RECUERDA: Tu respuesta debe ser ÚNICAMENTE JSON puro. Sin texto antes ni después. Sin markdown. Sin explicaciones. Solo el objeto JSON.";
+
+  const messageWithReminder = sanitizedMessage + JSON_REMINDER;
+
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
-    { role: "user", content: sanitizedMessage },
+    { role: "user", content: messageWithReminder },
   ];
 
   logger.info(
