@@ -90,15 +90,29 @@ const envSchema = z
     // Set in Railway: BANK_ACCOUNT_IMAGE_URL=https://res.cloudinary.com/...
     BANK_ACCOUNT_IMAGE_URL: optionalUrlSchema,
 
-    // Meta App credentials — required for Embedded Signup token exchange.
-    // META_APP_ID is your app ID: 2300378030444599
-    // META_APP_SECRET is from App Dashboard > Basic settings.
+    // ── Meta App credentials — required for Embedded Signup ─────────────────
+    // META_APP_ID    : Your Meta app ID: 2300378030444599
+    // META_APP_SECRET: App secret from App Dashboard > Basic settings.
+    //                  Used to exchange the 30-second Embedded Signup code
+    //                  for a long-lived per-boutique access token.
     // Both optional until Embedded Signup is deployed to production.
     META_APP_ID: z.string().trim().optional(),
     META_APP_SECRET: z.string().trim().optional(),
 
-    // System User master token for platform-level Meta API calls.
-    // System User SALO ID: 61577448959274
+    // ── Embedded Signup config ID ────────────────────────────────────────────
+    // Generated in Meta App Dashboard:
+    //   Facebook Login for Business → Configurations →
+    //   "WhatsApp Embedded Signup Configuration With 60 Expiration Token"
+    // Injected into the /boutique-signup HTML page so FB.login() uses the
+    // correct permission set and token expiry.
+    // Value: 914545048295259
+    META_ES_CONFIG_ID: z.string().trim().optional(),
+
+    // ── System User token — master credential ────────────────────────────────
+    // SYSTEM_USER_TOKEN: Token for the SALO system user (ID: 61577448959274)
+    //                    with admin permissions. Used for platform-level API
+    //                    calls: subscribing new WABAs to the app, managing
+    //                    webhooks, registering phone numbers, etc.
     // Optional until multi-tenant onboarding is live.
     SYSTEM_USER_TOKEN: z.string().trim().optional(),
   })
@@ -127,8 +141,7 @@ if (!parsed.success) {
 const corsOrigins: string[] | true =
   parsed.data.CORS_ORIGIN.trim() === "*"
     ? true
-    : parsed.data.CORS_ORIGIN
-        .split(",")
+    : parsed.data.CORS_ORIGIN.split(",")
         .map((origin) => origin.trim())
         .filter(Boolean);
 
@@ -174,6 +187,7 @@ export const {
   BANK_ACCOUNT_IMAGE_URL,
   META_APP_ID,
   META_APP_SECRET,
+  META_ES_CONFIG_ID,
   SYSTEM_USER_TOKEN,
   IS_PRODUCTION,
   IS_DEVELOPMENT,
