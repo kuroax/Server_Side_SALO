@@ -89,6 +89,18 @@ const envSchema = z
     // Empty Railway values are treated as undefined.
     // Set in Railway: BANK_ACCOUNT_IMAGE_URL=https://res.cloudinary.com/...
     BANK_ACCOUNT_IMAGE_URL: optionalUrlSchema,
+
+    // Meta App credentials — required for Embedded Signup token exchange.
+    // META_APP_ID is your app ID: 2300378030444599
+    // META_APP_SECRET is from App Dashboard > Basic settings.
+    // Both optional until Embedded Signup is deployed to production.
+    META_APP_ID: z.string().trim().optional(),
+    META_APP_SECRET: z.string().trim().optional(),
+
+    // System User master token for platform-level Meta API calls.
+    // System User SALO ID: 61577448959274
+    // Optional until multi-tenant onboarding is live.
+    SYSTEM_USER_TOKEN: z.string().trim().optional(),
   })
   .refine((env) => env.JWT_SECRET !== env.JWT_REFRESH_SECRET, {
     path: ["JWT_REFRESH_SECRET"],
@@ -160,6 +172,9 @@ export const {
   BUFFER_WEBHOOK_SECRET,
   WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS,
   BANK_ACCOUNT_IMAGE_URL,
+  META_APP_ID,
+  META_APP_SECRET,
+  SYSTEM_USER_TOKEN,
   IS_PRODUCTION,
   IS_DEVELOPMENT,
   IS_TEST,

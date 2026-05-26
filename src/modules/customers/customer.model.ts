@@ -29,6 +29,15 @@ const normalizeInstagramHandle = (value: unknown): string | undefined => {
 
 const customerSchema = new Schema(
   {
+    // Tenant scope — every customer belongs to exactly one boutique.
+    // All queries must filter by this field; the compound indexes below
+    // enforce per-boutique uniqueness for phone and instagramHandle.
+    boutiqueId: {
+      type: Schema.Types.ObjectId,
+      ref: "Boutique",
+      required: [true, "Boutique ID is required"],
+    },
+
     name: {
       type: String,
       required: true,
@@ -39,18 +48,23 @@ const customerSchema = new Schema(
     // Example: "5213328205715" (Meta E.164 without the +).
     // Normalization is applied before any query or upsert — see service/boundary layer.
     // The pre-save hook below is only a fallback for direct save() calls.
+    //
+    // unique is NOT set here — uniqueness is scoped to boutique via compound
+    // index below. A global unique would prevent the same customer from
+    // messaging two different boutiques.
     phone: {
       type: String,
       trim: true,
-      unique: true,
       sparse: true,
     },
 
+    // unique is NOT set here — uniqueness is scoped to boutique via compound
+    // index below. A global unique would prevent the same customer from
+    // messaging two different boutiques.
     instagramHandle: {
       type: String,
       trim: true,
       lowercase: true,
-      unique: true,
       sparse: true,
     },
 
@@ -134,12 +148,27 @@ customerSchema.pre("save", function () {
 
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
-customerSchema.index({ isActive: 1, contactChannel: 1 });
-customerSchema.index({ tags: 1 });
+// Per-boutique unique phone — replaces the old global { phone: unique, sparse }.
+// Lets the same phone number exist across multiple boutiques (one customer
+// shopping at two different stores) while still preventing duplicates within
+// a single boutique.
+customerSchema.index(
+  { boutiqueId: 1, phone: 1 },
+  { unique: true, sparse: true },
+);
+
+// Per-boutique unique Instagram handle — same reasoning as phone above.
+customerSchema.index(
+  { boutiqueId: 1, instagramHandle: 1 },
+  { unique: true, sparse: true },
+);
+
+customerSchema.index({ boutiqueId: 1, isActive: 1, contactChannel: 1 });
+customerSchema.index({ boutiqueId: 1, tags: 1 });
 
 // Supports sorting / filtering customers by spend in the SALO dashboard.
 // Also used if a future query ever needs to find all VIP customers directly.
-customerSchema.index({ lifetimeValue: -1 });
+customerSchema.index({ boutiqueId: 1, lifetimeValue: -1 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

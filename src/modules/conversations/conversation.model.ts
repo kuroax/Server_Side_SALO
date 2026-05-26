@@ -4,6 +4,8 @@ import {
   type InferSchemaType,
   type HydratedDocument,
 } from "mongoose";
+import { CONVERSATION_MODE } from "#/modules/boutiques/boutique.types.js";
+export type { ConversationMode } from "#/modules/boutiques/boutique.types.js";
 
 // ─── Subdocument ──────────────────────────────────────────────────────────────
 
@@ -22,6 +24,15 @@ const conversationTurnSchema = new Schema(
 
 const conversationSchema = new Schema(
   {
+    // Denormalized from customer for direct n8n mode-check queries.
+    // The n8n mode-check endpoint queries by boutiqueId + customerPhone,
+    // not customerId, so this field avoids a join.
+    boutiqueId: {
+      type: Schema.Types.ObjectId,
+      ref: "Boutique",
+      required: [true, "Boutique ID is required"],
+    },
+
     // One conversation document per customer+channel pair.
     // Indexed together for fast lookup on every incoming message.
     customerId: {
@@ -49,6 +60,25 @@ const conversationSchema = new Schema(
       type: Date,
       default: () => new Date(),
     },
+
+    // Per-conversation bot toggle.
+    //   "auto"   → Luis handles all messages for this customer (default).
+    //   "manual" → n8n skips the AI entirely; the owner responds manually.
+    // Flipped to "manual" automatically when Luis returns escalate: true.
+    // Reset to "auto" manually by the owner via the SALO app.
+    mode: {
+      type: String,
+      enum: Object.values(CONVERSATION_MODE),
+      default: CONVERSATION_MODE.AUTO,
+    },
+
+    // Timestamp of the most recent transition to "manual" — surfaced on the
+    // owner dashboard so they can see how long a conversation has been waiting
+    // for a human response.
+    escalatedAt: {
+      type: Date,
+      default: undefined,
+    },
   },
   {
     timestamps: true,
@@ -60,6 +90,10 @@ const conversationSchema = new Schema(
 
 // Primary lookup: find conversation by customer + channel on every message.
 conversationSchema.index({ customerId: 1, channel: 1 }, { unique: true });
+
+// Tenant-scoped mode lookup — used by the owner dashboard to list all
+// conversations currently in manual mode for a given boutique.
+conversationSchema.index({ boutiqueId: 1, mode: 1 });
 
 // TTL index — auto-delete conversations inactive for 30 days.
 // Keeps the collection lean without manual cleanup jobs.
