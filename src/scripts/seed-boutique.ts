@@ -32,6 +32,7 @@ import { InventoryModel } from "#/modules/inventory/inventory.model.js";
 import { CustomerModel } from "#/modules/customers/customer.model.js";
 import { ConversationModel } from "#/modules/conversations/conversation.model.js";
 import { OrderModel } from "#/modules/orders/order.model.js";
+import { UserModel } from "#/modules/auth/auth.model.js";
 
 // ─── Tenant #1 — Axel Monterrubio ─────────────────────────────────────────────
 // These values mirror the BUSINESS_INFO constant in webhook.service.ts at the
@@ -39,7 +40,7 @@ import { OrderModel } from "#/modules/orders/order.model.js";
 // the document directly through the boutiques GraphQL mutation instead.
 
 const FIRST_BOUTIQUE = {
-  name: "SALO — Axel Monterrubio",
+  name: "shopalogdl",
   phoneNumberId: "1136131782919468",
   wabaId: "1470978480789686",
   businessInfo: {
@@ -120,6 +121,18 @@ const backfills: CollectionBackfill[] = [
     count: () => OrderModel.countDocuments({ boutiqueId: { $exists: false } }),
     backfill: async (boutiqueId) => {
       const result = await OrderModel.updateMany(
+        { boutiqueId: { $exists: false } },
+        { $set: { boutiqueId } },
+        { strict: false },
+      );
+      return result.modifiedCount;
+    },
+  },
+  {
+    name: "User",
+    count: () => UserModel.countDocuments({ boutiqueId: { $exists: false } }),
+    backfill: async (boutiqueId) => {
+      const result = await UserModel.updateMany(
         { boutiqueId: { $exists: false } },
         { $set: { boutiqueId } },
         { strict: false },
