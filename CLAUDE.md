@@ -19,7 +19,9 @@ Read this section first. These rules apply to every task in this repo.
 
 ## Project overview
 
-GraphQL API backend for SALO — a clothing reseller automation system for a boutique in Guadalajara, Mexico. Handles orders, inventory, customers, products, authentication, and a WhatsApp bot powered by Claude AI ("Luis").
+GraphQL API backend for SALO — a multi-tenant SaaS platform for clothing boutiques in Mexico. Handles orders, inventory, customers, products, authentication, and a WhatsApp AI bot ("Luis") powered by Claude.
+
+**Architecture direction:** Multi-tenant SaaS. Each boutique is a separate tenant stored in the `boutiques` collection with its own Meta credentials, business info, and conversation mode. The first tenant is Axel Monterrubio's boutique (manually onboarded). Subsequent tenants onboard via WhatsApp Embedded Signup (in development). All domain collections (products, customers, orders, conversations) are scoped by `boutiqueId`.
 
 **Deployed on Railway:** `https://serversidesalo-production.up.railway.app`
 
@@ -91,13 +93,24 @@ src/
 │       ├── webhook.controller.ts     # Express controller for Meta webhook
 │       ├── webhook.router.ts         # Mounts all /api/webhooks/whatsapp routes
 │       ├── webhook.service.ts        # Orchestrates full bot flow (1900+ lines — FRAGILE)
+│       │                                 # Reads boutique by phoneNumberId on every request
+│       │                                 # Passes boutique.businessInfo to ClaudeContext
 │       └── webhook.validation.ts     # Zod schemas for Meta payload
 ├── modules/
 │   ├── auth/                         # JWT auth, login, refresh, password
+│   ├── boutiques/                    # Multi-tenant: one doc per boutique/client
+│   │   ├── boutique.model.ts         # Schema: Meta credentials, businessInfo, mode
+│   │   ├── boutique.types.ts         # BOUTIQUE_STATUS, CONVERSATION_MODE enums
+│   │   ├── boutique.validation.ts    # Zod schemas: create, update, embeddedSignup
+│   │   ├── boutique.service.ts       # findByPhoneNumberId, createBoutique, setMode
+│   │   ├── boutique.resolvers.ts     # GraphQL — never exposes accessToken
+│   │   └── boutique.typeDefs.ts      # GraphQL SDL
 │   ├── conversations/
 │   │   ├── conversation-buffer.model.ts  # MongoDB buffer for message accumulation
-│   │   └── conversation.model.ts         # Conversation memory (20-turn rolling window)
+│   │   └── conversation.model.ts         # Conversation memory — now includes boutiqueId
+│   │                                     # and mode: "auto" | "manual" for hybrid handoff
 │   ├── customers/                    # Customer CRUD + lifetimeValue cache
+│   │                                 # boutiqueId scopes all queries and indexes
 │   ├── inventory/                    # Stock tracking per variant
 │   ├── orders/                       # Order lifecycle management
 │   ├── products/                     # Product catalog
@@ -120,7 +133,7 @@ src/
 
 ## Module anatomy
 
-Every domain module follows the same 5-file pattern:
+Every domain module follows the same 6-file pattern:
 
 ```
 module.model.ts       # Mongoose schema + model
@@ -131,7 +144,58 @@ module.resolvers.ts   # GraphQL resolvers — auth guards + delegates to service
 module.typeDefs.ts    # GraphQL SDL (extends Query / extends Mutation)
 ```
 
+Note: some older modules may only have 5 files (missing typeDefs.ts) — do not
+retroactively add typeDefs.ts unless you are actively modifying that module's
+GraphQL surface.
+
 **Rule:** Resolvers never contain business logic. Services never contain GraphQL types. Validation always lives in the validation file — never inline in the service.
+
+---
+
+## Multi-tenant architecture
+
+### Boutique as tenant
+
+Every client boutique is a `Boutique` document in MongoDB. It stores:
+
+- Meta credentials: `phoneNumberId`, `wabaId`, `accessToken`
+- Business config: `businessInfo` (replaces hardcoded values in webhook.service.ts)
+- Hybrid mode: `globalMode: "auto" | "manual"`
+- Status: `"active" | "inactive" | "suspended"`
+
+### Tenant isolation
+
+All domain collections carry `boutiqueId: ObjectId (ref: Boutique)`. Every
+query MUST filter by `boutiqueId`. Resolvers receive boutique context from
+the authenticated user's associated boutique.
+
+### Conversation mode (hybrid AI/human)
+
+`conversation.mode` controls per-conversation bot behavior:
+
+- `"auto"` → Luis handles all messages for this customer (default)
+- `"manual"` → n8n skips the AI entirely; owner responds manually
+
+Set to `"manual"` automatically when Luis returns `escalate: true`.
+Reset to `"auto"` manually by the owner via SALO app.
+
+`boutique.globalMode` is a broader kill switch for the entire boutique.
+Per-conversation mode is preferred for targeted handoffs.
+
+### Webhook lookup
+
+`webhook.service.ts` reads `phoneNumberId` from the incoming n8n payload and
+calls `findBoutiqueByPhoneNumberId()` to get the boutique document. All
+downstream calls (claude.service.ts, etc.) receive `boutique.businessInfo`
+instead of hardcoded constants.
+
+### Onboarding
+
+- **Tenant #1 (Axel):** Manually onboarded. `seed-boutique.ts` creates the
+  boutique document and backfills `boutiqueId` on all existing documents.
+- **Subsequent tenants:** Onboarded via WhatsApp Embedded Signup (in development).
+  Token exchange endpoint: `POST /api/boutiques/signup`. Requires `META_APP_ID`
+  and `META_APP_SECRET` in Railway env vars.
 
 ---
 
@@ -372,12 +436,38 @@ WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS  # default 55000 — must be < n8n Wait nod
 BANK_ACCOUNT_IMAGE_URL            # Cloudinary URL for bank account image card
 ```
 
+**Optional — Embedded Signup (add before ES goes live):**
+
+```
+META_APP_ID        # Meta App ID: 2300378030444599
+                   # Required for Embedded Signup token exchange endpoint
+META_APP_SECRET    # From App Dashboard > Basic settings
+                   # Used to exchange the 30s code for a long-lived boutique token
+SYSTEM_USER_TOKEN  # System User SALO (ID: 61577448959274) master token
+                   # Used for platform-level Meta API calls (subscribe WABA, etc.)
+```
+
 **Deferred — not yet wired:**
 
 ```
 ACTIVE_PROMOTION   # Wire to env.ts as z.string().optional() when ready
                    # Used by businessInfo.activePromotion in ClaudeContext
+                   # Now stored per-boutique in boutique.businessInfo.activePromotion
 ```
+
+**Per-boutique credentials (now in MongoDB, not env vars):**
+
+After the boutiques module is deployed and `seed-boutique.ts` has run, the
+following values are stored in the `boutiques` collection per tenant.
+The env vars below are kept as FALLBACK for the first boutique only:
+
+```
+WHATSAPP_ACCESS_TOKEN   # Fallback token for tenant #1 (Axel) only
+BANK_ACCOUNT_IMAGE_URL  # Fallback bank image URL for tenant #1 only
+```
+
+For all boutiques added via Embedded Signup, credentials live exclusively
+in `boutique.accessToken` and `boutique.bankAccountImageUrl`.
 
 **CORS_ORIGINS** is computed from CORS_ORIGIN at startup:
 
@@ -504,6 +594,30 @@ Either signal skips `searchProductsByImage` and routes to receipt acknowledgment
 
 `sanitizeJsonNewlines()` — character-by-character state machine that escapes bare `\n`/`\r` inside JSON string values before `JSON.parse`. Prevents SAFE_FALLBACK when Claude generates multi-line ⭐️ summaries. Do NOT replace with a regex approach — regex only handles single newlines per string.
 
+### Markdown fence stripper
+
+`stripMarkdownFences()` — runs BEFORE `sanitizeJsonNewlines()`. Claude occasionally wraps its JSON response in ` ```json ``` ` despite the system prompt contract. `JSON.parse` fails on the backticks. This function strips the fences so the sanitizer only sees raw JSON.
+
+**Root cause confirmed:** Railway logs 2026-05-24 20:44:48 — `searchProductsForClaude` returned 2 products successfully but Claude wrapped the response in markdown fences, triggering SAFE_FALLBACK.
+
+Do NOT remove this function. Do NOT move it after `sanitizeJsonNewlines()`.
+
+### JSON reminder injection
+
+Every user message sent to Claude has a hard JSON reminder appended:
+
+```ts
+const JSON_REMINDER =
+  "\n\n⚠️ RECUERDA: Tu respuesta debe ser ÚNICAMENTE JSON puro...";
+const messageWithReminder = sanitizedMessage + JSON_REMINDER;
+```
+
+**Why:** Claude's JSON contract is defined in the system prompt. On complex multi-message buffered turns (e.g. gallery reaction + purchase confirmation + payment question), Claude occasionally abandons the JSON format entirely and responds in plain Spanish.
+
+**Root cause confirmed:** Railway logs 2026-05-25 02:24:18 — rawTextPreview showed "¡Qué bonita elección! 😊 Antes de mandarte los da…" (pure conversational text, no JSON).
+
+The reminder is injected at the message level — the last thing Claude reads before generating — making format violations much harder. Do NOT remove this injection. The customer never sees the reminder.
+
 ### Message flow
 
 ```
@@ -598,21 +712,21 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 
 ## Known technical debt (deferred)
 
-| Item                                                                  | Risk                                              | Status                              |
-| --------------------------------------------------------------------- | ------------------------------------------------- | ----------------------------------- |
-| Dedup in Extract Message uses n8n static data                         | Lost on container restart                         | Open                                |
-| `recentImageMessageIds` Set in webhook.service.ts                     | Memory growth, not horizontally scalable          | Open                                |
-| `searchProductsForClaude` color regex is unanchored                   | Regex special chars in Claude output = MongoError | Open                                |
-| `webhook.service.ts` is 1900+ lines, 7+ responsibilities              | High regression risk on any change                | Open — post-launch refactor         |
-| Products fetched before intent known                                  | Wasteful at scale                                 | Open                                |
-| `extractCartFromHistory` is regex-driven                              | Any prompt change silently regresses receipt acks | Deferred — structural fix post-demo |
-| `updateProduct` missing inventory cleanup on variant removal          | Orphaned inventory records                        | Deferred                            |
-| Server-side pagination on orders/customers/products                   | Fixed slice limits at scale                       | Deferred                            |
-| Conversation control system (bot_active/waiting_owner/human_takeover) | Owner and bot can reply simultaneously            | Deferred post-demo                  |
-| `lifetimeValue` semantics = expected revenue, not received            | Differs from dashboard cancelled-order exclusion  | Documented gap                      |
-| Token revocation not implemented                                      | Stolen refresh token valid until expiry           | Accepted for V1                     |
-| `ACTIVE_PROMOTION` env var not wired                                  | Cannot toggle a promotion without redeploy        | Deferred                            |
-| n8n `showroom_visit` has no dedicated escalation branch               | Owner sees generic text                           | Deferred                            |
+| Item                                                                  | Risk                                              | Status                                                                                                                                             |
+| --------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dedup in Extract Message uses n8n static data                         | Lost on container restart                         | Open                                                                                                                                               |
+| `recentImageMessageIds` Set in webhook.service.ts                     | Memory growth, not horizontally scalable          | Open                                                                                                                                               |
+| `searchProductsForClaude` color regex is unanchored                   | Regex special chars in Claude output = MongoError | Open                                                                                                                                               |
+| `webhook.service.ts` is 1900+ lines, 7+ responsibilities              | High regression risk on any change                | Open — post-launch refactor                                                                                                                        |
+| Products fetched before intent known                                  | Wasteful at scale                                 | Open                                                                                                                                               |
+| `extractCartFromHistory` is regex-driven                              | Any prompt change silently regresses receipt acks | Deferred — structural fix post-demo                                                                                                                |
+| `updateProduct` missing inventory cleanup on variant removal          | Orphaned inventory records                        | Deferred                                                                                                                                           |
+| Server-side pagination on orders/customers/products                   | Fixed slice limits at scale                       | Deferred                                                                                                                                           |
+| Conversation control system (bot_active/waiting_owner/human_takeover) | Owner and bot can reply simultaneously            | **In progress** — `conversation.mode` field added; n8n gate and owner notification pending                                                         |
+| `lifetimeValue` semantics = expected revenue, not received            | Differs from dashboard cancelled-order exclusion  | Documented gap                                                                                                                                     |
+| Token revocation not implemented                                      | Stolen refresh token valid until expiry           | Accepted for V1                                                                                                                                    |
+| `ACTIVE_PROMOTION` env var not wired                                  | Cannot toggle a promotion without redeploy        | Partially resolved — now stored per-boutique in MongoDB as `boutique.businessInfo.activePromotion`; webhook.service.ts must read from boutique doc |
+| n8n `showroom_visit` has no dedicated escalation branch               | Owner sees generic text                           | Deferred                                                                                                                                           |
 
 ---
 
@@ -659,3 +773,12 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 - Never pass `CORS_ORIGIN` (raw string) to `cors()` — use `CORS_ORIGINS` (typed `string[] | true`)
 - Never add a new cancellation path without running inventory restoration and LTV decrement
 - Never use `as never` casts — fix the underlying type instead
+- Never query customers, orders, conversations, products, or inventory without
+  filtering by `boutiqueId` — cross-boutique data leakage
+- Never expose `boutique.accessToken` in any GraphQL resolver response
+- Never put per-boutique config (showroomAddress, shippingPrice, etc.) back in
+  env vars — it belongs in `boutique.businessInfo` in MongoDB
+- Never add `unique: true` directly on the `phone` or `instagramHandle` fields
+  in customer.model.ts — uniqueness is scoped per boutique via compound indexes
+- Never remove `stripMarkdownFences()` from claude.service.ts
+- Never remove the `JSON_REMINDER` injection from claude.service.ts
