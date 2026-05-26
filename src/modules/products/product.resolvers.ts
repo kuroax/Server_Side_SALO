@@ -7,7 +7,7 @@ import {
   updateProduct,
   deleteProduct,
 } from '#/modules/products/product.service.js';
-import { requireRoles } from '#/shared/utils/auth.guards.js';
+import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
 
 // ─── Resolvers ────────────────────────────────────────────────────────────────
@@ -17,22 +17,33 @@ export const productResolvers = {
     product: (
       _parent: unknown,
       { id }: { id: string },
+      context: GraphQLContext,
     ) => {
-      return getProductById({ id });
+      requireAuth(context);
+      return getProductById({ id, boutiqueId: context.user!.boutiqueId });
     },
 
     productBySlug: (
       _parent: unknown,
       { slug }: { slug: string },
+      context: GraphQLContext,
     ) => {
-      return getProductBySlug(slug);
+      requireAuth(context);
+      return getProductBySlug({ slug, boutiqueId: context.user!.boutiqueId });
     },
 
     products: (
       _parent: unknown,
       { filters }: { filters?: Record<string, unknown> },
+      context: GraphQLContext,
     ) => {
-      return listProducts(filters ?? {});
+      requireAuth(context);
+      // boutiqueId is injected from context — any client-supplied boutiqueId
+      // in `filters` is overridden so callers cannot read another tenant's data.
+      return listProducts({
+        ...(filters ?? {}),
+        boutiqueId: context.user!.boutiqueId,
+      });
     },
   },
 
@@ -43,7 +54,11 @@ export const productResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN, ROLES.INVENTORY] as Role[]);
-      return createProduct(input);
+      // boutiqueId is injected from context — never accepted from client input.
+      return createProduct({
+        ...input,
+        boutiqueId: context.user!.boutiqueId,
+      });
     },
 
     updateProduct: (
@@ -52,7 +67,7 @@ export const productResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN, ROLES.INVENTORY] as Role[]);
-      return updateProduct(id, input);
+      return updateProduct(id, context.user!.boutiqueId, input);
     },
 
     deleteProduct: (
@@ -61,7 +76,7 @@ export const productResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
-      return deleteProduct({ id });
+      return deleteProduct({ id, boutiqueId: context.user!.boutiqueId });
     },
   },
 };

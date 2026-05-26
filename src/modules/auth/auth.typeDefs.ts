@@ -13,6 +13,7 @@ export const authTypeDefs = `
 
   type User {
     id: ID!
+    boutiqueId: ID!
     username: String!
     email: String
     role: Role!
@@ -33,7 +34,11 @@ export const authTypeDefs = `
 
   # ─── Inputs ─────────────────────────────────────────────────────────────────
 
+  # boutiqueId is required only on the bootstrap call (first owner).
+  # For subsequent registrations the resolver overrides this with the caller's
+  # boutiqueId, so any client-supplied value here is ignored.
   input RegisterInput {
+    boutiqueId: ID
     username: String!
     password: String!
     email: String

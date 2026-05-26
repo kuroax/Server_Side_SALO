@@ -19,6 +19,7 @@ import {
 
 type InventoryLike = {
   _id: { toString(): string };
+  boutiqueId: { toString(): string };
   productId: { toString(): string };
   size: string;
   color: string;
@@ -63,20 +64,26 @@ const isDuplicateKeyError = (err: unknown): boolean => {
 // $setOnInsert and $set are kept mutually exclusive for lowStockThreshold
 // to avoid MongoDB conflict errors
 export const addStock = async (input: unknown): Promise<InventoryResponse> => {
-  const { productId, size, color, quantity, lowStockThreshold } =
+  const { boutiqueId, productId, size, color, quantity, lowStockThreshold } =
     addStockSchema.parse(input);
 
   const threshold = lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
+  const boutiqueObjectId = new Types.ObjectId(boutiqueId);
 
   try {
+    // Tenant scope is enforced via boutiqueId in the filter — a stock add for
+    // a product belonging to another boutique will create a new inventory
+    // record (matched by the leading boutiqueId in the filter) instead of
+    // mutating the wrong tenant's data.
     const doc = await InventoryModel.findOneAndUpdate(
-      { productId, size, color },
+      { boutiqueId: boutiqueObjectId, productId, size, color },
       {
         $inc: { quantity },
         // $setOnInsert only fires on document creation
         // lowStockThreshold included here only when NOT explicitly provided
         // prevents conflict with $set below
         $setOnInsert: {
+          boutiqueId: boutiqueObjectId,
           productId,
           size,
           color,
@@ -96,7 +103,7 @@ export const addStock = async (input: unknown): Promise<InventoryResponse> => {
     }
 
     logger.info(
-      { productId, size, color, added: quantity, total: doc.quantity },
+      { boutiqueId, productId, size, color, added: quantity, total: doc.quantity },
       'Stock added',
     );
 
@@ -115,10 +122,13 @@ export const addStock = async (input: unknown): Promise<InventoryResponse> => {
 
 // Atomic decrement with conditional filter — blocks at zero, safe under concurrency
 export const removeStock = async (input: unknown): Promise<InventoryResponse> => {
-  const { productId, size, color, quantity } = removeStockSchema.parse(input);
+  const { boutiqueId, productId, size, color, quantity } = removeStockSchema.parse(input);
+
+  const boutiqueObjectId = new Types.ObjectId(boutiqueId);
 
   const doc = await InventoryModel.findOneAndUpdate(
     {
+      boutiqueId: boutiqueObjectId,
       productId,
       size,
       color,
@@ -129,7 +139,12 @@ export const removeStock = async (input: unknown): Promise<InventoryResponse> =>
   ).lean<InventoryLike>();
 
   if (!doc) {
-    const current = await InventoryModel.findOne({ productId, size, color })
+    const current = await InventoryModel.findOne({
+      boutiqueId: boutiqueObjectId,
+      productId,
+      size,
+      color,
+    })
       .select('quantity')
       .lean<{ quantity: number } | null>();
 
@@ -143,7 +158,7 @@ export const removeStock = async (input: unknown): Promise<InventoryResponse> =>
   }
 
   logger.info(
-    { productId, size, color, removed: quantity, remaining: doc.quantity },
+    { boutiqueId, productId, size, color, removed: quantity, remaining: doc.quantity },
     'Stock removed',
   );
 
@@ -155,9 +170,12 @@ export const removeStock = async (input: unknown): Promise<InventoryResponse> =>
 export const getProductInventory = async (
   input: unknown,
 ): Promise<InventoryResponse[]> => {
-  const { productId } = getProductInventorySchema.parse(input);
+  const { boutiqueId, productId } = getProductInventorySchema.parse(input);
 
-  const docs = await InventoryModel.find({ productId })
+  const docs = await InventoryModel.find({
+    boutiqueId: new Types.ObjectId(boutiqueId),
+    productId,
+  })
     .sort({ size: 1, color: 1 })
     .lean<InventoryLike[]>();
 
@@ -172,9 +190,13 @@ export const getProductInventory = async (
 export const getLowStock = async (
   input: unknown,
 ): Promise<InventoryResponse[]> => {
-  const { productId } = getLowStockSchema.parse(input);
+  const { boutiqueId, productId } = getLowStockSchema.parse(input);
 
+  // boutiqueId is in the $match stage so the aggregation scans only this
+  // tenant's inventory before the lookup join — also relies on the
+  // { boutiqueId, productId } index for the initial scan.
   const matchStage: Record<string, unknown> = {
+    boutiqueId: new Types.ObjectId(boutiqueId),
     $expr: { $lte: ['$quantity', '$lowStockThreshold'] },
   };
 
@@ -205,11 +227,11 @@ export const getLowStock = async (
 export const updateThreshold = async (
   input: unknown,
 ): Promise<InventoryResponse> => {
-  const { productId, size, color, lowStockThreshold } =
+  const { boutiqueId, productId, size, color, lowStockThreshold } =
     updateThresholdSchema.parse(input);
 
   const doc = await InventoryModel.findOneAndUpdate(
-    { productId, size, color },
+    { boutiqueId: new Types.ObjectId(boutiqueId), productId, size, color },
     { $set: { lowStockThreshold } },
     { new: true, runValidators: true },
   ).lean<InventoryLike>();
@@ -219,7 +241,7 @@ export const updateThreshold = async (
   }
 
   logger.info(
-    { productId, size, color, lowStockThreshold },
+    { boutiqueId, productId, size, color, lowStockThreshold },
     'Low stock threshold updated',
   );
 

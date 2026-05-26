@@ -43,13 +43,18 @@ export const authResolvers = {
       if (userCount === 0) {
         // Bootstrap — first owner, no auth required.
         // callerRole null signals bootstrap path to the service.
+        // boutiqueId MUST be supplied in input — the boutique is created
+        // out-of-band by seed-boutique.ts before the first user registers.
         return register(input, null);
       }
 
       // All subsequent registrations require owner or admin at the resolver layer.
       // The service enforces this independently as a second layer of defence.
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
-      return register(input, context.user!.role as Role);
+      // Override any client-supplied boutiqueId with the caller's own boutiqueId.
+      // Prevents an admin from one boutique creating staff for another boutique.
+      const enrichedInput = { ...input, boutiqueId: context.user!.boutiqueId };
+      return register(enrichedInput, context.user!.role as Role);
     },
 
     login: async (

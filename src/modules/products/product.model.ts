@@ -36,6 +36,14 @@ const variantSchema = new Schema(
 
 const productSchema = new Schema(
   {
+    // Tenant scope — every product belongs to exactly one boutique.
+    // All queries must filter by this field; slug uniqueness is scoped
+    // per-boutique via the compound index below.
+    boutiqueId: {
+      type: Schema.Types.ObjectId,
+      ref: "Boutique",
+      required: [true, "Boutique ID is required"],
+    },
     name: {
       type: String,
       required: [true, "Product name is required"],
@@ -43,10 +51,12 @@ const productSchema = new Schema(
       minlength: [2, "Product name must be at least 2 characters"],
       maxlength: [120, "Product name must be at most 120 characters"],
     },
+    // unique is NOT set here — slug uniqueness is scoped to boutique via the
+    // compound { boutiqueId, slug } index below. A global unique would prevent
+    // two boutiques from owning a product with the same slug.
     slug: {
       type: String,
       required: [true, "Slug is required"],
-      unique: true,
       trim: true,
       lowercase: true,
     },
@@ -141,16 +151,24 @@ const productSchema = new Schema(
 
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
-// slug index is handled automatically by unique: true
+// Per-boutique unique slug — replaces the old global { slug: unique }.
+// Lets two boutiques each own a product with the same slug while still
+// preventing duplicates within a single boutique.
+productSchema.index({ boutiqueId: 1, slug: 1 }, { unique: true });
 
 // Used by listProducts (admin filtering by gender/category/subcategory).
 // Not used by $text search queries — those use the text index below.
-productSchema.index({ gender: 1, categoryGroup: 1, subcategory: 1 });
+productSchema.index({
+  boutiqueId: 1,
+  gender: 1,
+  categoryGroup: 1,
+  subcategory: 1,
+});
 
 // Used as a pre-filter alongside $text queries in searchProductsForClaude.
 // MongoDB text indexes don't support compound field ordering with $text,
 // so this scalar index is the correct approach for status filtering.
-productSchema.index({ status: 1 });
+productSchema.index({ boutiqueId: 1, status: 1 });
 
 // NOTE: { brand: 1 } scalar index intentionally omitted.
 // brand is included in the text index below with weight 8, which already

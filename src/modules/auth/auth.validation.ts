@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ROLES } from '#/modules/auth/auth.types.js';
+import { objectIdSchema } from '#/shared/validation/common.validation.js';
 
 // ─── Shared Rules ─────────────────────────────────────────────────────────────
 
@@ -42,7 +43,13 @@ export type LoginSchema = z.infer<typeof loginSchema>;
 
 // ─── Register ─────────────────────────────────────────────────────────────────
 
+// boutiqueId is required to scope the new user to a tenant.
+// Bootstrap callers MUST supply it (the boutique must already exist via
+// seed-boutique.ts). For non-bootstrap registrations, the resolver overrides
+// any client-supplied boutiqueId with the caller's own boutiqueId, preventing
+// cross-tenant user creation.
 export const registerSchema = z.object({
+  boutiqueId: objectIdSchema,
   username: usernameSchema,
   email: emailSchema,
   password: passwordSchema,

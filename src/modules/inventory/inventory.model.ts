@@ -5,6 +5,16 @@ import { DEFAULT_LOW_STOCK_THRESHOLD } from '#/modules/inventory/inventory.const
 
 const inventorySchema = new Schema(
   {
+    // Tenant scope — denormalized from product for direct boutique-level
+    // inventory queries (e.g. dashboard "all stock for this boutique") without
+    // joining through products. The { productId, size, color } unique index
+    // below is already implicitly boutique-scoped via productId.
+    boutiqueId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Boutique',
+      required: [true, 'Boutique ID is required'],
+    },
+
     productId: {
       type: Schema.Types.ObjectId,
       ref: 'Product',
@@ -70,8 +80,14 @@ inventorySchema.pre('save', async function () {
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
 // Unique compound index — one record per product variant
-// The leftmost prefix { productId } also covers single-field productId queries
+// The leftmost prefix { productId } also covers single-field productId queries.
+// Implicitly boutique-scoped because productId references a Product that
+// belongs to one boutique, so adding boutiqueId here would be redundant.
 inventorySchema.index({ productId: 1, size: 1, color: 1 }, { unique: true });
+
+// Supports queries like "all inventory for this boutique" directly, without
+// having to join through the products collection first.
+inventorySchema.index({ boutiqueId: 1, productId: 1 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

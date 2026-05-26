@@ -62,6 +62,7 @@ export const generateTokens = (payload: JWTPayload) => ({
 
 export const toAuthUser = (user: IUserDocument): SafeUser => ({
   id: user._id.toString(),
+  boutiqueId: user.boutiqueId.toString(),
   username: user.username,
   email: user.email,
   role: user.role,

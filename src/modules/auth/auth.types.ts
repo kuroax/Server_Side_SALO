@@ -1,3 +1,5 @@
+import type { Types } from 'mongoose';
+
 // ─── Roles ────────────────────────────────────────────────────────────────────
 
 export const ROLES = {
@@ -13,6 +15,7 @@ export type Role = (typeof ROLES)[keyof typeof ROLES];
 // ─── User ─────────────────────────────────────────────────────────────────────
 
 export type IUser = {
+  boutiqueId: Types.ObjectId;
   username: string;
   email?: string;
   password: string;
@@ -23,6 +26,7 @@ export type IUser = {
 // createdAt and updatedAt serialized as ISO strings before returning to client
 export type SafeUser = {
   id: string;
+  boutiqueId: string;
   username: string;
   email?: string;
   role: Role;
@@ -46,4 +50,5 @@ export type RefreshPayload = {
 export type JWTPayload = {
   id: string;
   role: Role;
+  boutiqueId: string;
 };

@@ -4,6 +4,7 @@ import {
   SIZES,
   PRODUCT_STATUS,
 } from "#/modules/products/product.types.js";
+import { objectIdSchema } from "#/shared/validation/common.validation.js";
 
 // ─── Enum Arrays ──────────────────────────────────────────────────────────────
 
@@ -112,6 +113,10 @@ const searchKeywordsSchema = z
 // ─── Create Product ───────────────────────────────────────────────────────────
 
 export const createProductSchema = z.object({
+  // boutiqueId is injected by the resolver from context.user.boutiqueId —
+  // never accepted from client input directly. The schema validates the
+  // shape so the service can trust it.
+  boutiqueId: objectIdSchema,
   name: nameSchema,
   description: descriptionSchema,
   price: priceSchema,
@@ -146,8 +151,18 @@ export const updateProductSchema = z.object({
 
 // ─── Get / Delete Product by ID ───────────────────────────────────────────────
 
+// boutiqueId is required so every single-product lookup filters by tenant —
+// prevents cross-boutique reads or accidental updates if an ID is guessed.
 export const productIdSchema = z.object({
   id: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid product ID format"),
+  boutiqueId: objectIdSchema,
+});
+
+// Slug lookups are also scoped per boutique — { boutiqueId, slug } is the
+// compound unique index on the product collection.
+export const productSlugSchema = z.object({
+  slug: z.string().trim().min(1, "Slug cannot be empty").toLowerCase(),
+  boutiqueId: objectIdSchema,
 });
 
 // ─── List Products (filters + pagination) ────────────────────────────────────
@@ -159,6 +174,9 @@ const filterStringSchema = (max: number) =>
   z.string().trim().min(1).max(max).optional();
 
 export const listProductsSchema = z.object({
+  // boutiqueId is injected by the resolver from context — always required
+  // so listProducts never returns cross-boutique results.
+  boutiqueId: objectIdSchema,
   gender: genderSchema.optional(),
   categoryGroup: filterStringSchema(60),
   subcategory: filterStringSchema(60),

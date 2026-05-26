@@ -1,9 +1,11 @@
+import { Types } from "mongoose";
 import { ProductModel } from "#/modules/products/product.model.js";
 import type { ProductDocument } from "#/modules/products/product.model.js";
 import {
   createProductSchema,
   updateProductSchema,
   productIdSchema,
+  productSlugSchema,
   listProductsSchema,
 } from "#/modules/products/product.validation.js";
 import type { ProductResponse, ProductStatus, Gender } from "#/modules/products/product.types.js";
@@ -53,6 +55,7 @@ const escapeRegex = (value: string): string =>
 
 const buildUniqueSlug = async (
   name: string,
+  boutiqueId: string,
   excludeId?: string,
 ): Promise<string> => {
   const base = generateSlug(name);
@@ -64,7 +67,13 @@ const buildUniqueSlug = async (
   }
 
   const regex = new RegExp(`^${escapeRegex(base)}(-\\d+)?$`);
-  const query: Record<string, unknown> = { slug: { $regex: regex } };
+  // Scope slug uniqueness to the boutique — two boutiques can each own
+  // a product with the same slug; the compound { boutiqueId, slug } unique
+  // index on the model enforces this.
+  const query: Record<string, unknown> = {
+    boutiqueId: new Types.ObjectId(boutiqueId),
+    slug: { $regex: regex },
+  };
   if (excludeId) {
     query._id = { $ne: excludeId };
   }
@@ -128,11 +137,15 @@ const toProductResponse = (product: ProductLike): ProductResponse => ({
  */
 const syncInventoryForVariants = async (
   productId: { toString(): string },
+  boutiqueId: string,
   variants: { size: string; color: string }[],
 ): Promise<void> => {
   if (!variants || variants.length === 0) return;
 
+  const boutiqueObjectId = new Types.ObjectId(boutiqueId);
+
   const inventoryDocs = variants.map((variant) => ({
+    boutiqueId: boutiqueObjectId,
     productId,
     size: variant.size,
     color: variant.color,
@@ -197,7 +210,7 @@ export const createProduct = async (
   input: unknown,
 ): Promise<ProductResponse> => {
   const validated = createProductSchema.parse(input);
-  const slug = await buildUniqueSlug(validated.name);
+  const slug = await buildUniqueSlug(validated.name, validated.boutiqueId);
 
   const searchKeywords = buildSearchKeywords(
     validated.subcategory,
@@ -210,6 +223,7 @@ export const createProduct = async (
   try {
     product = await ProductModel.create({
       ...validated,
+      boutiqueId: new Types.ObjectId(validated.boutiqueId),
       status: validated.status as ProductStatus,
       gender: validated.gender as Gender,
       slug,
@@ -229,10 +243,14 @@ export const createProduct = async (
   }
 
   // Auto-create inventory records (quantity 0) for each variant
-  await syncInventoryForVariants(product._id, validated.variants ?? []);
+  await syncInventoryForVariants(
+    product._id,
+    validated.boutiqueId,
+    validated.variants ?? [],
+  );
 
   logger.info(
-    { productId: product._id, slug, searchKeywords },
+    { productId: product._id, boutiqueId: validated.boutiqueId, slug, searchKeywords },
     "Product created",
   );
 
@@ -244,9 +262,14 @@ export const createProduct = async (
 export const getProductById = async (
   input: unknown,
 ): Promise<ProductResponse> => {
-  const { id } = productIdSchema.parse(input);
+  const { id, boutiqueId } = productIdSchema.parse(input);
 
-  const product = await ProductModel.findById(id).lean<ProductLike>();
+  // findOne with boutiqueId in the filter — never findById alone — so a
+  // product belonging to another boutique returns NotFound instead of leaking.
+  const product = await ProductModel.findOne({
+    _id: id,
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  }).lean<ProductLike>();
 
   if (!product) {
     throw new NotFoundError("Product not found");
@@ -258,16 +281,13 @@ export const getProductById = async (
 // ─── Get by Slug ──────────────────────────────────────────────────────────────
 
 export const getProductBySlug = async (
-  slug: string,
+  input: unknown,
 ): Promise<ProductResponse> => {
-  const normalizedSlug = slug.trim().toLowerCase();
-
-  if (!normalizedSlug) {
-    throw new BadRequestError("Slug cannot be empty");
-  }
+  const { slug, boutiqueId } = productSlugSchema.parse(input);
 
   const product = await ProductModel.findOne({
-    slug: normalizedSlug,
+    boutiqueId: new Types.ObjectId(boutiqueId),
+    slug,
   }).lean<ProductLike>();
 
   if (!product) {
@@ -288,10 +308,15 @@ export const listProducts = async (
   limit: number;
   totalPages: number;
 }> => {
-  const { page, limit, gender, categoryGroup, subcategory, brand, status } =
+  const { boutiqueId, page, limit, gender, categoryGroup, subcategory, brand, status } =
     listProductsSchema.parse(input);
 
-  const filter: Record<string, unknown> = {};
+  // boutiqueId is the first filter — every list call is scoped to a tenant
+  // and the { boutiqueId, ... } compound indexes on the product model are
+  // built with boutiqueId as the leading field.
+  const filter: Record<string, unknown> = {
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  };
   if (gender) filter.gender = gender;
   if (categoryGroup) filter.categoryGroup = categoryGroup;
   if (subcategory) filter.subcategory = subcategory;
@@ -326,9 +351,11 @@ export const listProducts = async (
 
 export const updateProduct = async (
   id: unknown,
+  boutiqueId: string,
   input: unknown,
 ): Promise<ProductResponse> => {
-  const { id: productId } = productIdSchema.parse({ id });
+  const { id: productId, boutiqueId: validatedBoutiqueId } =
+    productIdSchema.parse({ id, boutiqueId });
   const validated = updateProductSchema.parse(input);
 
   // Check is post-parse intentionally — Zod strips unknown fields and applies
@@ -340,6 +367,13 @@ export const updateProduct = async (
 
   const updateData: Record<string, unknown> = { ...validated };
 
+  // Tenant-scoped filter — used by every read/write below so cross-boutique
+  // IDs return NotFound instead of mutating the wrong tenant's data.
+  const tenantFilter = {
+    _id: productId,
+    boutiqueId: new Types.ObjectId(validatedBoutiqueId),
+  };
+
   // Determine if we need to read the current document.
   // Consolidate into ONE read to avoid reading inconsistent state across
   // two separate queries (race condition if another update fires between them).
@@ -350,7 +384,7 @@ export const updateProduct = async (
     validated.searchKeywords !== undefined;
 
   if (needsSlugRebuild || needsKeywordRebuild) {
-    const current = await ProductModel.findById(productId)
+    const current = await ProductModel.findOne(tenantFilter)
       .select("name subcategory categoryGroup searchKeywords")
       .lean();
 
@@ -358,7 +392,11 @@ export const updateProduct = async (
 
     // Slug rebuild — only if name actually changed
     if (needsSlugRebuild && validated.name !== current.name) {
-      updateData.slug = await buildUniqueSlug(validated.name!, productId);
+      updateData.slug = await buildUniqueSlug(
+        validated.name!,
+        validatedBoutiqueId,
+        productId,
+      );
     }
 
     // Keyword rebuild — merge new values with current stored values
@@ -378,8 +416,8 @@ export const updateProduct = async (
     }
   }
 
-  const product = await ProductModel.findByIdAndUpdate(
-    productId,
+  const product = await ProductModel.findOneAndUpdate(
+    tenantFilter,
     { $set: updateData },
     { returnDocument: "after", runValidators: true },
   ).lean<ProductLike>();
@@ -390,11 +428,15 @@ export const updateProduct = async (
 
   // If variants were updated, sync inventory for any new ones
   if (validated.variants) {
-    await syncInventoryForVariants(product._id, validated.variants);
+    await syncInventoryForVariants(
+      product._id,
+      validatedBoutiqueId,
+      validated.variants,
+    );
   }
 
   logger.info(
-    { productId, updatedFields: Object.keys(validated) },
+    { productId, boutiqueId: validatedBoutiqueId, updatedFields: Object.keys(validated) },
     "Product updated",
   );
 
@@ -404,10 +446,18 @@ export const updateProduct = async (
 // ─── Delete ───────────────────────────────────────────────────────────────────
 
 export const deleteProduct = async (input: unknown): Promise<boolean> => {
-  const { id } = productIdSchema.parse(input);
+  const { id, boutiqueId } = productIdSchema.parse(input);
 
-  // Verify product exists before deleting anything
-  const product = await ProductModel.findById(id).select("_id").lean();
+  const boutiqueObjectId = new Types.ObjectId(boutiqueId);
+
+  // Verify product exists in this boutique before deleting anything —
+  // findOne with boutiqueId scoped filter prevents cross-tenant deletes.
+  const product = await ProductModel.findOne({
+    _id: id,
+    boutiqueId: boutiqueObjectId,
+  })
+    .select("_id")
+    .lean();
   if (!product) {
     throw new NotFoundError("Product not found");
   }
@@ -416,17 +466,23 @@ export const deleteProduct = async (input: unknown): Promise<boolean> => {
   // product still exists and the operation can be retried cleanly.
   // Reversing this order would delete the product first, leaving orphaned
   // inventory records with no recovery path.
-  await InventoryModel.deleteMany({ productId: id }).catch((err) => {
+  await InventoryModel.deleteMany({
+    productId: id,
+    boutiqueId: boutiqueObjectId,
+  }).catch((err) => {
     logger.warn(
-      { productId: id, error: err },
+      { productId: id, boutiqueId, error: err },
       "Failed to clean up inventory records before product deletion — aborting delete",
     );
     throw err; // Re-throw so product is NOT deleted if inventory cleanup fails
   });
 
-  await ProductModel.findByIdAndDelete(id);
+  await ProductModel.findOneAndDelete({
+    _id: id,
+    boutiqueId: boutiqueObjectId,
+  });
 
-  logger.info({ productId: id }, "Product deleted");
+  logger.info({ productId: id, boutiqueId }, "Product deleted");
 
   return true;
 };

@@ -118,7 +118,13 @@ src/
 │       └── sentImage.model.ts        # Maps WhatsApp message IDs to product captions
 │                                     # Used for gallery reply product resolution
 ├── scripts/
-│   └── backfill-inventory.ts         # One-off data migration script
+│   ├── backfill-inventory.ts         # One-off data migration script
+│   └── seed-boutique.ts              # Multi-tenant migration — creates first boutique,
+│                                     # backfills boutiqueId on all collections.
+│                                     # Run: npx tsx src/scripts/seed-boutique.ts
+│                                     # Uses { strict: false } for Product/Inventory/Order
+│                                     # because those models lacked boutiqueId when the
+│                                     # script was first created. Safe to re-run (idempotent).
 └── shared/
     ├── errors/                       # Typed error classes (AppError hierarchy)
     ├── models/
@@ -166,8 +172,10 @@ Every client boutique is a `Boutique` document in MongoDB. It stores:
 ### Tenant isolation
 
 All domain collections carry `boutiqueId: ObjectId (ref: Boutique)`. Every
-query MUST filter by `boutiqueId`. Resolvers receive boutique context from
-the authenticated user's associated boutique.
+query MUST filter by `boutiqueId`. Resolvers receive `boutiqueId` from
+`context.user.boutiqueId` (signed into the JWT at login) — never from client
+GraphQL arguments. Passing `boutiqueId` as a client argument is a security
+vulnerability that allows cross-tenant data access.
 
 ### Conversation mode (hybrid AI/human)
 
@@ -217,6 +225,38 @@ const ORDER_WRITE_ROLES: Role[] = ["owner", "admin", "sales"];
 const ORDER_CANCEL_ROLES: Role[] = ["owner", "admin"];
 const ORDER_DELETE_ROLES: Role[] = ["owner"];
 ```
+
+### JWT payload — includes boutiqueId
+
+```ts
+type JWTPayload = {
+  id: string;
+  role: Role;
+  boutiqueId: string; // added for multi-tenancy — resolvers read from here
+};
+```
+
+`boutiqueId` is signed into the JWT at login. Resolvers extract it from
+`context.user.boutiqueId` — they never accept it as a client argument.
+
+**Deployment note:** All existing JWTs issued before this change lack
+`boutiqueId`. Users must log out and log back in once after this is deployed
+to get a valid token. For the pilot (one user — Axel), this is acceptable.
+
+**User backfill required before deploying:** Axel's user document in MongoDB
+must have `boutiqueId` set before the first login attempt, otherwise the token
+will carry `boutiqueId: undefined` and every product/inventory query will fail.
+Run this in MongoDB Compass or Atlas before deploying:
+
+```js
+db.users.updateMany(
+  { boutiqueId: { $exists: false } },
+  { $set: { boutiqueId: ObjectId("6a15631c074684288beaa0f6") } },
+);
+```
+
+Replace the ObjectId with the value printed by `seed-boutique.ts`
+(also saved as `SALO_BOUTIQUE_ID` in Railway).
 
 ---
 
@@ -712,21 +752,23 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 
 ## Known technical debt (deferred)
 
-| Item                                                                  | Risk                                              | Status                                                                                                                                             |
-| --------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Dedup in Extract Message uses n8n static data                         | Lost on container restart                         | Open                                                                                                                                               |
-| `recentImageMessageIds` Set in webhook.service.ts                     | Memory growth, not horizontally scalable          | Open                                                                                                                                               |
-| `searchProductsForClaude` color regex is unanchored                   | Regex special chars in Claude output = MongoError | Open                                                                                                                                               |
-| `webhook.service.ts` is 1900+ lines, 7+ responsibilities              | High regression risk on any change                | Open — post-launch refactor                                                                                                                        |
-| Products fetched before intent known                                  | Wasteful at scale                                 | Open                                                                                                                                               |
-| `extractCartFromHistory` is regex-driven                              | Any prompt change silently regresses receipt acks | Deferred — structural fix post-demo                                                                                                                |
-| `updateProduct` missing inventory cleanup on variant removal          | Orphaned inventory records                        | Deferred                                                                                                                                           |
-| Server-side pagination on orders/customers/products                   | Fixed slice limits at scale                       | Deferred                                                                                                                                           |
-| Conversation control system (bot_active/waiting_owner/human_takeover) | Owner and bot can reply simultaneously            | **In progress** — `conversation.mode` field added; n8n gate and owner notification pending                                                         |
-| `lifetimeValue` semantics = expected revenue, not received            | Differs from dashboard cancelled-order exclusion  | Documented gap                                                                                                                                     |
-| Token revocation not implemented                                      | Stolen refresh token valid until expiry           | Accepted for V1                                                                                                                                    |
-| `ACTIVE_PROMOTION` env var not wired                                  | Cannot toggle a promotion without redeploy        | Partially resolved — now stored per-boutique in MongoDB as `boutique.businessInfo.activePromotion`; webhook.service.ts must read from boutique doc |
-| n8n `showroom_visit` has no dedicated escalation branch               | Owner sees generic text                           | Deferred                                                                                                                                           |
+| Item                                                                                                                 | Risk                                                                                                                         | Status                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dedup in Extract Message uses n8n static data                                                                        | Lost on container restart                                                                                                    | Open                                                                                                                                               |
+| `recentImageMessageIds` Set in webhook.service.ts                                                                    | Memory growth, not horizontally scalable                                                                                     | Open                                                                                                                                               |
+| `searchProductsForClaude` color regex is unanchored                                                                  | Regex special chars in Claude output = MongoError                                                                            | Open                                                                                                                                               |
+| `webhook.service.ts` is 1900+ lines, 7+ responsibilities                                                             | High regression risk on any change                                                                                           | Open — post-launch refactor                                                                                                                        |
+| Products fetched before intent known                                                                                 | Wasteful at scale                                                                                                            | Open                                                                                                                                               |
+| `extractCartFromHistory` is regex-driven                                                                             | Any prompt change silently regresses receipt acks                                                                            | Deferred — structural fix post-demo                                                                                                                |
+| `updateProduct` missing inventory cleanup on variant removal                                                         | Orphaned inventory records                                                                                                   | Deferred                                                                                                                                           |
+| Server-side pagination on orders/customers/products                                                                  | Fixed slice limits at scale                                                                                                  | Deferred                                                                                                                                           |
+| Conversation control system (bot_active/waiting_owner/human_takeover)                                                | Owner and bot can reply simultaneously                                                                                       | **In progress** — `conversation.mode` field added; n8n gate and owner notification pending                                                         |
+| `lifetimeValue` semantics = expected revenue, not received                                                           | Differs from dashboard cancelled-order exclusion                                                                             | Documented gap                                                                                                                                     |
+| Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                      | Accepted for V1                                                                                                                                    |
+| `ACTIVE_PROMOTION` env var not wired                                                                                 | Cannot toggle a promotion without redeploy                                                                                   | Partially resolved — now stored per-boutique in MongoDB as `boutique.businessInfo.activePromotion`; webhook.service.ts must read from boutique doc |
+| n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                      | Deferred                                                                                                                                           |
+| `webhook.service.ts` and `order.service.ts` use `ProductModel`/`InventoryModel` directly without `boutiqueId` filter | Bot and order logic will cross boutique boundaries when tenant #2 is onboarded                                               | **Must fix before onboarding tenant #2**                                                                                                           |
+| `productInventory` GraphQL query is now authenticated (requires JWT)                                                 | Any prior unauthenticated caller would break — confirmed safe: bot uses `webhook.service.ts` directly, not GraphQL resolvers | Resolved — confirmed safe                                                                                                                          |
 
 ---
 
@@ -775,6 +817,8 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 - Never use `as never` casts — fix the underlying type instead
 - Never query customers, orders, conversations, products, or inventory without
   filtering by `boutiqueId` — cross-boutique data leakage
+- Never accept `boutiqueId` as a GraphQL argument from the client — always
+  read it from `context.user.boutiqueId` (signed into JWT at login)
 - Never expose `boutique.accessToken` in any GraphQL resolver response
 - Never put per-boutique config (showroomAddress, shippingPrice, etc.) back in
   env vars — it belongs in `boutique.businessInfo` in MongoDB

@@ -16,6 +16,11 @@ export type IUserDocument = HydratedDocument<IUserWithTimestamps>;
 
 const userSchema = new Schema<IUserWithTimestamps>(
   {
+    boutiqueId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Boutique',
+      required: [true, 'Boutique ID is required'],
+    },
     username: {
       type: String,
       required: true,

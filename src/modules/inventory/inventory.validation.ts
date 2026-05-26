@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '#/modules/inventory/inventory.constants.js';
+import { objectIdSchema } from '#/shared/validation/common.validation.js';
 
 // ─── Reusable Fields ──────────────────────────────────────────────────────────
 
@@ -31,8 +32,10 @@ const thresholdField = z
 
 // ─── Inventory Key ────────────────────────────────────────────────────────────
 
-// Shared base for all variant-targeted operations
+// Shared base for all variant-targeted operations. boutiqueId is injected by
+// the resolver from context — never accepted from client input directly.
 const inventoryKeySchema = z.object({
+  boutiqueId: objectIdSchema,
   productId: productIdField,
   size: sizeField,
   color: colorField,
@@ -55,12 +58,14 @@ export const removeStockSchema = inventoryKeySchema.extend({
 // ─── Get Product Inventory ────────────────────────────────────────────────────
 
 export const getProductInventorySchema = z.object({
+  boutiqueId: objectIdSchema,
   productId: productIdField,
 });
 
 // ─── Get Low Stock ────────────────────────────────────────────────────────────
 
 export const getLowStockSchema = z.object({
+  boutiqueId: objectIdSchema,
   productId: productIdField.optional(),
 });
 

@@ -67,11 +67,13 @@ type CollectionBackfill = {
 const backfills: CollectionBackfill[] = [
   {
     name: "Product",
-    count: () => ProductModel.countDocuments({ boutiqueId: { $exists: false } }),
+    count: () =>
+      ProductModel.countDocuments({ boutiqueId: { $exists: false } }),
     backfill: async (boutiqueId) => {
       const result = await ProductModel.updateMany(
         { boutiqueId: { $exists: false } },
         { $set: { boutiqueId } },
+        { strict: false },
       );
       return result.modifiedCount;
     },
@@ -84,6 +86,7 @@ const backfills: CollectionBackfill[] = [
       const result = await InventoryModel.updateMany(
         { boutiqueId: { $exists: false } },
         { $set: { boutiqueId } },
+        { strict: false },
       );
       return result.modifiedCount;
     },
@@ -119,6 +122,7 @@ const backfills: CollectionBackfill[] = [
       const result = await OrderModel.updateMany(
         { boutiqueId: { $exists: false } },
         { $set: { boutiqueId } },
+        { strict: false },
       );
       return result.modifiedCount;
     },

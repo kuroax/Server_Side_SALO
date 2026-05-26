@@ -1,3 +1,4 @@
+import { Types } from 'mongoose';
 import { UserModel } from '#/modules/auth/auth.model.js';
 import {
   loginSchema,
@@ -82,19 +83,21 @@ export const register = async (
   const hashed = await hashPassword(validated.password);
 
   const user = await UserModel.create({
-    username: validated.username,
-    email:    validated.email,
-    password: hashed,
-    role:     validated.role as Role,
+    boutiqueId: new Types.ObjectId(validated.boutiqueId),
+    username:   validated.username,
+    email:      validated.email,
+    password:   hashed,
+    role:       validated.role as Role,
   });
 
   const payload: JWTPayload = {
-    id:   user._id.toString(),
-    role: user.role,
+    id:         user._id.toString(),
+    role:       user.role,
+    boutiqueId: user.boutiqueId.toString(),
   };
 
   logger.info(
-    { userId: user._id, role: user.role, createdBy: callerRole ?? 'bootstrap' },
+    { userId: user._id, boutiqueId: user.boutiqueId, role: user.role, createdBy: callerRole ?? 'bootstrap' },
     'User registered',
   );
 
@@ -128,13 +131,14 @@ export const login = async (input: unknown): Promise<AuthPayload> => {
   }
 
   const payload: JWTPayload = {
-    id:   user._id.toString(),
-    role: user.role,
+    id:         user._id.toString(),
+    role:       user.role,
+    boutiqueId: user.boutiqueId.toString(),
   };
 
   const { accessToken, refreshToken } = generateTokens(payload);
 
-  logger.info({ userId: user._id, role: user.role }, 'User logged in');
+  logger.info({ userId: user._id, role: user.role, boutiqueId: user.boutiqueId }, 'User logged in');
 
   return {
     accessToken,
@@ -167,8 +171,9 @@ export const refreshToken = async (input: unknown): Promise<RefreshPayload> => {
   // for full server-side revocation. Implement alongside frontend silent refresh.
 
   const accessToken = signAccessToken({
-    id:   user._id.toString(),
-    role: user.role,
+    id:         user._id.toString(),
+    role:       user.role,
+    boutiqueId: user.boutiqueId.toString(),
   });
 
   logger.info({ userId: user._id }, 'Access token refreshed');
@@ -235,16 +240,17 @@ export const listUsers = async (
     _id: { $ne: callerId }, // exclude the caller from the list
   })
     .sort({ createdAt: 1 })
-    .lean<{ _id: { toString(): string }; username: string; email?: string; role: Role; isActive: boolean; createdAt: Date; updatedAt: Date }[]>();
+    .lean<{ _id: { toString(): string }; boutiqueId: { toString(): string }; username: string; email?: string; role: Role; isActive: boolean; createdAt: Date; updatedAt: Date }[]>();
 
   return users.map((u) => ({
-    id:        u._id.toString(),
-    username:  u.username,
-    email:     u.email ?? undefined,
-    role:      u.role,
-    isActive:  u.isActive,
-    createdAt: u.createdAt.toISOString(),
-    updatedAt: u.updatedAt.toISOString(),
+    id:         u._id.toString(),
+    boutiqueId: u.boutiqueId.toString(),
+    username:   u.username,
+    email:      u.email ?? undefined,
+    role:       u.role,
+    isActive:   u.isActive,
+    createdAt:  u.createdAt.toISOString(),
+    updatedAt:  u.updatedAt.toISOString(),
   }));
 };
 
