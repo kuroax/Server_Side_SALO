@@ -47,6 +47,12 @@ export const webhookPayloadSchema = z.object({
     .nullable()
     .optional()
     .transform(trimToNullOrUndefined),
+  // Meta WhatsApp Cloud API phone_number_id — identifies which boutique
+  // the message was sent to. Sourced by n8n from
+  // entry[].changes[].value.metadata.phone_number_id. Optional during the
+  // multi-tenant rollout — when missing, webhook.service.ts falls back to
+  // the only active boutique (single-tenant compatibility shim).
+  phoneNumberId: z.string().optional().transform(trimToUndefined),
 });
 
 export type WebhookPayload = z.infer<typeof webhookPayloadSchema>;

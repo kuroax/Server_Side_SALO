@@ -12,7 +12,10 @@ import { processMessage } from "#/integrations/whatsapp/claude.service.js";
 import { searchProductsByImage } from "#/integrations/whatsapp/image-search.service.js";
 import { CUSTOMER_GENDERS } from "#/modules/customers/customer.types.js";
 import { logger } from "#/config/logger.js";
-import { BANK_ACCOUNT_IMAGE_URL } from "#/config/env.js";
+import {
+  findBoutiqueByPhoneNumberId,
+  findFirstActiveBoutique,
+} from "#/modules/boutiques/boutique.service.js";
 import { z } from "zod";
 import type { WebhookPayload } from "#/integrations/whatsapp/webhook.validation.js";
 import type {
@@ -457,27 +460,12 @@ const imageSearchResultSchema = z.object({
 });
 
 // ─── Business info ────────────────────────────────────────────────────────────
-
-const BUSINESS_INFO = {
-  showroomAddress:
-    "Av. Guadalupe 1390, Chapalita Oriente, Guadalajara, Jalisco",
-  businessHours:
-    "Lunes a Viernes 10:00am–8:30pm · Sábados 11:00am–7:00pm · Domingos cerrado",
-  shippingPrice: 179,
-  paymentMethods:
-    "Transferencia bancaria, depósito o tarjeta de crédito/débito. No se acepta efectivo en pedidos sobre pedido.",
-  depositPercent: 30,
-  paymentDays: 20,
-  // Human-readable delivery window shown when the customer asks "¿cuándo llega?" or
-  // "¿en cuánto tiempo me llegaría?". Update this whenever fulfillment timelines change.
-  // The bot uses this string verbatim — keep it natural and customer-friendly.
-  deliveryInfo: "3 a 7 días hábiles una vez confirmado el pago",
-  // Set to a non-empty string to have Luis mention the promotion once per
-  // conversation when the customer is browsing or hesitating.
-  // e.g. "30% Off Alo Yoga hasta el 10 de mayo"
-  // Leave undefined or empty string when no promotion is active.
-  activePromotion: undefined as string | undefined,
-} as const;
+//
+// Per-tenant business config now lives on the boutique document in MongoDB
+// (boutique.businessInfo). The hardcoded BUSINESS_INFO constant that used to
+// live here was removed when multi-tenant support landed — the handler reads
+// the boutique by phoneNumberId at the start of every request and passes
+// boutique.businessInfo to ClaudeContext + escalation builders.
 
 // ─── Image message idempotency ────────────────────────────────────────────────
 
@@ -850,6 +838,43 @@ export const handleIncomingMessage = async (
     return emptyResult();
   }
 
+  // ── 0b. Resolve tenant (boutique) ─────────────────────────────────────────
+  // Look up the boutique by the Meta phone_number_id from the payload.
+  // During the multi-tenant rollout n8n may not yet be sending phoneNumberId
+  // in the webhook body — when missing, fall back to the only active
+  // boutique so single-tenant traffic keeps flowing. Remove the fallback
+  // once every n8n workflow has been migrated and a second boutique is live.
+  const phoneNumberId = payload.phoneNumberId;
+  const boutique = phoneNumberId
+    ? await findBoutiqueByPhoneNumberId(phoneNumberId)
+    : await findFirstActiveBoutique();
+
+  if (!boutique) {
+    logger.error(
+      { phoneNumberId, from, messageId },
+      "Boutique not found for phoneNumberId — rejecting message",
+    );
+    return toSafeResult(
+      {
+        reply: "Lo siento, este servicio no está disponible en este momento.",
+        escalate: true,
+        customerPhone: from,
+        customerName: payload.contactName ?? "Cliente",
+        productImages: [],
+        escalationMessage: `Mensaje recibido en número no registrado: ${phoneNumberId ?? "(sin phoneNumberId en payload)"}`,
+      },
+      from,
+      payload.contactName ?? null,
+    );
+  }
+
+  if (!phoneNumberId) {
+    logger.warn(
+      { boutiqueId: boutique._id.toString(), from, messageId },
+      "Webhook payload missing phoneNumberId — using single-tenant fallback (first active boutique)",
+    );
+  }
+
   // ── 1. Identify / create customer ─────────────────────────────────────────
 
   const customer = await CustomerModel.findOneAndUpdate(
@@ -1053,7 +1078,7 @@ export const handleIncomingMessage = async (
             customerPhone: from,
             customerName,
             cart,
-            shippingPrice: BUSINESS_INFO.shippingPrice,
+            shippingPrice: boutique.businessInfo.shippingPrice,
           }),
         },
         from,
@@ -1424,7 +1449,13 @@ ${incomingMessageForClaude}`;
     searchProducts: searchProductsForClaude,
     incomingMessage: incomingMessageForClaude,
     conversationHistory,
-    businessInfo: BUSINESS_INFO,
+    businessInfo: {
+      ...boutique.businessInfo,
+      // ClaudeContext expects string | undefined; Mongoose infers
+      // string | null | undefined for the schema. Coerce here so a null
+      // value in MongoDB doesn't break the type contract.
+      activePromotion: boutique.businessInfo.activePromotion ?? undefined,
+    },
   });
 
   const parsedResult = processMessageResultSchema.safeParse(rawResult);
@@ -1675,21 +1706,23 @@ ${incomingMessageForClaude}`;
   // image pipeline (IF Has Product Images → Send Image) delivers it automatically.
   // No n8n changes needed — reuses the existing gallery pipeline.
   if (result.intent === "payment_info") {
-    if (BANK_ACCOUNT_IMAGE_URL) {
+    if (boutique.bankAccountImageUrl) {
       productImages.push({
-        url: BANK_ACCOUNT_IMAGE_URL,
+        url: boutique.bankAccountImageUrl,
         caption: "Datos bancarios para tu depósito 🏦",
       });
       logger.info(
-        { customerId, messageId },
+        { customerId, messageId, boutiqueId: boutique._id.toString() },
         "payment_info — bank account image injected",
       );
     } else {
-      // Image URL not configured — escalate so owner can send details manually.
+      // Image URL not configured for this boutique — escalate so owner can
+      // send details manually. The owner should set bankAccountImageUrl on
+      // the boutique document so the bot does this automatically next time.
       escalate = true;
       logger.warn(
-        { customerId, messageId },
-        "payment_info — BANK_ACCOUNT_IMAGE_URL not set, escalating to owner",
+        { customerId, messageId, boutiqueId: boutique._id.toString() },
+        "payment_info — boutique.bankAccountImageUrl not set, escalating to owner",
       );
     }
   }
@@ -1714,7 +1747,7 @@ ${incomingMessageForClaude}`;
         customerPhone: from,
         customerName,
         cart,
-        shippingPrice: BUSINESS_INFO.shippingPrice,
+        shippingPrice: boutique.businessInfo.shippingPrice,
       });
     } else {
       // All other escalation reasons use the general builder
@@ -1734,9 +1767,9 @@ ${incomingMessageForClaude}`;
           "Confirmar disponibilidad y preparar la visita. Contactar al cliente para acordar hora si es necesario.";
       } else if (intent === "payment_info") {
         reason =
-          "El cliente preguntó por los datos de pago pero BANK_ACCOUNT_IMAGE_URL no está configurado en Railway.";
+          "El cliente preguntó por los datos de pago pero la boutique no tiene bankAccountImageUrl configurado.";
         suggestedAction =
-          "Enviar los datos bancarios manualmente al cliente. Configurar BANK_ACCOUNT_IMAGE_URL en Railway → Server_Side_SALO → Variables para que el bot lo haga automáticamente en el futuro.";
+          "Enviar los datos bancarios manualmente al cliente. Configurar bankAccountImageUrl en el documento de la boutique en MongoDB para que el bot lo haga automáticamente en el futuro.";
       } else if (
         // Fallback receipt detection: catches edge cases where Claude misclassified
         // a payment text as a different intent but the message clearly references payment.
@@ -1754,7 +1787,7 @@ ${incomingMessageForClaude}`;
           customerPhone: from,
           customerName,
           cart,
-          shippingPrice: BUSINESS_INFO.shippingPrice,
+          shippingPrice: boutique.businessInfo.shippingPrice,
         });
       } else if (intent === "product_search" && productImages.length === 0) {
         const keyword = searchHints?.keyword ?? "producto no especificado";
