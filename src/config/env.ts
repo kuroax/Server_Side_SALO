@@ -115,6 +115,12 @@ const envSchema = z
     //                    webhooks, registering phone numbers, etc.
     // Optional until multi-tenant onboarding is live.
     SYSTEM_USER_TOKEN: z.string().trim().optional(),
+
+    // ── Backend base URL ─────────────────────────────────────────────────────
+    // Used by embeddedSignup.controller.ts to build the redirect_uri for the
+    // OAuth callback. Defaults to the production Railway URL if not set.
+    // Set in Railway: SALO_BACKEND_URL=https://serversidesalo-production.up.railway.app
+    SALO_BACKEND_URL: z.string().url().optional(),
   })
   .refine((env) => env.JWT_SECRET !== env.JWT_REFRESH_SECRET, {
     path: ["JWT_REFRESH_SECRET"],
@@ -189,6 +195,7 @@ export const {
   META_APP_SECRET,
   META_ES_CONFIG_ID,
   SYSTEM_USER_TOKEN,
+  SALO_BACKEND_URL,
   IS_PRODUCTION,
   IS_DEVELOPMENT,
   IS_TEST,
