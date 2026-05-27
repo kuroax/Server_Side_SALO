@@ -52,6 +52,7 @@ import {
 import { logger } from '#/config/logger.js';
 import { AppError } from '#/shared/errors/index.js';
 import { whatsappWebhookRouter } from '#/integrations/whatsapp/webhook.router.js';
+import { embeddedSignupRouter } from '#/integrations/embedded-signup/embeddedSignup.router.js';
 
 export const createApp = async (): Promise<Application> => {
   const app = express();
@@ -144,6 +145,16 @@ export const createApp = async (): Promise<Application> => {
   app.use('/api/webhooks/whatsapp', whatsappWebhookRouter);
 
   logger.info('WhatsApp webhook mounted at /api/webhooks/whatsapp');
+
+  // ─── Embedded Signup ──────────────────────────────────────────────────────────
+  // Mounted at "/" because the router owns two unrelated paths:
+  //   GET  /boutique-signup        (public HTML page, served in the SALO WebView)
+  //   POST /api/boutiques/signup   (JWT-protected token exchange)
+  app.use('/', embeddedSignupRouter);
+
+  logger.info(
+    'Embedded Signup mounted: GET /boutique-signup, POST /api/boutiques/signup',
+  );
 
   // ─── 404 ──────────────────────────────────────────────────────────────────────
   app.use((_req: Request, res: Response) => {
