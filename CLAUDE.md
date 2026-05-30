@@ -48,10 +48,7 @@ GraphQL API backend for SALO — a multi-tenant SaaS platform for clothing bouti
 
 ```bash
 npm run dev        # tsx watch mode — hot reload on src/**/*.ts changes
-npm run build      # tsc + tsc-alias (resolves # path aliases in dist/)
-npm run start      # node dist/server.js (production)
 npm run typecheck  # tsc --noEmit (type check only)
-npm run clean      # rm -rf dist
 ```
 
 ---
@@ -247,25 +244,6 @@ type JWTPayload = {
 
 `boutiqueId` is signed into the JWT at login. Resolvers extract it from
 `context.user.boutiqueId` — they never accept it as a client argument.
-
-**Deployment note:** All existing JWTs issued before this change lack
-`boutiqueId`. Users must log out and log back in once after this is deployed
-to get a valid token. For the pilot (one user — Axel), this is acceptable.
-
-**User backfill required before deploying:** Axel's user document in MongoDB
-must have `boutiqueId` set before the first login attempt, otherwise the token
-will carry `boutiqueId: undefined` and every product/inventory query will fail.
-Run this in MongoDB Compass or Atlas before deploying:
-
-```js
-db.users.updateMany(
-  { boutiqueId: { $exists: false } },
-  { $set: { boutiqueId: ObjectId("6a15631c074684288beaa0f6") } },
-);
-```
-
-Replace the ObjectId with the value printed by `seed-boutique.ts`
-(also saved as `SALO_BOUTIQUE_ID` in Railway).
 
 ---
 
@@ -774,12 +752,10 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 | Conversation control system (bot_active/waiting_owner/human_takeover)                                                | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversation.mode` field added; n8n gate and owner notification pending                             |
 | `lifetimeValue` semantics = expected revenue, not received                                                           | Differs from dashboard cancelled-order exclusion                                                                                | Documented gap                                                                                                         |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
-| `ACTIVE_PROMOTION` env var not wired                                                                                 | Cannot toggle a promotion without redeploy                                                                                      | ✅ Resolved — stored in `boutique.businessInfo.activePromotion`; `webhook.service.ts` now reads from boutique document |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
 | `webhook.service.ts` and `order.service.ts` use `ProductModel`/`InventoryModel` directly without `boutiqueId` filter | Bot and order logic will cross boutique boundaries when tenant #2 is onboarded                                                  | **Must fix before onboarding tenant #2**                                                                               |
 | `findFirstActiveBoutique()` shim in `webhook.service.ts` + `boutique.service.ts`                                     | Silently routes all messages to tenant #1 if `phoneNumberId` missing from n8n payload; breaks immediately when tenant #2 exists | **Remove after n8n is updated to forward `phoneNumberId`**                                                             |
 | n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Every message uses the single-tenant fallback shim — WARN logged on every request                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
-| `productInventory` GraphQL query is now authenticated (requires JWT)                                                 | Any prior unauthenticated caller would break — confirmed safe: bot uses `webhook.service.ts` directly, not GraphQL resolvers    | Resolved — confirmed safe                                                                                              |
 
 ---
 
