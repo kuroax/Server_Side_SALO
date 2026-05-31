@@ -533,7 +533,7 @@ type ClaudeContext = {
     depositPercent: number;
     paymentDays: number;
     deliveryInfo: string; // e.g. "3 a 7 dias habiles una vez confirmado el pago"
-    activePromotion?: string; // DEFERRED — wire to ACTIVE_PROMOTION env var when ready
+    activePromotion?: string; // stored per-boutique in boutique.businessInfo.activePromotion
   };
 };
 ```
