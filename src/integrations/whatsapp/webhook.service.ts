@@ -16,6 +16,13 @@ import {
   findBoutiqueByPhoneNumberId,
   findFirstActiveBoutique,
 } from "#/modules/boutiques/boutique.service.js";
+import {
+  getConversationMode,
+  trackIncomingMessage,
+  checkAndApplyAutoResume,
+} from "#/modules/conversationState/conversationState.service.js";
+import { registerOrUpdateProspect } from "#/modules/prospect/prospect.service.js";
+import { sendOwnerAlert } from "#/integrations/whatsapp/alert.service.js";
 import { z } from "zod";
 import type { WebhookPayload } from "#/integrations/whatsapp/webhook.validation.js";
 import type {
@@ -875,6 +882,45 @@ export const handleIncomingMessage = async (
     );
   }
 
+  const boutiqueId = boutique._id.toString();
+
+  // ── 0c. Hybrid pipeline bookkeeping ───────────────────────────────────────
+  // Runs for every inbound message (text or image) BEFORE any Claude call.
+  // Uses the conversationState (ai/human/paused gate) and prospect (CRM
+  // pipeline) modules — both scoped by boutiqueId. The mode gate itself is
+  // applied later, at the start of the text flow (section 3).
+  //
+  // NOTE: Owner-reply detection (coexistence handoff) is intentionally NOT
+  // wired here — the normalized n8n payload carries only customer messages
+  // (no statuses / recipient_id / business display number), so owner replies
+  // from the WhatsApp Business App never reach this endpoint. That requires an
+  // n8n change to forward status/echo events first. See report / tech debt.
+
+  // B. Auto-resume: if this conversation was handed to a human with a timer
+  //    that has now elapsed, flip it back to "ai" before the mode is read.
+  await checkAndApplyAutoResume(boutiqueId, from);
+
+  // C. Register / refresh the prospect, and alert the owner the first time we
+  //    ever see this number.
+  const { isNew: isNewProspect } = await registerOrUpdateProspect(
+    boutiqueId,
+    from,
+    payload.contactName,
+  );
+
+  if (isNewProspect && boutique.ownerPhone) {
+    await sendOwnerAlert({
+      ownerPhone: boutique.ownerPhone,
+      phoneNumberId: boutique.phoneNumberId,
+      accessToken: boutique.accessToken,
+      customerPhone: from,
+      alertType: "new_prospect",
+    });
+  }
+
+  // D. Track the inbound message on the conversation-state counter.
+  await trackIncomingMessage(boutiqueId, from);
+
   // ── 1. Identify / create customer ─────────────────────────────────────────
 
   const customer = await CustomerModel.findOneAndUpdate(
@@ -1067,6 +1113,20 @@ export const handleIncomingMessage = async (
         { upsert: true, returnDocument: "after" },
       );
 
+      // E. Notify the owner that a payment receipt arrived so they can verify
+      //    and confirm the order. Non-blocking — sendOwnerAlert never throws.
+      //    The customer-facing acknowledgment (receiptAck) is already built
+      //    above and returned below, so no separate customer reply is needed.
+      if (boutique.ownerPhone) {
+        await sendOwnerAlert({
+          ownerPhone: boutique.ownerPhone,
+          phoneNumberId: boutique.phoneNumberId,
+          accessToken: boutique.accessToken,
+          customerPhone: from,
+          alertType: "receipt_received",
+        });
+      }
+
       return toSafeResult(
         {
           reply: receiptAck,
@@ -1221,6 +1281,20 @@ export const handleIncomingMessage = async (
   }
 
   // ── 3. Text message — Luis flow ───────────────────────────────────────────
+
+  // F. Hybrid gate — check the conversation mode before generating any reply.
+  //    "human"/"paused" → the bot stays silent (owner is handling it, or it is
+  //    muted); return an empty result so n8n sends nothing. Only "ai" mode
+  //    continues to the Luis/Claude flow below. Auto-resume already ran in
+  //    section 0c, so an elapsed human handoff has been flipped back to "ai".
+  const conversationMode = await getConversationMode(boutiqueId, from);
+  if (conversationMode !== "ai") {
+    logger.info(
+      { boutiqueId, from, messageId, conversationMode },
+      "Conversation not in AI mode — skipping Claude (bot stays silent)",
+    );
+    return emptyResult();
+  }
 
   // Build the history window for Claude.
   // allTurns and isStaleConversation are already resolved from section 1b.

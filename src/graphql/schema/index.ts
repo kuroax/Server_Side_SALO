@@ -15,6 +15,12 @@ import { customerResolvers } from '#/modules/customers/customer.resolvers.js';
 import { orderTypeDefs }     from '#/modules/orders/order.typeDefs.js';
 import { orderResolvers }    from '#/modules/orders/order.resolvers.js';
 
+import { conversationStateTypeDefs }  from '#/modules/conversationState/conversationState.typeDefs.js';
+import { conversationStateResolvers } from '#/modules/conversationState/conversationState.resolvers.js';
+
+import { prospectTypeDefs }  from '#/modules/prospect/prospect.typeDefs.js';
+import { prospectResolvers } from '#/modules/prospect/prospect.resolvers.js';
+
 // Root types — every module extends these via `extend type Query / Mutation`
 const rootTypeDefs = /* #graphql */ `
   type Query
@@ -29,6 +35,8 @@ export const schema = makeExecutableSchema({
     inventoryTypeDefs,
     customerTypeDefs,
     orderTypeDefs,
+    conversationStateTypeDefs,
+    prospectTypeDefs,
   ],
   resolvers: [
     authResolvers,
@@ -36,5 +44,7 @@ export const schema = makeExecutableSchema({
     inventoryResolvers,
     customerResolvers,
     orderResolvers,
+    conversationStateResolvers,
+    prospectResolvers,
   ],
 });

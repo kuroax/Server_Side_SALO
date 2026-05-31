@@ -81,6 +81,7 @@ src/
 │   └── schema/index.ts               # Merges all typeDefs + resolvers
 ├── integrations/
 │   └── whatsapp/
+│       ├── alert.service.ts          # Owner WhatsApp alerts — direct Graph API (exception)
 │       ├── buffer.controller.ts      # Express controller for buffer push/claim endpoints
 │       ├── buffer.service.ts         # Buffer push/claim logic — MongoDB-backed
 │       ├── claude.service.ts         # Claude AI — intent detection + response generation
@@ -108,22 +109,20 @@ src/
 │   │   ├── conversation-buffer.model.ts  # MongoDB buffer for message accumulation
 │   │   └── conversation.model.ts         # Conversation memory — now includes boutiqueId
 │   │                                     # and mode: "auto" | "manual" for hybrid handoff
+│   ├── conversationState/            # Hybrid bot gate (model "ConversationState"): ai|human|paused
 │   ├── customers/                    # Customer CRUD + lifetimeValue cache
 │   │                                 # boutiqueId scopes all queries and indexes
 │   ├── inventory/                    # Stock tracking per variant
 │   ├── orders/                       # Order lifecycle management
 │   ├── products/                     # Product catalog
+│   ├── prospect/                     # WhatsApp lead CRM — pipeline stages, history, notes
 │   └── sentImages/
 │       └── sentImage.model.ts        # Maps WhatsApp message IDs to product captions
 │                                     # Used for gallery reply product resolution
 ├── scripts/
 │   ├── backfill-inventory.ts         # One-off data migration script
 │   └── seed-boutique.ts              # Multi-tenant migration — creates first boutique,
-│                                     # backfills boutiqueId on all collections.
-│                                     # Run: npx tsx src/scripts/seed-boutique.ts
-│                                     # Uses { strict: false } for Product/Inventory/Order
-│                                     # because those models lacked boutiqueId when the
-│                                     # script was first created. Safe to re-run (idempotent).
+│                                     # backfills boutiqueId. Idempotent. Run: npx tsx ...
 └── shared/
     ├── errors/                       # Typed error classes (AppError hierarchy)
     ├── models/
@@ -188,6 +187,15 @@ Reset to `"auto"` manually by the owner via SALO app.
 
 `boutique.globalMode` is a broader kill switch for the entire boutique.
 Per-conversation mode is preferred for targeted handoffs.
+
+### Hybrid bot gate (conversationState module)
+
+Distinct from `conversation.mode`. The `conversationState` module (model
+`ConversationState`, keyed by `boutiqueId + customerPhone`) gates replies in
+`webhook.service.ts`: `human`/`paused` silence the bot, `ai` lets Luis reply. The
+handler runs `checkAndApplyAutoResume` then `getConversationMode` before any
+Claude call. Owner alerts use `alert.service.ts`, which calls the WhatsApp Graph
+API directly — a deliberate exception (owner alerts only) to the no-direct-Meta rule.
 
 ### Webhook lookup
 
@@ -374,37 +382,9 @@ estimatedDelivery?: string    // e.g. "Jueves 8 de mayo"
 
 ### `safeUpdateLifetimeValue` rules
 
-```ts
-// On create (new orders only — not duplicate recovery):
-await safeUpdateLifetimeValue(order.customerId, order.total, "Order created");
-
-// On cancel:
-await safeUpdateLifetimeValue(
-  order.customerId,
-  -order.total,
-  "Order cancelled",
-);
-
-// On hard delete (non-cancelled only):
-if (order.status !== "cancelled") {
-  await safeUpdateLifetimeValue(
-    order.customerId,
-    -order.total,
-    "Order hard-deleted",
-  );
-}
-
-// On customer assign (non-cancelled only):
-if (order.status !== "cancelled") {
-  await safeUpdateLifetimeValue(
-    order.customerId,
-    order.total,
-    "Customer assigned",
-  );
-}
-```
-
-Accepts `Types.ObjectId | null | undefined` — all safe (null/undefined = skip, non-fatal).
+Call on: create (+total), cancel (−total), hard-delete (−total, non-cancelled only),
+customer-assign (+total, non-cancelled only). Cancelled orders skip the delta on
+delete/assign. Accepts `Types.ObjectId | null | undefined` — null/undefined = skip, non-fatal.
 
 ### Field name: `productName`, not `name`
 
@@ -472,14 +452,6 @@ META_APP_SECRET    # From App Dashboard > Basic settings
                    # Used to exchange the 30s code for a long-lived boutique token
 SYSTEM_USER_TOKEN  # System User SALO (ID: 61577448959274) master token
                    # Used for platform-level Meta API calls (subscribe WABA, etc.)
-```
-
-**Deferred — not yet wired:**
-
-```
-ACTIVE_PROMOTION   # Wire to env.ts as z.string().optional() when ready
-                   # Used by businessInfo.activePromotion in ClaudeContext
-                   # Now stored per-boutique in boutique.businessInfo.activePromotion
 ```
 
 **Per-boutique credentials (now in MongoDB, not env vars):**
@@ -625,8 +597,6 @@ Either signal skips `searchProductsByImage` and routes to receipt acknowledgment
 
 `stripMarkdownFences()` — runs BEFORE `sanitizeJsonNewlines()`. Claude occasionally wraps its JSON response in ` ```json ``` ` despite the system prompt contract. `JSON.parse` fails on the backticks. This function strips the fences so the sanitizer only sees raw JSON.
 
-**Root cause confirmed:** Railway logs 2026-05-24 20:44:48 — `searchProductsForClaude` returned 2 products successfully but Claude wrapped the response in markdown fences, triggering SAFE_FALLBACK.
-
 Do NOT remove this function. Do NOT move it after `sanitizeJsonNewlines()`.
 
 ### JSON reminder injection
@@ -640,8 +610,6 @@ const messageWithReminder = sanitizedMessage + JSON_REMINDER;
 ```
 
 **Why:** Claude's JSON contract is defined in the system prompt. On complex multi-message buffered turns (e.g. gallery reaction + purchase confirmation + payment question), Claude occasionally abandons the JSON format entirely and responds in plain Spanish.
-
-**Root cause confirmed:** Railway logs 2026-05-25 02:24:18 — rawTextPreview showed "¡Qué bonita elección! 😊 Antes de mandarte los da…" (pure conversational text, no JSON).
 
 The reminder is injected at the message level — the last thing Claude reads before generating — making format violations much harder. Do NOT remove this injection. The customer never sees the reminder.
 
@@ -749,29 +717,18 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 | `extractCartFromHistory` is regex-driven                                                                             | Any prompt change silently regresses receipt acks                                                                               | Deferred — structural fix post-demo                                                                                    |
 | `updateProduct` missing inventory cleanup on variant removal                                                         | Orphaned inventory records                                                                                                      | Deferred                                                                                                               |
 | Server-side pagination on orders/customers/products                                                                  | Fixed slice limits at scale                                                                                                     | Deferred                                                                                                               |
-| Conversation control system (bot_active/waiting_owner/human_takeover)                                                | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversation.mode` field added; n8n gate and owner notification pending                             |
+| Conversation control system (ai/human/paused gate)                                                                  | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversationState` gate + new-prospect/receipt alerts live; owner auto-takeover detection pending    |
 | `lifetimeValue` semantics = expected revenue, not received                                                           | Differs from dashboard cancelled-order exclusion                                                                                | Documented gap                                                                                                         |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
 | `webhook.service.ts` and `order.service.ts` use `ProductModel`/`InventoryModel` directly without `boutiqueId` filter | Bot and order logic will cross boutique boundaries when tenant #2 is onboarded                                                  | **Must fix before onboarding tenant #2**                                                                               |
 | `findFirstActiveBoutique()` shim in `webhook.service.ts` + `boutique.service.ts`                                     | Silently routes all messages to tenant #1 if `phoneNumberId` missing from n8n payload; breaks immediately when tenant #2 exists | **Remove after n8n is updated to forward `phoneNumberId`**                                                             |
 | n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Every message uses the single-tenant fallback shim — WARN logged on every request                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
-
----
-
-## Security — confirmed clean in audit
-
-- Webhook secret validation: `timingSafeEqual` with length pre-check and 512-byte cap ✅
-- MongoDB query injection: all IDs through `objectIdSchema`, filters constructed field-by-field ✅
-- API keys in logs: pino redact list covers all sensitive fields, SDK does not log by default ✅
-- Unhandled promise rejections: `process.on('unhandledRejection', exit)` in server.ts ✅
-- Mass assignment: Zod strips unknown fields on all mutations ✅
-- CORS wildcard: rejected in production at startup ✅
-
-**Two areas to watch:**
-
-- Rate limit applies to the webhook — n8n may hit 429 on bursty days (consider per-route exemption)
-- Token revocation deferred — stolen refresh token valid until natural expiry
+| Owner-reply detection not wired (coexistence handoff) | Owner + bot can reply at once; no auto-flip to `human` | Blocked — needs n8n to forward status/echo events with `recipient_id` |
+| `human_takeover_needed` / `prospect_stage_changed` alerts defined but never sent | Owner gets no handoff or stage-change notification | Wire call sites on escalate/pause and stage change |
+| `alert.service.ts` calls WhatsApp Graph API directly | Breaks "all Meta creds in n8n" invariant; token used in backend | Accepted for owner alerts; revisit if alerts move to n8n |
+| Two conversation models (`ConversationState` vs `Conversation`) | Duplicate state; divergent mode semantics (ai/human/paused vs auto/manual) | Consolidate post-MVP |
+| `registerOrUpdateProspect` does findOne→create (no upsert) | Parallel first messages can hit duplicate-key error | Guard with upsert or retry on E11000 |
 
 ---
 
@@ -815,3 +772,7 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
   that will be removed before tenant #2 is onboarded
 - Never remove `stripMarkdownFences()` from claude.service.ts
 - Never remove the `JSON_REMINDER` injection from claude.service.ts
+- Never register a second Mongoose model named `"Conversation"` — the gate model is `ConversationState`
+- Never blanket short-circuit image messages — preserve visual search and gallery-reply flows
+- Never let `sendOwnerAlert` throw or log `accessToken` — alerts must never break the webhook flow
+- Never read conversationState mode without first running `checkAndApplyAutoResume`

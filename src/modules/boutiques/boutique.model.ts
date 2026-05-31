@@ -76,6 +76,14 @@ const boutiqueSchema = new Schema(
       default: undefined,
     },
 
+    // Owner's personal WhatsApp number (digits-only). Receives owner alerts
+    // (new prospect, receipt received, handoff needed) sent via alert.service.
+    // Distinct from phoneNumberId, which is the boutique's Cloud API sender.
+    ownerPhone: {
+      type: String,
+      trim: true,
+    },
+
     // Embedded business info — replaces the old BUSINESS_INFO constant in
     // webhook.service.ts. Each tenant owns its own copy.
     businessInfo: {
