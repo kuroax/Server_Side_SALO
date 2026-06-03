@@ -204,13 +204,6 @@ calls `findBoutiqueByPhoneNumberId()` to get the boutique document. All
 downstream calls (claude.service.ts, etc.) receive `boutique.businessInfo`
 instead of hardcoded constants.
 
-**Temporary shim:** If `phoneNumberId` is absent from the payload,
-`findFirstActiveBoutique()` is called as a single-tenant fallback (WARN logged).
-This shim exists because n8n does not yet forward `phoneNumberId` in the
-webhook POST body. Once n8n is updated (add `"phoneNumberId": "{{ $json.phoneNumberId }}"`
-to the SALO Backend node JSON body), the fallback fires. The shim
-**must be removed** before tenant #2 is onboarded — see Known Technical Debt.
-
 ### Onboarding
 
 - **Tenant #1 (shopalogdl):** Manually onboarded. `seed-boutique.ts` creates the
@@ -729,6 +722,7 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 | `alert.service.ts` calls WhatsApp Graph API directly | Breaks "all Meta creds in n8n" invariant; token used in backend | Accepted for owner alerts; revisit if alerts move to n8n |
 | Two conversation models (`ConversationState` vs `Conversation`) | Duplicate state; divergent mode semantics (ai/human/paused vs auto/manual) | Consolidate post-MVP |
 | `registerOrUpdateProspect` does findOne→create (no upsert) | Parallel first messages can hit duplicate-key error | Guard with upsert or retry on E11000 |
+| `setHumanMode` endpoint has no caller | Endpoint exists but nothing invokes it | Wire n8n/app to call on owner takeover |
 
 ---
 
@@ -776,3 +770,4 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 - Never blanket short-circuit image messages — preserve visual search and gallery-reply flows
 - Never let `sendOwnerAlert` throw or log `accessToken` — alerts must never break the webhook flow
 - Never read conversationState mode without first running `checkAndApplyAutoResume`
+- Never log `customerPhone` unmasked in `setHumanMode` — mask all but last 4 digits via `maskPhone`

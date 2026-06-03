@@ -5,6 +5,7 @@ import {
   bufferClaimHandler,
 } from "#/integrations/whatsapp/buffer.controller.js";
 import { logSentImageHandler } from "#/integrations/whatsapp/logSentImage.controller.js";
+import { setHumanModeHandler } from "#/integrations/whatsapp/setHumanMode.controller.js";
 import { requireBufferWebhookSecret } from "#/integrations/whatsapp/webhook.auth.js";
 
 export const whatsappWebhookRouter = Router();
@@ -34,4 +35,14 @@ whatsappWebhookRouter.post(
   "/log-sent-image",
   requireBufferWebhookSecret,
   logSentImageHandler,
+);
+
+// POST /api/webhooks/whatsapp/set-human-mode
+// Called to flip the conversationState gate to "human" for a customer so the
+// bot stops replying and the owner handles the conversation manually. Resolves
+// the boutique by phoneNumberId and auto-resumes to "ai" after the given minutes.
+whatsappWebhookRouter.post(
+  "/set-human-mode",
+  requireBufferWebhookSecret,
+  setHumanModeHandler,
 );
