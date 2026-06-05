@@ -1335,7 +1335,24 @@ export const handleIncomingMessage = async (
   const isBroadCatalog =
     broadCatalogPattern.test(message) && !specificProductPattern.test(message);
 
-  if (isBroadCatalog) {
+  // If the customer already received the broad-catalog clarifying question in a
+  // prior assistant turn, firing the fast-path again just loops the same prompt.
+  // Bypass it so the repeated broad question falls through to Claude (which then
+  // calls search_products per the prompt rules).
+  const alreadyAskedForSpecifics = allTurns.some(
+    (t) =>
+      t.role === "assistant" &&
+      t.content.includes("¿Qué tipo de prenda buscas?"),
+  );
+
+  if (isBroadCatalog && alreadyAskedForSpecifics) {
+    logger.info(
+      { customerId, messageId },
+      "Broad catalog question repeated — bypassing fast-path, falling through to Claude",
+    );
+  }
+
+  if (isBroadCatalog && !alreadyAskedForSpecifics) {
     const catalogReply =
       customerGender === "male"
         ? "¡Hola amigo! Manejamos ropa deportiva y lifestyle de Alo Yoga, Lululemon, Wiskii, 437, Better Me y Skims 🙌🏼 ¿Qué tipo de prenda buscas? ¿Leggings, bra, top, jersey, shorts? ¿Y qué talla manejas?"
