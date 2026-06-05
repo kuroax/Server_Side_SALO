@@ -632,36 +632,9 @@ POST /api/webhooks/whatsapp/buffer/push
 POST /api/webhooks/whatsapp/buffer/claim
 ```
 
-### Push body — all fields required
+### Push body & claim response
 
-```json
-{
-  "from": "5213328205715",
-  "message": "busco leggings negros",
-  "executionId": "179",
-  "messageId": "wamid.xxx",
-  "messageType": "text",
-  "imageMediaId": null,
-  "imageCaption": "",
-  "contactName": "Axel Monterrubio",
-  "timestamp": "1776813588624"
-}
-```
-
-### Claim success response — all fields required by n8n
-
-```json
-{
-  "skip": false,
-  "shouldRespond": true,
-  "mergedMessage": "busco leggings negros\ntalla S",
-  "messageCount": 2,
-  "messageType": "image",
-  "imageMediaId": "wamid.xxx",
-  "imageCaption": "",
-  "contactName": "Axel Monterrubio"
-}
-```
+Push + claim payloads are field-exhaustive (n8n contract) — see `buffer.controller.ts`.
 
 `messageType` is `"image"` if ANY buffered message was an image.
 `imageMediaId` is the first non-null media ID across all buffered messages.
@@ -675,26 +648,20 @@ POST /api/webhooks/whatsapp/buffer/claim
 
 ---
 
-## Image search service
-
-`searchProductsByImage` returns `Array<{ url: string; caption?: string }>` — not `string[]`.
-
-Empty URL filtering is applied before mapping:
-
-```ts
-((p.images ?? []) as string[])
-  .filter(
-    (url): url is string => typeof url === "string" && url.trim().length > 0,
-  )
-  .map((url, idx) => ({ url, caption: idx === 0 ? caption : undefined }))
-  .slice(0, 5);
-```
-
----
-
 ## GraphQL schema structure
 
 All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src/graphql/schema/index.ts`.
+
+---
+
+## Testing
+
+Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm test`.
+
+- `src/__tests__/setup.ts` — in-memory MongoDB + env bootstrap; all external APIs mocked.
+- `src/__tests__/integration/webhook.test.ts` — 15 tests: gate, prospects, buffer, set-human-mode.
+- Fixtures/mocks: seeded boutique, n8n payloads, Claude/alert/image-search stubs.
+- Scripts: `test`, `test:watch`, `test:coverage`, `test:integration`.
 
 ---
 
@@ -723,6 +690,8 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 | Two conversation models (`ConversationState` vs `Conversation`) | Duplicate state; divergent mode semantics (ai/human/paused vs auto/manual) | Consolidate post-MVP |
 | `registerOrUpdateProspect` does findOne→create (no upsert) | Parallel first messages can hit duplicate-key error | Guard with upsert or retry on E11000 |
 | `setHumanMode` endpoint has no caller | Endpoint exists but nothing invokes it | Wire n8n/app to call on owner takeover |
+| Backend has no text-message idempotency (only images deduped via `trackImageMessageId`) | Duplicate text `messageId` re-runs the full Claude flow | Open — text dedup lives in n8n; add a backend guard if n8n dedup is lost on restart |
+| Test 15 marked `it.fails` (idempotency) | Green CI masks the text-dedup gap | Drop the marker once the backend dedups text messages |
 
 ---
 
@@ -771,3 +740,6 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 - Never let `sendOwnerAlert` throw or log `accessToken` — alerts must never break the webhook flow
 - Never read conversationState mode without first running `checkAndApplyAutoResume`
 - Never log `customerPhone` unmasked in `setHumanMode` — mask all but last 4 digits via `maskPhone`
+- Never call the real Claude/WhatsApp/Graph API in tests — mock claude/alert/image-search services
+- Never set env vars after the imports in `setup.ts` — `env.ts` validates at import and exits on miss
+- Never send `imageCaption: null` in a webhook payload — the schema requires a string; use `""`
