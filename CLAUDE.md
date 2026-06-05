@@ -531,14 +531,6 @@ type ClaudeContext = {
 };
 ```
 
-### Image limits
-
-```ts
-const MAX_PRODUCTS_PER_SEARCH = 4;
-const MAX_IMAGES_PER_PRODUCT = 5; // matches product UI 5-slot design
-const MAX_IMAGES_TOTAL = 20; // 4 × 5
-```
-
 ### Image suppression rule
 
 Product images flow ONLY when `result.intent === "product_search"`. All other intents suppress accumulated images — prevents product gallery during availability checks, payment flows, or context-recall responses.
@@ -642,9 +634,7 @@ Push + claim payloads are field-exhaustive (n8n contract) — see `buffer.contro
 
 ### Timing
 
-- n8n Wait: **60 seconds**
-- `ELAPSED_THRESHOLD_MS`: **55,000ms** (5s headroom is intentional — confirmed production bug if removed)
-- Testing: set `WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS=5000` and n8n Wait to 5s
+n8n Wait **60s**; `ELAPSED_THRESHOLD_MS` **55,000ms** (5s headroom intentional — prod bug if removed). Test: both at 5s.
 
 ---
 
@@ -692,6 +682,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `setHumanMode` endpoint has no caller | Endpoint exists but nothing invokes it | Wire n8n/app to call on owner takeover |
 | Backend has no text-message idempotency (only images deduped via `trackImageMessageId`) | Duplicate text `messageId` re-runs the full Claude flow | Open — text dedup lives in n8n; add a backend guard if n8n dedup is lost on restart |
 | Test 15 marked `it.fails` (idempotency) | Green CI masks the text-dedup gap | Drop the marker once the backend dedups text messages |
+| `product_search` 0 results auto-escalates | Conflicts with new text-reply prompt guidance | Reconcile in `webhook.service.ts` |
 
 ---
 
@@ -743,3 +734,4 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never call the real Claude/WhatsApp/Graph API in tests — mock claude/alert/image-search services
 - Never set env vars after the imports in `setup.ts` — `env.ts` validates at import and exits on miss
 - Never send `imageCaption: null` in a webhook payload — the schema requires a string; use `""`
+- Never re-ask a broad catalog question already answered — call search_products instead
