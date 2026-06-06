@@ -576,6 +576,86 @@ async function searchProductsForClaude(
   // claude.service.ts validates keyword with min(1) but we defend here too.
   if (!keyword) return [];
 
+  // Special value "*" = browse all active products without text search.
+  // Used by the explicit inventory fast-path when the customer asks to
+  // see everything available rather than a specific product.
+  if (keyword === "*") {
+    const browseFilter: Record<string, unknown> = { status: "active" };
+    if (hints.gender && hints.gender !== "unknown") {
+      browseFilter.gender = hints.gender === "female" ? "women" : "men";
+    }
+    let browseProducts: any[] = [];
+    try {
+      browseProducts = await ProductModel.find(browseFilter)
+        .select("name price brand gender categoryGroup subcategory images")
+        .limit(20)
+        .lean();
+    } catch {
+      return [];
+    }
+    // If gender filter returned 0, retry without gender
+    if (browseProducts.length === 0 && browseFilter.gender) {
+      delete browseFilter.gender;
+      try {
+        browseProducts = await ProductModel.find(browseFilter)
+          .select("name price brand gender categoryGroup subcategory images")
+          .limit(20)
+          .lean();
+      } catch {
+        return [];
+      }
+    }
+    if (browseProducts.length === 0) return [];
+    // Reuse the rest of the function — set products and fall through
+    // to the inventory join. We do this by temporarily replacing
+    // the keyword search result. Since the function is async/sequential,
+    // the cleanest approach is to duplicate the join inline.
+    // (Refactor to shared helper is deferred — see technical debt.)
+    const browseIds = browseProducts.map((p) => p._id);
+    const browseInventory = await InventoryModel.find({
+      productId: { $in: browseIds },
+      quantity: { $gt: 0 },
+    })
+      .select("productId size color quantity")
+      .lean();
+    if (browseInventory.length === 0) return [];
+    const browseMap = new Map(browseProducts.map((p) => [p._id.toString(), p]));
+    const browseSeen = new Set<string>();
+    const browseResults: ProductSearchItem[] = [];
+    for (const inv of browseInventory) {
+      const idStr = inv.productId.toString();
+      if (browseSeen.has(idStr)) continue;
+      browseSeen.add(idStr);
+      const product = browseMap.get(idStr);
+      if (!product) continue;
+      const displayColor = inv.color
+        .split(" ")
+        .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+      const primaryCaption = `$${product.price.toLocaleString("es-MX")} — ${product.name} ${displayColor} (${product.brand})`;
+      const images = (product.images ?? [])
+        .map((uri: string, index: number) => {
+          const url = toValidUrl(uri);
+          return url ? { url, caption: index === 0 ? primaryCaption : "" } : null;
+        })
+        .filter((img: { url: string; caption: string } | null): img is { url: string; caption: string } =>
+          img !== null && img !== undefined,
+        );
+      browseResults.push({
+        name: product.name,
+        brand: product.brand,
+        price: product.price,
+        color: displayColor,
+        images,
+      });
+    }
+    logger.info(
+      { gender: hints.gender, returned: browseResults.length },
+      "searchProductsForClaude — browse-all query complete",
+    );
+    return browseResults;
+  }
+
   // Step 1: Match products using MongoDB full-text index.
   // The text index covers: name (weight 10), brand (8), searchKeywords (6),
   // subcategory (6), categoryGroup (3), description (1) — with Spanish stemming.
@@ -1399,6 +1479,94 @@ export const handleIncomingMessage = async (
       from,
       customerName,
       customerGender,
+    );
+  }
+
+  // ── 3b. Explicit inventory / product gallery request ──────────────────────
+  // Detects messages where the customer explicitly asks to SEE or RECEIVE
+  // product images: "mándame tus productos", "muéstrame lo que tienes",
+  // "qué tienes en inventario", etc.
+  //
+  // Unlike catalog_query (which asks for specifics), these messages signal the
+  // customer wants to browse visually. We call searchProductsForClaude with
+  // keyword "*" to get all active in-stock products and return images directly
+  // without going through Claude — which would use vague keywords like
+  // "inventario" that never match the text index, producing 0 results.
+  const explicitInventoryPattern =
+    /(?:mándame|manda|muéstrame|muestra|enseñame|enseña|ver|véndeme|quiero\s+ver)\s+(?:tus?\s+)?(?:productos?|inventario|catálogo|lo\s+que\s+tienes?|lo\s+que\s+tienen?)|(?:tienes?\s+fotos?|tienes?\s+imágenes?|fotos?\s+de\s+(?:tus?\s+)?productos?|qué\s+tienes?\s+en\s+inventario|qué\s+tienen?\s+en\s+inventario)/i;
+
+  const isExplicitInventoryRequest =
+    explicitInventoryPattern.test(message) &&
+    !specificProductPattern.test(message);
+
+  if (isExplicitInventoryRequest) {
+    logger.info(
+      { customerId, messageId },
+      "Explicit inventory request — calling browse-all search",
+    );
+
+    const inventoryItems = await searchProductsForClaude({
+      keyword: "*",
+      gender: customerGender,
+    });
+
+    if (inventoryItems.length > 0) {
+      // Flatten all product images from all results
+      const inventoryImages = inventoryItems.flatMap((item) => item.images);
+
+      const inventoryReply =
+        inventoryItems.length === 1
+          ? customerGender === "male"
+            ? "¡Aquí te comparto lo que tenemos disponible ahorita! 🛍️"
+            : "¡Aquí te comparto lo que tenemos disponible ahorita! 🛍️"
+          : customerGender === "male"
+            ? `¡Aquí tienes nuestra selección disponible — ${inventoryItems.length} productos! 🛍️`
+            : `¡Aquí tienes nuestra selección disponible — ${inventoryItems.length} productos! 🛍️`;
+
+      // Persist the turn so conversation history reflects this exchange
+      await ConversationModel.findOneAndUpdate(
+        { customerId, channel: "whatsapp" },
+        {
+          $push: {
+            turns: {
+              $each: [
+                {
+                  role: "user" as const,
+                  content: message,
+                  createdAt: new Date(),
+                },
+                {
+                  role: "assistant" as const,
+                  content: inventoryReply,
+                  createdAt: new Date(),
+                },
+              ],
+              $slice: -MAX_CONVERSATION_TURNS,
+            },
+          },
+          $set: { lastMessageAt: new Date() },
+        },
+        { upsert: true, returnDocument: "after" },
+      );
+
+      return toSafeResult(
+        {
+          reply: inventoryReply,
+          escalate: false,
+          customerPhone: from,
+          customerName,
+          productImages: inventoryImages,
+        },
+        from,
+        customerName,
+        customerGender,
+      );
+    }
+
+    // 0 results — fall through to Claude (catalog has no active products)
+    logger.info(
+      { customerId, messageId },
+      "Explicit inventory request — browse-all returned 0 results, falling through to Claude",
     );
   }
 
