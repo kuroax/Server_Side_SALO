@@ -584,6 +584,7 @@ async function searchProductsForClaude(
     if (hints.gender && hints.gender !== "unknown") {
       browseFilter.gender = hints.gender === "female" ? "women" : "men";
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let browseProducts: any[] = [];
     try {
       browseProducts = await ProductModel.find(browseFilter)
@@ -1493,7 +1494,7 @@ export const handleIncomingMessage = async (
   // without going through Claude — which would use vague keywords like
   // "inventario" that never match the text index, producing 0 results.
   const explicitInventoryPattern =
-    /(?:m[aá]nd[ae]me?|manda|dame|muéstrame?|muestra|ens[eé][ñn]ame?|ver|qu[ie]ero\s+ver|qu[ie]ero\s+que\s+me\s+(?:mandes?|muestres?))\s+(?:tus?\s+)?(?:productos?|inventario|catálogo|lo\s+que\s+tienes?|lo\s+que\s+tienen?|todo\s+lo\s+que\s+tienes?)|(?:tienes?\s+fotos?|tienes?\s+im[aá]genes?|fotos?\s+de\s+(?:tus?\s+)?productos?|qu[eé]\s+tienes?\s+en\s+inventario|qu[eé]\s+tienen?\s+en\s+inventario)/i;
+    /(?:m[aá]nd[ae]me?|manda|dame|madame|muéstrame?|muestra|ens[eé][ñn]ame?|ver|qu[ie]ero\s+ver|qu[ie]ero\s+que\s+me\s+(?:mandes?|muestres?))\s+(?:tus?\s+)?(?:productos?|inventario|catálogo|lo\s+que\s+tienes?|lo\s+que\s+tienen?|todo\s+lo\s+que\s+tienes?)|(?:tienes?\s+fotos?|tienes?\s+im[aá]genes?|fotos?\s+de\s+(?:tus?\s+)?productos?|qu[eé]\s+tienes?\s+en\s+inventario|qu[eé]\s+tienen?\s+en\s+inventario)/i;
 
   const isExplicitInventoryRequest =
     explicitInventoryPattern.test(message) &&
