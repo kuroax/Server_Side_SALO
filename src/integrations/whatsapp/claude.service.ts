@@ -205,6 +205,17 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
   },
 };
 
+const BROWSE_ALL_PRODUCTS_TOOL: Anthropic.Tool = {
+  name: "browse_all_products",
+  description:
+    "Returns all products currently in stock. Call this whenever the customer wants to see what is available — including typos, informal phrasing, or any variation of: show me products, send me photos, what do you have, dame lo que tienes, madame los productos, quiero ver inventario, me pasas fotos, qué modelos manejas, tienes algo disponible, manda lo que tengas, quiero mirar lo que tienes. No parameters needed.",
+  input_schema: {
+    type: "object" as const,
+    properties: {},
+    required: [],
+  },
+};
+
 // ─── Safe fallback ────────────────────────────────────────────────────────────
 
 const SAFE_FALLBACK = (
@@ -450,6 +461,21 @@ CUÁNDO NO USARLA:
 → Para comprobante de pago → payment_receipt.
 → Cuando el cliente pide ver su lista de pedido acumulado → order_summary.
 → Cuando el cliente quiere visitar el showroom → showroom_visit.
+
+─── HERRAMIENTA: browse_all_products ──────────────────────────────────
+→ Usa ESTA herramienta cuando el cliente pide ver todo lo disponible
+  sin especificar una prenda concreta.
+→ Ejemplos que SIEMPRE activan browse_all_products:
+  "dame lo que tienes", "mándame tus productos", "madame los productos",
+  "qué tienes disponible", "quiero ver inventario", "me pasas fotos",
+  "qué modelos manejas", "tienes algo", "manda todo lo que tengas",
+  "quiero mirar lo que tienes", "fotos de lo que hay", "qué hay",
+  "qué manejas", y cualquier variación con errores de escritura.
+→ NO uses search_products para estas frases.
+→ search_products es SOLO para cuando el cliente menciona una prenda
+  específica: leggings, bra, top, jersey, short, etc.
+→ Cliente pide ver todo sin especificar prenda → browse_all_products
+→ Cliente menciona prenda específica → search_products
 
 ─── REGLA CRÍTICA — parámetro gender en search_products ──────────────────────
 
@@ -1030,6 +1056,7 @@ async function runAgenticLoop(
   searchProducts: SearchProductsFn,
   depositPercent: number,
   paymentDays: number,
+  customerGender: "female" | "male" | "unknown",
 ): Promise<AgenticResult> {
   const messages: Anthropic.MessageParam[] = [
     ...(baseParams.messages as Anthropic.MessageParam[]),
@@ -1065,7 +1092,10 @@ async function runAgenticLoop(
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolUseBlocks) {
-      if (toolUse.name !== "search_products") {
+      if (
+        toolUse.name !== "search_products" &&
+        toolUse.name !== "browse_all_products"
+      ) {
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
@@ -1074,24 +1104,33 @@ async function runAgenticLoop(
         continue;
       }
 
-      const parsed = searchProductsInputSchema.safeParse(toolUse.input);
-      if (!parsed.success) {
-        logger.warn(
-          { issues: parsed.error.issues, input: toolUse.input },
-          "search_products tool call — invalid input from Claude",
-        );
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: "Error: parámetros de búsqueda inválidos.",
-        });
-        continue;
+      let hints: ClaudeSearchHints;
+      if (toolUse.name === "browse_all_products") {
+        // No parameters — browse all active in-stock products. The "*" keyword
+        // routes searchProducts (searchProductsForClaude) to its browse-all
+        // branch. Gender is applied for catalog relevance, with a no-gender
+        // retry on 0 results handled inside the callback.
+        hints = { keyword: "*", gender: customerGender };
+      } else {
+        const parsed = searchProductsInputSchema.safeParse(toolUse.input);
+        if (!parsed.success) {
+          logger.warn(
+            { issues: parsed.error.issues, input: toolUse.input },
+            "search_products tool call — invalid input from Claude",
+          );
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: "Error: parámetros de búsqueda inválidos.",
+          });
+          continue;
+        }
+        hints = parsed.data;
       }
 
-      const hints = parsed.data;
       logger.info(
-        { hints, iteration },
-        "search_products tool call — querying inventory",
+        { hints, iteration, tool: toolUse.name },
+        "product tool call — querying inventory",
       );
 
       let items: ProductSearchItem[];
@@ -1355,13 +1394,14 @@ INFORMACIÓN DEL NEGOCIO:
         model: CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
         system: fullSystemPrompt,
-        tools: [SEARCH_PRODUCTS_TOOL],
+        tools: [SEARCH_PRODUCTS_TOOL, BROWSE_ALL_PRODUCTS_TOOL],
         messages,
       },
       requestTimeoutMs,
       searchProducts,
       businessInfo.depositPercent,
       businessInfo.paymentDays,
+      customerGender,
     );
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "TimeoutError";
