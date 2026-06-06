@@ -476,6 +476,10 @@ CUÁNDO NO USARLA:
   específica: leggings, bra, top, jersey, short, etc.
 → Cliente pide ver todo sin especificar prenda → browse_all_products
 → Cliente menciona prenda específica → search_products
+→ Después de llamar browse_all_products:
+  - Si hay resultados → usa intent: product_search. El formato JSON es idéntico
+    al de search_products.
+  - Si no hay resultados → usa intent: catalog_query y pide especificación.
 
 ─── REGLA CRÍTICA — parámetro gender en search_products ──────────────────────
 
@@ -848,7 +852,7 @@ NUNCA uses needs_human para:
 ─── INTENCIONES ───────────────────────────────────────────────────────────────
 
 - catalog_query   : falta información — pregunta qué tipo de prenda busca
-- product_search  : llamaste search_products y encontraste resultados
+- product_search  : llamaste search_products O browse_all_products y encontraste resultados
 - price_query     : cliente pregunta precio de algo — responde directamente
 - create_order    : cliente confirmó pedido — producto + talla + color confirmados
 - order_status    : cliente pregunta por su pedido / envío / guía
