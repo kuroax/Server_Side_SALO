@@ -476,6 +476,12 @@ CUÁNDO NO USARLA:
   específica: leggings, bra, top, jersey, short, etc.
 → Cliente pide ver todo sin especificar prenda → browse_all_products
 → Cliente menciona prenda específica → search_products
+→ REGLA CRÍTICA — NO re-llamar si ya se mostró catálogo:
+  Si el historial reciente contiene [Productos enviados al cliente en este turn:]
+  significa que ya enviaste el catálogo. NO vuelvas a llamar browse_all_products
+  ni search_products. Continúa la conversación naturalmente: pregunta talla,
+  color, o avanza la venta. Un "Hola", sticker o mensaje corto después de ver
+  productos NO es una nueva solicitud de catálogo. intent: general.
 → Después de llamar browse_all_products:
   - Si hay resultados → usa intent: product_search. El formato JSON es idéntico
     al de search_products.
@@ -1260,10 +1266,24 @@ INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_prod
         "search_products tool call — results returned to Claude",
       );
 
+      // Inject a hard stop into the tool result on the second-to-last iteration
+      // (iteration MAX_TOOL_ITERATIONS - 2, zero-indexed). Claude sees this warning
+      // when it is called at the final iteration and is forced to respond with text
+      // instead of calling a tool again — preventing tool_loop_exhausted on
+      // genuine "no inventory" cases like "busco leggings negros talla S".
+      const isLastChance = iteration === MAX_TOOL_ITERATIONS - 2;
+      const lastChanceWarning = isLastChance
+        ? `\n\n⚠️ ÚLTIMA OPORTUNIDAD: No puedes llamar más herramientas después de esta. ` +
+          `Tu PRÓXIMA respuesta DEBE ser JSON puro sin tool_use. ` +
+          `Si no encontraste el producto solicitado, responde directamente al cliente: ` +
+          `informa que no tienes ese producto disponible en este momento, ` +
+          `ofrece lo que sí tienes como alternativa, y usa intent: general.`
+        : "";
+
       toolResults.push({
         type: "tool_result",
         tool_use_id: toolUse.id,
-        content: resultText,
+        content: resultText + lastChanceWarning,
       });
     }
 
@@ -1429,7 +1449,11 @@ INFORMACIÓN DEL NEGOCIO:
           ? "Claude agentic loop exhausted MAX_TOOL_ITERATIONS — returning safe fallback"
           : "Claude API call failed — returning safe fallback",
     );
-    return SAFE_FALLBACK(customerGender);
+    // Escalate when the agentic loop exhausted its iterations — this signals a
+    // genuine "product not found" or logic failure that the owner should see.
+    // Do NOT escalate on transient API errors or timeouts — those are retried
+    // automatically and would generate false-positive owner alerts.
+    return SAFE_FALLBACK(customerGender, isLoopExhausted);
   }
 
   if (agenticResult.stopReason === "max_tokens") {
