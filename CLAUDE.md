@@ -586,17 +586,7 @@ Do NOT remove this function. Do NOT move it after `sanitizeJsonNewlines()`.
 
 ### JSON reminder injection
 
-Every user message sent to Claude has a hard JSON reminder appended:
-
-```ts
-const JSON_REMINDER =
-  "\n\n⚠️ RECUERDA: Tu respuesta debe ser ÚNICAMENTE JSON puro...";
-const messageWithReminder = sanitizedMessage + JSON_REMINDER;
-```
-
-**Why:** Claude's JSON contract is defined in the system prompt. On complex multi-message buffered turns (e.g. gallery reaction + purchase confirmation + payment question), Claude occasionally abandons the JSON format entirely and responds in plain Spanish.
-
-The reminder is injected at the message level — the last thing Claude reads before generating — making format violations much harder. Do NOT remove this injection. The customer never sees the reminder.
+`JSON_REMINDER` is appended to every user message (last thing Claude reads) so it stays in JSON on complex buffered turns. Defined in `claude.service.ts`; never remove it. Customer never sees it.
 
 ### Message flow
 
@@ -683,6 +673,8 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Backend has no text-message idempotency (only images deduped via `trackImageMessageId`) | Duplicate text `messageId` re-runs the full Claude flow | Open — text dedup lives in n8n; add a backend guard if n8n dedup is lost on restart |
 | Test 15 marked `it.fails` (idempotency) | Green CI masks the text-dedup gap | Drop the marker once the backend dedups text messages |
 | `product_search` 0 results auto-escalates | Conflicts with new text-reply prompt guidance | Reconcile in `webhook.service.ts` |
+| browse-all `*` block duplicates the inventory join in `searchProductsForClaude` | Two joins can drift | Refactor to a shared helper |
+| Broad/inventory routing now always round-trips to Claude | API cost+latency; depends on model routing | Monitor misroutes and cost |
 
 ---
 
@@ -734,4 +726,4 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never call the real Claude/WhatsApp/Graph API in tests — mock claude/alert/image-search services
 - Never set env vars after the imports in `setup.ts` — `env.ts` validates at import and exits on miss
 - Never send `imageCaption: null` in a webhook payload — the schema requires a string; use `""`
-- Never re-ask a broad catalog question already answered — call search_products instead
+- Never escalate SAFE_FALLBACK on timeout/API error — only on tool_loop_exhausted
