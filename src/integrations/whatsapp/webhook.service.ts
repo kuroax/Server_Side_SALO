@@ -1176,12 +1176,45 @@ export const handleIncomingMessage = async (
           {
             $set: {
               customerName,
-              cart: cart.map((item) => ({
-                productNameHint: item.description,
-                size: "?",
-                color: "?",
-                quantity: 1,
-              })),
+              cart: cart.map((item) => {
+                const desc = item.description;
+
+                // Extract size — matches "Talla S", "Talla XS", "Talla XXL"
+                const sizeMatch = desc.match(/\bTalla\s+([A-Z]{1,4})\b/i);
+                const size = sizeMatch ? sizeMatch[1].toUpperCase() : "?";
+
+                // Extract color — strategy depends on description format:
+                // Pipe-delimited: "... | ALO | Paradise Pink | Talla S | ..."
+                //   → take the segment immediately before the "Talla" segment
+                // Space-delimited: "... color negro Talla S ..."
+                //   → take the word(s) after "color"
+                let color = "?";
+
+                if (desc.includes("|")) {
+                  // Split on pipe, trim each segment, find the one right before
+                  // the segment that starts with "Talla"
+                  const segments = desc.split("|").map((s) => s.trim());
+                  const tallaIndex = segments.findIndex((s) =>
+                    /^Talla\s+/i.test(s),
+                  );
+                  if (tallaIndex > 0) {
+                    color = segments[tallaIndex - 1];
+                  }
+                } else {
+                  // Space-delimited: extract word(s) after "color"
+                  const colorMatch = desc.match(
+                    /\bcolor\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)\b/i,
+                  );
+                  if (colorMatch) color = colorMatch[1].trim();
+                }
+
+                return {
+                  productNameHint: desc,
+                  size,
+                  color,
+                  quantity: 1,
+                };
+              }),
               expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
             },
           },
