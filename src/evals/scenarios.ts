@@ -200,4 +200,78 @@ export const scenarios: EvalScenario[] = [
       },
     ],
   },
+  {
+    name: "Lourdes — texture material question",
+    description: "Customer asks if leggings are shiny/glossy. Luis should answer naturally without escalating.",
+    turns: [
+      {
+        customerMessage: "Oye y las leggings son brillosas?",
+        priorHistory: [
+          { role: "user", content: "Quiero las leggings blancas talla M" },
+          {
+            role: "assistant",
+            content:
+              '{"intent":"general","response":"¡Sí bonita! Tengo las leggings blancas en talla M disponibles 🙌🏼 ¿Las apartamos?"}',
+          },
+        ],
+        criteria: [
+          isInSpanish(),
+          doesNotEscalate(),
+          doesNotContain("permíteme un momento"),
+          doesNotContain("ahorita te atiendo"),
+        ],
+      },
+    ],
+  },
+  {
+    name: "Lourdes — payment timing advice",
+    description: "Customer asks whether to pay now or wait to bundle with more items. Luis should advise naturally.",
+    turns: [
+      {
+        customerMessage: "Oye qué me recomiendas, te pago la sudadera ya o espero a ver las leggings y compramos todo junto?",
+        priorHistory: [
+          { role: "user", content: "Quiero la sudadera talla M" },
+          {
+            role: "assistant",
+            content:
+              '{"intent":"general","response":"¡Perfecto bonita! La sudadera está a $3,390. ¿La apartamos con el 30%?"}',
+          },
+        ],
+        criteria: [
+          isInSpanish(),
+          doesNotEscalate(),
+          doesNotContain("permíteme un momento"),
+          doesNotContain("ahorita te atiendo"),
+          {
+            name: "gives practical advice",
+            description: "Luis must give a recommendation or practical guidance",
+            check: (response) => /recomiendo|puedes|apartamos|junto|espera|cuando|quieras|ambas/i.test(response),
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "Natalia — order cancellation must escalate",
+    description: "Customer asks to cancel an item from her order. Luis cannot do this automatically — must escalate.",
+    turns: [
+      {
+        customerMessage: "Este me lo cancelas xfa",
+        priorHistory: [
+          { role: "user", content: "Quiero el set azul marino talla M" },
+          {
+            role: "assistant",
+            content:
+              '{"intent":"create_order","response":"¡Perfecto! Tu pedido está registrado. ⭐️Top azul marino Talla M $2,290\\n⭐️Short azul marino Talla M $1,990\\nTotal: $4,280 🙌🏼"}',
+          },
+        ],
+        criteria: [
+          isInSpanish(),
+          escalates(),
+          doesNotContain("cancelado"),
+          doesNotContain("listo"),
+        ],
+      },
+    ],
+  },
 ];

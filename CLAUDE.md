@@ -593,6 +593,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - `src/__tests__/integration/webhook.test.ts` — 15 tests: gate, prospects, buffer, set-human-mode.
 - Fixtures/mocks: seeded boutique, n8n payloads, Claude/alert/image-search stubs.
 - Scripts: `test`, `test:watch`, `test:coverage`, `test:integration`.
+- Evals: `src/evals/` — offline prompt-quality harness over real processMessage; `npm run eval [-- keyword]`.
 
 ---
 
@@ -631,6 +632,8 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Receipt without orderHints stores cart size/color as `?` | owner-confirm can't resolve → manual order | Capture full variant on receipt |
 | `LOOKUP_BY_BOUTIQUE` picks the most-recent pending | Can confirm wrong customer | Pass phone when present |
 | Receipt color/size parser is heuristic | Wrong/empty color fails inventory match | Capture variant at source |
+| Eval hits real `MONGODB_URI` + spends real Claude credits | Prod connection / cost | Gate behind test DB/flag |
+| `MOCK_SEARCH_PRODUCTS` ignores keyword (always Jersey) | Weak search coverage | Make it keyword-aware |
 
 ---
 
@@ -685,3 +688,4 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never set env vars after the imports in `setup.ts` — `env.ts` validates at import and exits on miss
 - Never send `imageCaption: null` in a webhook payload — the schema requires a string; use `""`
 - Never escalate SAFE_FALLBACK on timeout/API error — only on tool_loop_exhausted
+- Never answer size/talla questions in plain text — always JSON (intent: general)
