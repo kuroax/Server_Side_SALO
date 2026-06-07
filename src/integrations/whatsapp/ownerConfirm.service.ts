@@ -80,10 +80,20 @@ export const handleOwnerConfirm = async (
   const boutiqueObjectId = new mongoose.Types.ObjectId(boutiqueId);
 
   // 1. Find the pending payment record (boutique-scoped).
-  const pending = await PendingPaymentModel.findOne({
-    boutiqueId: boutiqueObjectId,
-    customerPhone,
-  }).lean();
+  // If customerPhone is "LOOKUP_BY_BOUTIQUE", find the most recent pending
+  // payment for this boutique — used when the owner confirms via natural
+  // language ("ya confirmé el pago") without specifying the customer phone.
+  const pendingQuery =
+    customerPhone === "LOOKUP_BY_BOUTIQUE"
+      ? PendingPaymentModel.findOne({
+          boutiqueId: boutiqueObjectId,
+        }).sort({ createdAt: -1 })
+      : PendingPaymentModel.findOne({
+          boutiqueId: boutiqueObjectId,
+          customerPhone,
+        });
+
+  const pending = await pendingQuery.lean();
 
   if (!pending) {
     logger.info(
@@ -93,12 +103,17 @@ export const handleOwnerConfirm = async (
     return { status: "no_pending_payment" };
   }
 
+  // Use the resolved customerPhone from the pending document going forward
+  const resolvedCustomerPhone = pending.customerPhone;
+
   // 2. Find the customer record.
   // NOTE: queried by phone only — bot-created customers do not carry boutiqueId
   // (documented tech debt), so a boutiqueId filter would return null here.
-  const customer = await CustomerModel.findOne({ phone: customerPhone }).lean();
+  const customer = await CustomerModel.findOne({
+    phone: resolvedCustomerPhone,
+  }).lean();
   if (!customer) {
-    logger.warn({ customerPhone }, "ownerConfirm — customer not found");
+    logger.warn({ resolvedCustomerPhone }, "ownerConfirm — customer not found");
     return { status: "customer_not_found" };
   }
 
@@ -148,7 +163,7 @@ export const handleOwnerConfirm = async (
 
   if (resolvedItems.length === 0) {
     logger.warn(
-      { boutiqueId, customerPhone, cartItems: pending.cart.length },
+      { boutiqueId, resolvedCustomerPhone, cartItems: pending.cart.length },
       "ownerConfirm — no cart items could be resolved to in-stock products",
     );
     return { status: "error", reason: "no resolvable cart items" };
@@ -163,7 +178,7 @@ export const handleOwnerConfirm = async (
         items: resolvedItems,
         notes: [
           {
-            message: `Pago confirmado manualmente por el dueño. Cliente: ${customerPhone}.`,
+            message: `Pago confirmado manualmente por el dueño. Cliente: ${resolvedCustomerPhone}.`,
             kind: "system",
           },
         ],
@@ -173,28 +188,28 @@ export const handleOwnerConfirm = async (
     );
 
     logger.info(
-      { orderNumber: created.orderNumber, customerPhone, boutiqueId },
+      { orderNumber: created.orderNumber, resolvedCustomerPhone, boutiqueId },
       "ownerConfirm — order created",
     );
 
     // 5. Delete the pending payment to prevent duplicates.
     await PendingPaymentModel.deleteOne({
       boutiqueId: boutiqueObjectId,
-      customerPhone,
+      customerPhone: resolvedCustomerPhone,
     });
 
     // 6. Notify the customer.
     await sendWhatsAppText(
       phoneNumberId,
       accessToken,
-      customerPhone,
+      resolvedCustomerPhone,
       `¡Tu pago fue confirmado! 🙌🏼 Tu pedido ${created.orderNumber} está en proceso. Te avisamos en cuanto vaya en camino 🙏🏻`,
     );
 
     return { status: "order_created", orderNumber: created.orderNumber };
   } catch (err) {
     logger.error(
-      { err, customerPhone, boutiqueId },
+      { err, resolvedCustomerPhone, boutiqueId },
       "ownerConfirm — createOrder failed",
     );
     return {

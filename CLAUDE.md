@@ -580,9 +580,7 @@ Either signal skips `searchProductsByImage` and routes to receipt acknowledgment
 
 ### Markdown fence stripper
 
-`stripMarkdownFences()` — runs BEFORE `sanitizeJsonNewlines()`. Claude occasionally wraps its JSON response in ` ```json ``` ` despite the system prompt contract. `JSON.parse` fails on the backticks. This function strips the fences so the sanitizer only sees raw JSON.
-
-Do NOT remove this function. Do NOT move it after `sanitizeJsonNewlines()`.
+`stripMarkdownFences()` strips ` ```json ``` ` fences and runs BEFORE `sanitizeJsonNewlines()`. Never remove it or reorder the two (see NEVER rules). In `claude.service.ts`.
 
 ### JSON reminder injection
 
@@ -676,6 +674,8 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | browse-all `*` block duplicates the inventory join in `searchProductsForClaude` | Two joins can drift | Refactor to a shared helper |
 | Broad/inventory routing now always round-trips to Claude | API cost+latency; depends on model routing | Monitor misroutes and cost |
 | `[payment_info_sent]` now fires at PASO 2 (after confirmation) | Early receipt not context-detected | Rely on caption |
+| `owner-confirm` needs n8n to parse "CONFIRMAR PAGO" + send secret/creds | Unusable until n8n wired | Wire n8n command parsing |
+| Receipt without orderHints stores cart size/color as `?` | owner-confirm can't resolve → manual order | Capture full variant on receipt |
 
 ---
 
