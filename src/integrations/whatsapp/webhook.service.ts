@@ -1167,6 +1167,37 @@ export const handleIncomingMessage = async (
         "Payment receipt — built cart-aware ack from conversation history",
       );
 
+      // Persist cart for owner-confirm endpoint — same upsert as the
+      // Claude text path. Image receipts bypass Claude so this is the
+      // only place to write pendingPayments on the image path.
+      if (cart.length > 0) {
+        await PendingPaymentModel.findOneAndUpdate(
+          { boutiqueId, customerPhone: from },
+          {
+            $set: {
+              customerName,
+              cart: cart.map((item) => ({
+                productNameHint: item.description,
+                size: "?",
+                color: "?",
+                quantity: 1,
+              })),
+              expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            },
+          },
+          { upsert: true, returnDocument: "after" },
+        ).catch((err) => {
+          logger.warn(
+            { err, boutiqueId, customerPhone: from },
+            "pendingPayments upsert failed (image path) — non-critical",
+          );
+        });
+        logger.info(
+          { boutiqueId, customerPhone: from, cartItems: cart.length },
+          "pendingPayments upsert — cart saved for owner-confirm (image path)",
+        );
+      }
+
       // Persist the receipt turn so subsequent text messages have this context.
       // Storing "[Comprobante de pago enviado]" as the user turn prevents Claude
       // from treating the next message as coming out of nowhere.
