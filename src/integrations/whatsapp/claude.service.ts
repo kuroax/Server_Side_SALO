@@ -1207,7 +1207,7 @@ async function runAgenticLoop(
 
 INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_products de nuevo. NO anuncies imágenes. ` +
             `Redacta UNA respuesta que cubra TODAS las preguntas del mensaje: disponibilidad ✓, precio, anticipo, entrega, siguiente paso. ` +
-            `Si el mensaje contiene "cuenta", "depositar", "dónde pago" o preguntas de entrega → usa intent: payment_info (el sistema enviará los datos bancarios automáticamente). ` +
+            `Si el mensaje contiene "cuenta", "depositar", "dónde pago" o preguntas de entrega → NO uses intent: payment_info todavía. Muestra el resumen del pedido con formato ⭐️ (producto, talla, color, precio, envío, total, anticipo) y termina con "¿Confirmas tu pedido para enviarte los datos de depósito? 🙌🏼". Usa intent: general. El sistema enviará la imagen SOLO después de que el cliente confirme explícitamente en el siguiente turno. ` +
             `Si solo confirmó talla sin pedir datos de pago → usa intent: price_query. ` +
             `Respuesta modelo: "¡Sí bonita, tengo disponible la talla [X]! El [producto] está a $[precio]. Para apartarlo depositas el [%]%, equivalente a $[anticipo], y liquidas dentro de [días] días 🙌🏼 El tiempo de entrega es de [deliveryInfo]. Aquí van los datos 🙌🏼"` +
             setCompletionHint
