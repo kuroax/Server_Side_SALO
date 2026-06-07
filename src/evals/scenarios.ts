@@ -149,7 +149,7 @@ export const scenarios: EvalScenario[] = [
           {
             name: "gives size guidance",
             description: "Luis must give some size guidance or ask a clarifying question about size/fit",
-            check: (response) => /talla|fit|ajustado|medida|recomiendo|quedar[áa]|talla|pequeño|grande/i.test(response),
+            check: (response) => /talla|fit|ajustad[oa]|medida|recomend|quedar[áa]|pequeñ[oa]|grande|holgad[oa]|ceñid[oa]|amplio|amplia/i.test(response),
           },
         ],
       },
