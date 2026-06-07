@@ -501,35 +501,7 @@ Changing this enum requires updating: `claude.service.ts`, `webhook.service.ts`,
 
 ### ClaudeContext — current shape
 
-```ts
-type ClaudeContext = {
-  customerName: string | null;
-  customerGender: "female" | "male" | "unknown";
-  customerLifetimeValue?: number;
-  recentOrder: {
-    orderNumber: string;
-    status: string;
-    total: number;
-    outstandingBalance?: number;
-    trackingNumber?: string;
-    estimatedDelivery?: string;
-    items?: OrderItem[];
-  } | null;
-  searchProducts: SearchProductsFn;
-  incomingMessage: string;
-  conversationHistory: ConversationTurnInput[];
-  businessInfo: {
-    showroomAddress: string;
-    businessHours: string;
-    shippingPrice: number;
-    paymentMethods: string;
-    depositPercent: number;
-    paymentDays: number;
-    deliveryInfo: string; // e.g. "3 a 7 dias habiles una vez confirmado el pago"
-    activePromotion?: string; // stored per-boutique in boutique.businessInfo.activePromotion
-  };
-};
-```
+Full type in `claude.service.ts`. Carries `customerName`, `customerGender`, `customerLifetimeValue?`, `recentOrder`, `searchProducts`, `incomingMessage`, `conversationHistory`, and `businessInfo` (`showroomAddress`, `businessHours`, `shippingPrice`, `paymentMethods`, `depositPercent`, `paymentDays`, `deliveryInfo`, `activePromotion?` — `activePromotion` stored per-boutique in `boutique.businessInfo`).
 
 ### Image suppression rule
 
@@ -537,19 +509,7 @@ Product images flow ONLY when `result.intent === "product_search"`. All other in
 
 ### ⭐️ format — required for cart extraction
 
-When Luis confirms availability or gives payment info, product lines MUST use:
-
-```
-⭐️Jersey Accolade Negro | Talla M | $1,990
-```
-
-`extractCartFromHistory()` uses a three-pass approach to find cart items:
-
-1. Primary: scan all assistant turns for ⭐️ lines
-2. Secondary: natural language price mentions (only if primary found nothing)
-3. Tertiary: `[Producto exacto seleccionado por el cliente: NAME]` tag (only if secondary found nothing)
-
-Missing ⭐️ format = bot asks customer to re-confirm product on receipt — bad UX.
+When Luis confirms availability or gives payment info, product lines MUST use the format `⭐️Jersey Accolade Negro | Talla M | $1,990`. `extractCartFromHistory()` finds cart items in three passes: ⭐️ lines → natural-language price mentions → `[Producto exacto seleccionado por el cliente: NAME]` tag (each only if the prior found nothing). Missing ⭐️ format = bot re-asks product on receipt (bad UX).
 
 ### System tags in conversation history
 
@@ -565,18 +525,11 @@ These tags are injected into stored turns by the backend. Claude reads them for 
 
 ### Receipt detection — dual signal
 
-```ts
-isLikelyReceipt = isReceiptByContext || isReceiptByCaption;
-```
-
-- **Context:** `hasRecentPaymentInfoContext()` finds `[payment_info_sent]` in last 20 turns
-- **Caption:** customer text matches receipt phrases
-
-Either signal skips `searchProductsByImage` and routes to receipt acknowledgment.
+`isLikelyReceipt` = `hasRecentPaymentInfoContext()` finds `[payment_info_sent]` OR caption matches receipt phrases → skips `searchProductsByImage`, receipt ack.
 
 ### JSON sanitizer
 
-`sanitizeJsonNewlines()` — character-by-character state machine that escapes bare `\n`/`\r` inside JSON string values before `JSON.parse`. Prevents SAFE_FALLBACK when Claude generates multi-line ⭐️ summaries. Do NOT replace with a regex approach — regex only handles single newlines per string.
+`sanitizeJsonNewlines()` escapes bare `\n`/`\r` in JSON strings before `JSON.parse` (prevents SAFE_FALLBACK on ⭐️ summaries). Never replace with regex (NEVER rules).
 
 ### Markdown fence stripper
 
@@ -584,7 +537,7 @@ Either signal skips `searchProductsByImage` and routes to receipt acknowledgment
 
 ### JSON reminder injection
 
-`JSON_REMINDER` is appended to every user message (last thing Claude reads) so it stays in JSON on complex buffered turns. Defined in `claude.service.ts`; never remove it. Customer never sees it.
+`JSON_REMINDER` appended to every user message (last thing Claude reads); keeps JSON on buffered turns. In `claude.service.ts`; never remove.
 
 ### Message flow
 
@@ -676,6 +629,8 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `[payment_info_sent]` now fires at PASO 2 (after confirmation) | Early receipt not context-detected | Rely on caption |
 | `owner-confirm` needs n8n to parse "CONFIRMAR PAGO" + send secret/creds | Unusable until n8n wired | Wire n8n command parsing |
 | Receipt without orderHints stores cart size/color as `?` | owner-confirm can't resolve → manual order | Capture full variant on receipt |
+| `LOOKUP_BY_BOUTIQUE` picks the most-recent pending | Can confirm wrong customer | Pass phone when present |
+| Receipt color/size parser is heuristic | Wrong/empty color fails inventory match | Capture variant at source |
 
 ---
 
@@ -696,6 +651,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never add/remove a `ClaudeIntent` without updating all three required places
 - Never call `search_products` for `order_summary`
 - Never escalate `payment_info` to the owner
+- Never leave `/owner-confirm` unauthenticated — it creates orders and sends WhatsApp
 - Never send the bank image on first payment ask — confirm explicitly (PASO 2) first
 - Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown`
 - Never read `lifetimeValue === 0` as "new customer" — it is `undefined` for new customers
