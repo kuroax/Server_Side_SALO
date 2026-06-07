@@ -7,6 +7,7 @@ import {
   MAX_CONVERSATION_TURNS,
 } from "#/modules/conversations/conversation.model.js";
 import { SentImageModel } from "#/modules/sentImages/sentImage.model.js";
+import { PendingPaymentModel } from "#/modules/pendingPayments/pendingPayment.model.js";
 import { createOrder } from "#/modules/orders/order.service.js";
 import { processMessage } from "#/integrations/whatsapp/claude.service.js";
 import { searchProductsByImage } from "#/integrations/whatsapp/image-search.service.js";
@@ -1702,6 +1703,41 @@ ${incomingMessageForClaude}`;
       { customerId, messageId, cartItems: result.orderHints?.length ?? 0 },
       "payment_receipt intent — escalating to owner for payment verification",
     );
+
+    // Persist cart so the owner-confirm endpoint can create the order
+    // without re-reading conversation history. Upsert so a second receipt
+    // from the same customer overwrites rather than duplicates.
+    const pendingCart = result.orderHints?.length
+      ? result.orderHints
+      : extractCartFromHistory(allTurns).map((item) => ({
+          productNameHint: item.description,
+          size: "?",
+          color: "?",
+          quantity: 1,
+        }));
+
+    if (pendingCart.length > 0) {
+      await PendingPaymentModel.findOneAndUpdate(
+        { boutiqueId, customerPhone: from },
+        {
+          $set: {
+            customerName,
+            cart: pendingCart,
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          },
+        },
+        { upsert: true, returnDocument: "after" },
+      ).catch((err) => {
+        logger.warn(
+          { err, boutiqueId, customerPhone: from },
+          "pendingPayments upsert failed — non-critical, escalation still fires",
+        );
+      });
+      logger.info(
+        { boutiqueId, customerPhone: from, cartItems: pendingCart.length },
+        "pendingPayments upsert — cart saved for owner-confirm",
+      );
+    }
   }
 
   // ── create_order ──────────────────────────────────────────────────────────

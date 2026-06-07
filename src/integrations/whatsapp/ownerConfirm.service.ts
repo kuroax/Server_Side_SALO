@@ -1,0 +1,205 @@
+import mongoose from "mongoose";
+import { z } from "zod";
+import { logger } from "#/config/logger.js";
+import { PendingPaymentModel } from "#/modules/pendingPayments/pendingPayment.model.js";
+import { createOrder } from "#/modules/orders/order.service.js";
+import { CustomerModel } from "#/modules/customers/customer.model.js";
+import { InventoryModel } from "#/modules/inventory/inventory.model.js";
+import { ProductModel } from "#/modules/products/product.model.js";
+
+// ─── Input schema ─────────────────────────────────────────────────────────────
+
+export const ownerConfirmSchema = z.object({
+  boutiqueId: z.string().min(1),
+  customerPhone: z.string().min(1),
+  ownerPhone: z.string().min(1),
+  accessToken: z.string().min(1),
+  phoneNumberId: z.string().min(1),
+});
+
+export type OwnerConfirmInput = z.infer<typeof ownerConfirmSchema>;
+
+// ─── Result ───────────────────────────────────────────────────────────────────
+
+export type OwnerConfirmResult =
+  | { status: "order_created"; orderNumber: string }
+  | { status: "no_pending_payment" }
+  | { status: "customer_not_found" }
+  | { status: "error"; reason: string };
+
+const GRAPH_API_VERSION = "v20.0";
+
+// Order item shape expected by createOrderSchema (order.validation.ts).
+// size/color are normalized to canonical casing by the schema; we resolve
+// productId + unitPrice from the live product record here.
+type ResolvedItem = {
+  productId: string;
+  size: string;
+  color: string;
+  quantity: number;
+  unitPrice: number;
+};
+
+// Direct Graph API send — same deliberate exception as alert.service.ts (owner/
+// out-of-band notifications). Never throws; never logs the accessToken.
+async function sendWhatsAppText(
+  phoneNumberId: string,
+  accessToken: string,
+  to: string,
+  body: string,
+): Promise<void> {
+  try {
+    const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body },
+      }),
+    });
+  } catch (err) {
+    logger.warn(
+      { err, to },
+      "ownerConfirm — failed to send customer WhatsApp notification",
+    );
+  }
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
+export const handleOwnerConfirm = async (
+  input: OwnerConfirmInput,
+): Promise<OwnerConfirmResult> => {
+  const { boutiqueId, customerPhone, accessToken, phoneNumberId } = input;
+  const boutiqueObjectId = new mongoose.Types.ObjectId(boutiqueId);
+
+  // 1. Find the pending payment record (boutique-scoped).
+  const pending = await PendingPaymentModel.findOne({
+    boutiqueId: boutiqueObjectId,
+    customerPhone,
+  }).lean();
+
+  if (!pending) {
+    logger.info(
+      { boutiqueId, customerPhone },
+      "ownerConfirm — no pending payment found, possible duplicate confirm",
+    );
+    return { status: "no_pending_payment" };
+  }
+
+  // 2. Find the customer record.
+  // NOTE: queried by phone only — bot-created customers do not carry boutiqueId
+  // (documented tech debt), so a boutiqueId filter would return null here.
+  const customer = await CustomerModel.findOne({ phone: customerPhone }).lean();
+  if (!customer) {
+    logger.warn({ customerPhone }, "ownerConfirm — customer not found");
+    return { status: "customer_not_found" };
+  }
+
+  // 3. Resolve cart hints to real product + in-stock variant, building the
+  //    order item shape createOrder expects ({ productId, size, color,
+  //    quantity, unitPrice }).
+  const resolvedItems: ResolvedItem[] = [];
+
+  for (const hint of pending.cart) {
+    if (hint.size === "?" || hint.color === "?") {
+      // Cart was extracted from history without full detail — skip resolution
+      // and let the owner create the order manually from the app if needed.
+      logger.warn(
+        { hint },
+        "ownerConfirm — cart item missing size/color, skipping resolution",
+      );
+      continue;
+    }
+
+    const product = await ProductModel.findOne({
+      boutiqueId: boutiqueObjectId,
+      name: { $regex: hint.productNameHint, $options: "i" },
+      status: "active",
+    }).lean();
+
+    if (!product) continue;
+
+    // inventory.size is stored uppercase, color lowercase (pre-save hooks).
+    const inventory = await InventoryModel.findOne({
+      boutiqueId: boutiqueObjectId,
+      productId: product._id,
+      size: hint.size.trim().toUpperCase(),
+      color: { $regex: hint.color.trim().toLowerCase(), $options: "i" },
+      quantity: { $gt: 0 },
+    }).lean();
+
+    if (!inventory) continue;
+
+    resolvedItems.push({
+      productId: product._id.toString(),
+      size: hint.size,
+      color: hint.color,
+      quantity: hint.quantity,
+      unitPrice: product.price,
+    });
+  }
+
+  if (resolvedItems.length === 0) {
+    logger.warn(
+      { boutiqueId, customerPhone, cartItems: pending.cart.length },
+      "ownerConfirm — no cart items could be resolved to in-stock products",
+    );
+    return { status: "error", reason: "no resolvable cart items" };
+  }
+
+  try {
+    // 4. Create the order. createOrder(input, createdBy, sourceMessageId).
+    const created = await createOrder(
+      {
+        customerId: customer._id.toString(),
+        channel: "whatsapp",
+        items: resolvedItems,
+        notes: [
+          {
+            message: `Pago confirmado manualmente por el dueño. Cliente: ${customerPhone}.`,
+            kind: "system",
+          },
+        ],
+      },
+      null,
+      null,
+    );
+
+    logger.info(
+      { orderNumber: created.orderNumber, customerPhone, boutiqueId },
+      "ownerConfirm — order created",
+    );
+
+    // 5. Delete the pending payment to prevent duplicates.
+    await PendingPaymentModel.deleteOne({
+      boutiqueId: boutiqueObjectId,
+      customerPhone,
+    });
+
+    // 6. Notify the customer.
+    await sendWhatsAppText(
+      phoneNumberId,
+      accessToken,
+      customerPhone,
+      `¡Tu pago fue confirmado! 🙌🏼 Tu pedido ${created.orderNumber} está en proceso. Te avisamos en cuanto vaya en camino 🙏🏻`,
+    );
+
+    return { status: "order_created", orderNumber: created.orderNumber };
+  } catch (err) {
+    logger.error(
+      { err, customerPhone, boutiqueId },
+      "ownerConfirm — createOrder failed",
+    );
+    return {
+      status: "error",
+      reason: err instanceof Error ? err.message : "unknown",
+    };
+  }
+};

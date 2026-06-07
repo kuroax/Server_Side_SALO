@@ -675,6 +675,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `product_search` 0 results auto-escalates | Conflicts with new text-reply prompt guidance | Reconcile in `webhook.service.ts` |
 | browse-all `*` block duplicates the inventory join in `searchProductsForClaude` | Two joins can drift | Refactor to a shared helper |
 | Broad/inventory routing now always round-trips to Claude | API cost+latency; depends on model routing | Monitor misroutes and cost |
+| `[payment_info_sent]` now fires at PASO 2 (after confirmation) | Early receipt not context-detected | Rely on caption |
 
 ---
 
@@ -695,6 +696,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never add/remove a `ClaudeIntent` without updating all three required places
 - Never call `search_products` for `order_summary`
 - Never escalate `payment_info` to the owner
+- Never send the bank image on first payment ask — confirm explicitly (PASO 2) first
 - Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown`
 - Never read `lifetimeValue === 0` as "new customer" — it is `undefined` for new customers
 - Never use `i.name` for order items — the schema field is `productName`

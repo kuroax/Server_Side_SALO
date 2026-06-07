@@ -7,6 +7,10 @@ import {
 import { logSentImageHandler } from "#/integrations/whatsapp/logSentImage.controller.js";
 import { setHumanModeHandler } from "#/integrations/whatsapp/setHumanMode.controller.js";
 import { requireBufferWebhookSecret } from "#/integrations/whatsapp/webhook.auth.js";
+import {
+  handleOwnerConfirm,
+  ownerConfirmSchema,
+} from "#/integrations/whatsapp/ownerConfirm.service.js";
 
 export const whatsappWebhookRouter = Router();
 
@@ -45,4 +49,24 @@ whatsappWebhookRouter.post(
   "/set-human-mode",
   requireBufferWebhookSecret,
   setHumanModeHandler,
+);
+
+// POST /api/webhooks/whatsapp/owner-confirm
+// Called when the owner sends "CONFIRMAR PAGO {customerPhone}" — creates the
+// order from the stored pendingPayments cart and notifies the customer.
+// Secret-gated like every other write route (it creates orders + sends WA).
+whatsappWebhookRouter.post(
+  "/owner-confirm",
+  requireBufferWebhookSecret,
+  async (req, res) => {
+    const parsed = ownerConfirmSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res
+        .status(400)
+        .json({ error: "Invalid input", issues: parsed.error.issues });
+      return;
+    }
+    const result = await handleOwnerConfirm(parsed.data);
+    res.status(200).json(result);
+  },
 );
