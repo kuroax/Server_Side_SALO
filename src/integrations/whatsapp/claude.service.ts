@@ -1487,11 +1487,9 @@ INFORMACIÓN DEL NEGOCIO:
           ? "Claude agentic loop exhausted MAX_TOOL_ITERATIONS — returning safe fallback"
           : "Claude API call failed — returning safe fallback",
     );
-    // Escalate when the agentic loop exhausted its iterations — this signals a
-    // genuine "product not found" or logic failure that the owner should see.
-    // Do NOT escalate on transient API errors or timeouts — those are retried
-    // automatically and would generate false-positive owner alerts.
-    return SAFE_FALLBACK(customerGender, isLoopExhausted);
+    // Escalate on any failure — silent drops lose sales.
+    // tool_loop_exhausted and api_timeout both need owner awareness.
+    return SAFE_FALLBACK(customerGender, true);
   }
 
   if (agenticResult.stopReason === "max_tokens") {
@@ -1504,7 +1502,8 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude response was truncated at token limit — increase MAX_TOKENS or reduce prompt size",
     );
-    return SAFE_FALLBACK(customerGender);
+    // max_tokens: the cart or response was truncated — owner should know.
+    return SAFE_FALLBACK(customerGender, true);
   }
 
   // Handle the tool_loop_exhausted_with_images sentinel: MAX_TOOL_ITERATIONS
@@ -1519,7 +1518,7 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Tool loop exhausted with images — discarding images, returning safe fallback",
     );
-    return SAFE_FALLBACK(customerGender);
+    return SAFE_FALLBACK(customerGender, true);
   }
 
   let parsed: unknown;
@@ -1593,7 +1592,8 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude returned non-JSON (after sanitization) — returning safe fallback",
     );
-    return SAFE_FALLBACK(customerGender);
+    // Non-JSON response: Claude broke the contract — owner should know.
+    return SAFE_FALLBACK(customerGender, true);
   }
 
   const validated = claudeResultSchema.safeParse(parsed);
@@ -1606,7 +1606,8 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude output failed schema validation — returning safe fallback",
     );
-    return SAFE_FALLBACK(customerGender);
+    // Schema validation failed — Claude output was malformed.
+    return SAFE_FALLBACK(customerGender, true);
   }
 
   logger.info(

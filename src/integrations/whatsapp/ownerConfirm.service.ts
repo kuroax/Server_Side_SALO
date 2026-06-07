@@ -1,8 +1,12 @@
 import mongoose from "mongoose";
 import { z } from "zod";
 import { logger } from "#/config/logger.js";
-import { PendingPaymentModel } from "#/modules/pendingPayments/pendingPayment.model.js";
+import {
+  PendingPaymentModel,
+  type IPendingPayment,
+} from "#/modules/pendingPayments/pendingPayment.model.js";
 import { createOrder } from "#/modules/orders/order.service.js";
+import { OrderModel } from "#/modules/orders/order.model.js";
 import { CustomerModel } from "#/modules/customers/customer.model.js";
 import { InventoryModel } from "#/modules/inventory/inventory.model.js";
 import { ProductModel } from "#/modules/products/product.model.js";
@@ -83,17 +87,35 @@ export const handleOwnerConfirm = async (
   // If customerPhone is "LOOKUP_BY_BOUTIQUE", find the most recent pending
   // payment for this boutique — used when the owner confirms via natural
   // language ("ya confirmé el pago") without specifying the customer phone.
-  const pendingQuery =
-    customerPhone === "LOOKUP_BY_BOUTIQUE"
-      ? PendingPaymentModel.findOne({
-          boutiqueId: boutiqueObjectId,
-        }).sort({ createdAt: -1 })
-      : PendingPaymentModel.findOne({
-          boutiqueId: boutiqueObjectId,
-          customerPhone,
-        });
+  let pending: IPendingPayment | null = null;
 
-  const pending = await pendingQuery.lean();
+  if (customerPhone === "LOOKUP_BY_BOUTIQUE") {
+    // Guard: refuse when multiple pending payments exist for this boutique.
+    // Picking the wrong customer with real money is worse than returning an error.
+    const pendingCount = await PendingPaymentModel.countDocuments({
+      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+    });
+    if (pendingCount > 1) {
+      logger.warn(
+        { boutiqueId, pendingCount },
+        "ownerConfirm — LOOKUP_BY_BOUTIQUE refused: multiple pending payments exist, specify customerPhone",
+      );
+      return {
+        status: "error",
+        reason: `Ambiguous: ${pendingCount} pending payments exist for this boutique. Reply with: CONFIRMAR PAGO {customerPhone}`,
+      };
+    }
+    pending = await PendingPaymentModel.findOne({
+      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  } else {
+    pending = await PendingPaymentModel.findOne({
+      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+      customerPhone,
+    }).lean();
+  }
 
   if (!pending) {
     logger.info(
@@ -171,6 +193,30 @@ export const handleOwnerConfirm = async (
   }
 
   try {
+    // Guard against duplicate orders if owner confirms twice.
+    // Check if an order already exists for this customer that was created
+    // from a pendingPayment (notes contain the customer phone).
+    // Scoped to this boutique via customerId to avoid cross-tenant matches.
+    // Find the customer first (already resolved above), then scope the order.
+    const existingOrder = customer
+      ? await OrderModel.findOne({
+          customerId: customer._id,
+          "notes.message": { $regex: resolvedCustomerPhone, $options: "i" },
+        }).lean()
+      : null;
+    if (existingOrder) {
+      logger.warn(
+        { boutiqueId, resolvedCustomerPhone, existingOrderId: existingOrder._id },
+        "ownerConfirm — duplicate confirm detected, order already exists",
+      );
+      // Delete the pending payment so this guard triggers only once
+      await PendingPaymentModel.deleteOne({
+        boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+        customerPhone: resolvedCustomerPhone,
+      });
+      return { status: "order_created", orderNumber: existingOrder.orderNumber };
+    }
+
     // 4. Create the order. createOrder(input, createdBy, sourceMessageId).
     const created = await createOrder(
       {
