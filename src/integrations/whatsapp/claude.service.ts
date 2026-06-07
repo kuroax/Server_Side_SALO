@@ -93,6 +93,9 @@ export type ClaudeContext = {
   searchProducts: SearchProductsFn;
   incomingMessage: string;
   conversationHistory: ConversationTurnInput[];
+  // Optional override for the Claude API request timeout (ms). Used by the eval
+  // runner, where sequential calls need more headroom than the default.
+  requestTimeoutOverrideMs?: number;
   businessInfo: {
     showroomAddress: string;
     businessHours: string;
@@ -1360,7 +1363,8 @@ export const processMessage = async (
   // A flat +5s (not per-turn) because Claude API latency is dominated by
   // generation time, not context length. Per-turn growth adds 20s at MAX_TURNS
   // and makes WhatsApp UX unacceptably slow.
-  const requestTimeoutMs = Math.min(BASE_TIMEOUT_MS + 5_000, MAX_TIMEOUT_MS);
+  const requestTimeoutMs = context.requestTimeoutOverrideMs
+    ?? Math.min(BASE_TIMEOUT_MS + 5_000, MAX_TIMEOUT_MS);
 
   const sanitizedMessage = incomingMessage.slice(0, 2000);
 
