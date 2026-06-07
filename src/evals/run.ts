@@ -150,12 +150,29 @@ async function main() {
   // Connect to MongoDB (needed for any DB-touching code paths)
   await mongoose.connect(env.MONGODB_URI);
 
-  console.log(`\nRunning ${scenarios.length} eval scenarios with real Claude API...`);
+  // Optional filter: npx tsx src/evals/run.ts talla
+  // Runs only scenarios whose name contains the keyword (case-insensitive)
+  const filterKeyword = process.argv[2]?.toLowerCase();
+  const filteredScenarios = filterKeyword
+    ? scenarios.filter((s) => s.name.toLowerCase().includes(filterKeyword))
+    : scenarios;
+
+  if (filterKeyword && filteredScenarios.length === 0) {
+    console.log(`\nNo scenarios match "${filterKeyword}". Available scenarios:\n`);
+    scenarios.forEach((s) => console.log(`  - ${s.name}`));
+    process.exit(1);
+  }
+
+  console.log(
+    filterKeyword
+      ? `\nRunning ${filteredScenarios.length} scenario(s) matching "${filterKeyword}"...`
+      : `\nRunning ${filteredScenarios.length} eval scenarios with real Claude API...`
+  );
   console.log("This uses real API credits. Each scenario = 1-2 Claude calls.\n");
 
   const results: EvalScenarioResult[] = [];
 
-  for (const scenario of scenarios) {
+  for (const scenario of filteredScenarios) {
     process.stdout.write(`  Running: ${scenario.name}... `);
     const result = await runScenario(scenario);
     const icon = result.passed === result.total ? "✅" : "❌";
