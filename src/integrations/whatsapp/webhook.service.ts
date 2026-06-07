@@ -569,6 +569,7 @@ function normalizeProductImages(value: unknown): ProductImage[] {
 // caption accurately reflects color ("Crop Top (Alo) — Blanco — $1,599").
 
 async function searchProductsForClaude(
+  boutiqueId: string,
   hints: ClaudeSearchHints,
 ): Promise<ProductSearchItem[]> {
   const keyword = hints.keyword.toLowerCase().trim();
@@ -581,7 +582,7 @@ async function searchProductsForClaude(
   // Used by the explicit inventory fast-path when the customer asks to
   // see everything available rather than a specific product.
   if (keyword === "*") {
-    const browseFilter: Record<string, unknown> = { status: "active" };
+    const browseFilter: Record<string, unknown> = { boutiqueId, status: "active" };
     if (hints.gender && hints.gender !== "unknown") {
       browseFilter.gender = hints.gender === "female" ? "women" : "men";
     }
@@ -615,6 +616,7 @@ async function searchProductsForClaude(
     // (Refactor to shared helper is deferred — see technical debt.)
     const browseIds = browseProducts.map((p) => p._id);
     const browseInventory = await InventoryModel.find({
+      boutiqueId,
       productId: { $in: browseIds },
       quantity: { $gt: 0 },
     })
@@ -667,6 +669,7 @@ async function searchProductsForClaude(
   //
   // Gender normalization: DB stores 'women'/'men', Claude sends 'female'/'male'.
   const productFilter: Record<string, unknown> = {
+    boutiqueId,
     status: "active",
     $text: { $search: keyword },
   };
@@ -735,6 +738,7 @@ async function searchProductsForClaude(
   // Step 2: Query inventory for in-stock variants of matching products.
   // Filter by size and color at the DB level so we don't return zero-stock rows.
   const inventoryFilter: Record<string, unknown> = {
+    boutiqueId,
     productId: { $in: matchingProductIds },
     quantity: { $gt: 0 },
   };
@@ -934,9 +938,14 @@ export const handleIncomingMessage = async (
   // boutique so single-tenant traffic keeps flowing. Remove the fallback
   // once every n8n workflow has been migrated and a second boutique is live.
   const phoneNumberId = payload.phoneNumberId;
-  const boutique = phoneNumberId
-    ? await findBoutiqueByPhoneNumberId(phoneNumberId)
-    : await findFirstActiveBoutique();
+  if (!phoneNumberId) {
+    logger.warn(
+      { from },
+      "[webhook] phoneNumberId missing — cannot identify boutique, skipping message",
+    );
+    return emptyResult();
+  }
+  const boutique = await findBoutiqueByPhoneNumberId(phoneNumberId);
 
   if (!boutique) {
     logger.error(
@@ -954,13 +963,6 @@ export const handleIncomingMessage = async (
       },
       from,
       payload.contactName ?? null,
-    );
-  }
-
-  if (!phoneNumberId) {
-    logger.warn(
-      { boutiqueId: boutique._id.toString(), from, messageId },
-      "Webhook payload missing phoneNumberId — using single-tenant fallback (first active boutique)",
     );
   }
 
@@ -1006,9 +1008,10 @@ export const handleIncomingMessage = async (
   // ── 1. Identify / create customer ─────────────────────────────────────────
 
   const customer = await CustomerModel.findOneAndUpdate(
-    { phone: from },
+    { boutiqueId, phone: from },
     {
       $setOnInsert: {
+        boutiqueId,
         name: payload.contactName ?? `WhatsApp ${from}`,
         phone: from,
         contactChannel: "whatsapp",
@@ -1595,7 +1598,7 @@ ${incomingMessageForClaude}`;
             : undefined,
         }
       : null,
-    searchProducts: searchProductsForClaude,
+    searchProducts: (hints) => searchProductsForClaude(boutiqueId, hints),
     incomingMessage: incomingMessageForClaude,
     conversationHistory,
     businessInfo: {
@@ -1818,7 +1821,7 @@ ${incomingMessageForClaude}`;
         // Fetch catalog here — only needed for create_order resolution.
         // Previously fetched unconditionally before processMessage, causing
         // a wasted DB round-trip on every greet, search, and general message.
-        const catalogForOrders = await ProductModel.find({ status: "active" })
+        const catalogForOrders = await ProductModel.find({ boutiqueId, status: "active" })
           .select("name price")
           .lean();
         const catalog = catalogForOrders.map((p) => ({

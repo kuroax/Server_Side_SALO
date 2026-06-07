@@ -689,3 +689,4 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never send `imageCaption: null` in a webhook payload — the schema requires a string; use `""`
 - Never escalate SAFE_FALLBACK on timeout/API error — only on tool_loop_exhausted
 - Never answer size/talla questions in plain text — always JSON (intent: general)
+- Never confirm or perform an order cancellation — always escalate (intent: needs_human)

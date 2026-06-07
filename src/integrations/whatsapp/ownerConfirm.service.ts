@@ -107,9 +107,10 @@ export const handleOwnerConfirm = async (
   const resolvedCustomerPhone = pending.customerPhone;
 
   // 2. Find the customer record.
-  // NOTE: queried by phone only — bot-created customers do not carry boutiqueId
-  // (documented tech debt), so a boutiqueId filter would return null here.
+  // Lookup by boutiqueId + phone. Customers created before the boutiqueId
+  // backfill migration may not have boutiqueId set and will return null here.
   const customer = await CustomerModel.findOne({
+    boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
     phone: resolvedCustomerPhone,
   }).lean();
   if (!customer) {
