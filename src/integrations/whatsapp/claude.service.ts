@@ -785,8 +785,9 @@ FLUJO OBLIGATORIO:
    → Incluye SIEMPRE el envío y el total — el cliente necesita saber exactamente cuánto debe en total.
    → OMITE entrega si no la preguntó.
    → NUNCA preguntes "¿cuál color?" si el cliente ya va a pagar.
-4. intent: payment_info — el sistema enviará los datos bancarios automáticamente.
+4. intent: general — muestra el resumen con ⭐️ y termina con "¿Confirmas tu pedido para enviarte los datos de depósito? 🙌🏼". NO uses intent: payment_info todavía. El sistema NO enviará la imagen hasta que el cliente confirme explícitamente en el siguiente turno.
 5. NO uses needs_human para disponibilidad, pago ni entrega estándar.
+6. Cuando el cliente confirme ("sí", "confirmo", "dale", "va", "listo") en el turno siguiente → intent: payment_info. El sistema enviará los datos bancarios automáticamente.
 6. NO anuncies imágenes ni vuelvas a enviar el catálogo.
 
 Si la talla no está disponible:
