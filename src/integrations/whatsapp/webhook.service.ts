@@ -988,6 +988,17 @@ export const handleIncomingMessage = async (
 
   const boutiqueId = boutique._id.toString();
 
+  // ─── Idempotency gate ─────────────────────────────────────────────────────
+  // Must run before any bookkeeping (prospect bump, message count, etc.)
+  // so duplicate deliveries are fully no-ops, not partial side-effects.
+  if (messageId && !(await markMessageProcessed(messageId, boutiqueId))) {
+    logger.info(
+      { messageId, boutiqueId, from },
+      "[webhook] duplicate message — skipping before bookkeeping",
+    );
+    return emptyResult();
+  }
+
   // ── 0c. Hybrid pipeline bookkeeping ───────────────────────────────────────
   // Runs for every inbound message (text or image) BEFORE any Claude call.
   // Uses the conversationState (ai/human/paused gate) and prospect (CRM
@@ -1135,14 +1146,6 @@ export const handleIncomingMessage = async (
   // ── 2. Image message ──────────────────────────────────────────────────────
 
   if (messageType === "image") {
-    if (messageId && !(await markMessageProcessed(messageId, boutiqueId))) {
-      logger.info(
-        { from, messageId, customerId },
-        "Duplicate image messageId — skipping",
-      );
-      return emptyResult();
-    }
-
     // ── 2a. Payment receipt detection ─────────────────────────────────────
     // An incoming image is treated as a payment receipt if EITHER:
     //
@@ -1456,21 +1459,6 @@ export const handleIncomingMessage = async (
   //    muted); return an empty result so n8n sends nothing. Only "ai" mode
   //    continues to the Luis/Claude flow below. Auto-resume already ran in
   //    section 0c, so an elapsed human handoff has been flipped back to "ai".
-
-  // Text message idempotency — same MongoDB TTL dedup as images. Guarded on
-  // messageType so gallery-reply images (already deduped in section 2, then
-  // falling through to this text flow) are not double-deduped and dropped.
-  if (
-    messageType !== "image" &&
-    messageId &&
-    !(await markMessageProcessed(messageId, boutiqueId))
-  ) {
-    logger.info(
-      { messageId, boutiqueId, from },
-      "[webhook] duplicate text message — skipping",
-    );
-    return emptyResult();
-  }
 
   const conversationMode = await getConversationMode(boutiqueId, from);
   if (conversationMode !== "ai") {
