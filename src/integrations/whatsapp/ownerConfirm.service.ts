@@ -10,6 +10,7 @@ import { OrderModel } from "#/modules/orders/order.model.js";
 import { CustomerModel } from "#/modules/customers/customer.model.js";
 import { InventoryModel } from "#/modules/inventory/inventory.model.js";
 import { ProductModel } from "#/modules/products/product.model.js";
+import { BoutiqueModel } from "#/modules/boutiques/boutique.model.js";
 
 // ─── Input schema ─────────────────────────────────────────────────────────────
 
@@ -17,8 +18,6 @@ export const ownerConfirmSchema = z.object({
   boutiqueId: z.string().min(1),
   customerPhone: z.string().min(1),
   ownerPhone: z.string().min(1),
-  accessToken: z.string().min(1),
-  phoneNumberId: z.string().min(1),
 });
 
 export type OwnerConfirmInput = z.infer<typeof ownerConfirmSchema>;
@@ -80,7 +79,22 @@ async function sendWhatsAppText(
 export const handleOwnerConfirm = async (
   input: OwnerConfirmInput,
 ): Promise<OwnerConfirmResult> => {
-  const { boutiqueId, customerPhone, accessToken, phoneNumberId } = input;
+  const { boutiqueId, customerPhone } = input;
+
+  // Look up boutique credentials server-side — never accept tokens from the caller.
+  const boutique = await BoutiqueModel.findOne({
+    _id: new mongoose.Types.ObjectId(boutiqueId),
+    status: "active",
+  }).lean();
+
+  if (!boutique) {
+    logger.warn({ boutiqueId }, "ownerConfirm — boutique not found or inactive");
+    return { status: "error", reason: "Boutique not found" };
+  }
+
+  const accessToken = boutique.accessToken;
+  const phoneNumberId = boutique.phoneNumberId;
+  const ownerPhone = boutique.ownerPhone ?? input.ownerPhone;
   const boutiqueObjectId = new mongoose.Types.ObjectId(boutiqueId);
 
   // 1. Find the pending payment record (boutique-scoped).
