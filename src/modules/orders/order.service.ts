@@ -432,14 +432,6 @@ export async function createOrder(
     "Order created",
   );
 
-  // Update cached lifetime value — non-fatal, never blocks order creation.
-  // Only fires for genuinely new orders (duplicate-recovery returns early above).
-  await safeUpdateLifetimeValue(
-    order.customerId,
-    order.total,
-    "Order created — incremented customer lifetimeValue",
-  );
-
   return mapOrder(order.toObject() as OrderLike);
 }
 
@@ -560,11 +552,25 @@ export async function updatePaymentStatus(input: unknown): Promise<SafeOrder> {
     );
   }
 
+  // Capture the status before mutating so the guard below compares against the
+  // pre-update value (avoids double-counting if called with "paid" twice).
+  const previousPaymentStatus = order.paymentStatus;
+
   order.paymentStatus = paymentStatus;
   order.notes.push(
     makeSystemNote(`Payment status changed to '${paymentStatus}'.`),
   );
   await order.save();
+
+  // Increment lifetimeValue only when payment is fully confirmed.
+  // Partial payments are tracked via outstandingBalance — not LTV.
+  if (paymentStatus === "paid" && previousPaymentStatus !== "paid") {
+    await safeUpdateLifetimeValue(
+      order.customerId,
+      order.total,
+      "Payment confirmed — incremented customer lifetimeValue",
+    );
+  }
 
   logger.info({ orderId, paymentStatus }, "Order payment status updated");
   return mapOrder(order.toObject() as OrderLike);
@@ -601,12 +607,15 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
 
   logger.info({ orderId }, "Order cancelled");
 
-  // Decrement cached lifetime value — order is no longer counted as revenue.
-  await safeUpdateLifetimeValue(
-    order.customerId,
-    -order.total,
-    "Order cancelled — decremented customer lifetimeValue",
-  );
+  // Only decrement lifetimeValue if the payment was confirmed —
+  // unpaid orders were never counted so there is nothing to reverse.
+  if (order.paymentStatus === "paid") {
+    await safeUpdateLifetimeValue(
+      order.customerId,
+      -order.total,
+      "Order cancelled after payment — decremented customer lifetimeValue",
+    );
+  }
   return mapOrder(order.toObject() as OrderLike);
 }
 

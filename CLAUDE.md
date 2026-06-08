@@ -603,7 +603,6 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Item                                                                                                                 | Risk                                                                                                                            | Status                                                                                                                 |
 | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | Dedup in Extract Message uses n8n static data                                                                        | Lost on container restart                                                                                                       | Open                                                                                                                   |
-| `recentImageMessageIds` Set in webhook.service.ts                                                                    | Memory growth, not horizontally scalable                                                                                        | Open                                                                                                                   |
 | `searchProductsForClaude` color regex is unanchored                                                                  | Regex special chars in Claude output = MongoError                                                                               | Open                                                                                                                   |
 | `webhook.service.ts` is 1900+ lines, 7+ responsibilities                                                             | High regression risk on any change                                                                                              | Open — post-launch refactor                                                                                            |
 | Products fetched before intent known                                                                                 | Wasteful at scale                                                                                                               | Open                                                                                                                   |
@@ -621,10 +620,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `human_takeover_needed` / `prospect_stage_changed` alerts defined but never sent | Owner gets no handoff or stage-change notification | Wire call sites on escalate/pause and stage change |
 | `alert.service.ts` calls WhatsApp Graph API directly | Breaks "all Meta creds in n8n" invariant; token used in backend | Accepted for owner alerts; revisit if alerts move to n8n |
 | Two conversation models (`ConversationState` vs `Conversation`) | Duplicate state; divergent mode semantics (ai/human/paused vs auto/manual) | Consolidate post-MVP |
-| `registerOrUpdateProspect` does findOne→create (no upsert) | Parallel first messages can hit duplicate-key error | Guard with upsert or retry on E11000 |
 | `setHumanMode` endpoint has no caller | Endpoint exists but nothing invokes it | Wire n8n/app to call on owner takeover |
-| Backend has no text-message idempotency (only images deduped via `trackImageMessageId`) | Duplicate text `messageId` re-runs the full Claude flow | Open — text dedup lives in n8n; add a backend guard if n8n dedup is lost on restart |
-| Test 15 marked `it.fails` (idempotency) | Green CI masks the text-dedup gap | Drop the marker once the backend dedups text messages |
 | `product_search` 0 results auto-escalates | Conflicts with new text-reply prompt guidance | Reconcile in `webhook.service.ts` |
 | browse-all `*` block duplicates the inventory join in `searchProductsForClaude` | Two joins can drift | Refactor to a shared helper |
 | Broad/inventory routing now always round-trips to Claude | API cost+latency; depends on model routing | Monitor misroutes and cost |
@@ -635,6 +631,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Receipt color/size parser is heuristic | Wrong/empty color fails inventory match | Capture variant at source |
 | Eval hits real `MONGODB_URI` + spends real Claude credits | Prod connection / cost | Gate behind test DB/flag |
 | `MOCK_SEARCH_PRODUCTS` ignores keyword (always Jersey) | Weak search coverage | Make it keyword-aware |
+| `boutique.accessToken` is select:false but still plaintext in MongoDB | DB breach exposes tokens | Encrypt at rest (AES) before tenant #2 |
 | SAFE_FALLBACK now escalates on every path (incl. timeout/api_error) | Owner-alert noise on Claude blips | Retry/dedup before escalating |
 
 ---
@@ -658,6 +655,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never escalate `payment_info` to the owner
 - Never leave `/owner-confirm` unauthenticated — it creates orders and sends WhatsApp
 - Never accept accessToken or phoneNumberId in the owner-confirm body — read them from the boutique
+- Never read `boutique.accessToken` without `.select("+accessToken")` — it is select:false by default
 - Never send the bank image on first payment ask — confirm explicitly (PASO 2) first
 - Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown`
 - Never read `lifetimeValue === 0` as "new customer" — it is `undefined` for new customers
