@@ -94,7 +94,6 @@ export const handleOwnerConfirm = async (
 
   const accessToken = boutique.accessToken;
   const phoneNumberId = boutique.phoneNumberId;
-  const ownerPhone = boutique.ownerPhone ?? input.ownerPhone;
   const boutiqueObjectId = new mongoose.Types.ObjectId(boutiqueId);
 
   // 1. Find the pending payment record (boutique-scoped).

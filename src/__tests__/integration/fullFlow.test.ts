@@ -379,8 +379,6 @@ describe('JOURNEY: Frida-style complete purchase flow', () => {
       boutiqueId: JOURNEY_BOUTIQUE_ID,
       customerPhone: 'LOOKUP_BY_BOUTIQUE',
       ownerPhone: OWNER_PHONE,
-      accessToken: ACCESS_TOKEN,
-      phoneNumberId: JOURNEY_PHONE_NUMBER_ID,
     })
 
     expect(result.status).toBe('order_created')
