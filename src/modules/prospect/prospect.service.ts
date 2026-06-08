@@ -9,6 +9,7 @@ import {
   type StageHistoryEntry,
 } from "./prospect.types.js";
 import { NotFoundError } from "#/shared/errors/index.js";
+import { logger } from "#/config/logger.js";
 
 // ─── Mapper ───────────────────────────────────────────────────────────────────
 
@@ -43,46 +44,70 @@ export const registerOrUpdateProspect = async (
   customerPhone: string,
   customerName?: string,
 ): Promise<{ prospect: ProspectDTO; isNew: boolean }> => {
-  const existing = await ProspectModel.findOne({
-    boutiqueId,
-    customerPhone,
-  }).lean<ProspectLean | null>();
-
-  if (existing) {
-    const set: Record<string, unknown> = { lastContactAt: new Date() };
-    if (!existing.customerName && customerName) {
-      set.customerName = customerName;
-    }
-
-    const updated = await ProspectModel.findOneAndUpdate(
-      { boutiqueId, customerPhone },
-      { $inc: { totalMessages: 1 }, $set: set },
-      { new: true },
-    ).lean<ProspectLean | null>();
-
-    if (!updated) {
-      throw new NotFoundError("Prospect not found");
-    }
-
-    return { prospect: toDTO(updated), isNew: false };
-  }
-
   const now = new Date();
-  const created = await ProspectModel.create({
+  const filter = {
     boutiqueId: new Types.ObjectId(boutiqueId),
     customerPhone,
-    customerName,
-    stage: "nuevo",
-    stageHistory: [{ stage: "nuevo", changedAt: now }],
-    totalMessages: 1,
-    firstContactAt: now,
-    lastContactAt: now,
-  });
-
-  return {
-    prospect: toDTO(created.toObject() as unknown as ProspectLean),
-    isNew: true,
   };
+
+  try {
+    // Atomic upsert — handles first contact (insert) and subsequent messages
+    // (update) in one operation. $setOnInsert fields apply only on insert;
+    // $set/$inc apply on both. totalMessages lives ONLY in $inc so it starts at
+    // 1 on insert (0 + 1) and increments thereafter — putting it in $setOnInsert
+    // too would conflict ($setOnInsert + $inc on the same field is not allowed).
+    const result = await ProspectModel.findOneAndUpdate(
+      filter,
+      {
+        $setOnInsert: {
+          stage: "nuevo" as const,
+          stageHistory: [{ stage: "nuevo" as const, changedAt: now }],
+          firstContactAt: now,
+        },
+        $set: {
+          lastContactAt: now,
+          ...(customerName ? { customerName } : {}),
+        },
+        $inc: { totalMessages: 1 },
+      },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
+    ).lean<ProspectLean | null>();
+
+    if (!result) {
+      throw new NotFoundError("Prospect upsert returned null");
+    }
+    // First message ⇒ totalMessages was just incremented from 0 to 1.
+    return { prospect: toDTO(result), isNew: result.totalMessages === 1 };
+  } catch (err: unknown) {
+    // E11000 on upsert is a race between two concurrent inserts for the same
+    // { boutiqueId, customerPhone } — retry once as a plain update.
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      (err as { code: number }).code === 11000
+    ) {
+      logger.warn(
+        { boutiqueId, customerPhone },
+        "[prospect] E11000 on upsert — retrying as update",
+      );
+      const retried = await ProspectModel.findOneAndUpdate(
+        filter,
+        {
+          $set: {
+            lastContactAt: now,
+            ...(customerName ? { customerName } : {}),
+          },
+          $inc: { totalMessages: 1 },
+        },
+        { returnDocument: "after" },
+      ).lean<ProspectLean | null>();
+      if (!retried) {
+        throw new NotFoundError("Prospect not found on retry");
+      }
+      return { prospect: toDTO(retried), isNew: false };
+    }
+    throw err;
+  }
 };
 
 // ─── Stage transitions ────────────────────────────────────────────────────────
