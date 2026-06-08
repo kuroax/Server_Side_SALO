@@ -12,6 +12,10 @@ import { InventoryModel } from "#/modules/inventory/inventory.model.js";
 import { ProductModel } from "#/modules/products/product.model.js";
 import { BoutiqueModel } from "#/modules/boutiques/boutique.model.js";
 
+// Escape regex metacharacters so Claude-derived strings are safe in $regex queries.
+const escapeRegex = (str: string): string =>
+  str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // ─── Input schema ─────────────────────────────────────────────────────────────
 
 export const ownerConfirmSchema = z.object({
@@ -171,7 +175,7 @@ export const handleOwnerConfirm = async (
 
     const product = await ProductModel.findOne({
       boutiqueId: boutiqueObjectId,
-      name: { $regex: hint.productNameHint, $options: "i" },
+      name: { $regex: escapeRegex(hint.productNameHint), $options: "i" },
       status: "active",
     }).lean();
 
@@ -182,7 +186,7 @@ export const handleOwnerConfirm = async (
       boutiqueId: boutiqueObjectId,
       productId: product._id,
       size: hint.size.trim().toUpperCase(),
-      color: { $regex: hint.color.trim().toLowerCase(), $options: "i" },
+      color: { $regex: escapeRegex(hint.color.trim().toLowerCase()), $options: "i" },
       quantity: { $gt: 0 },
     }).lean();
 
@@ -214,7 +218,7 @@ export const handleOwnerConfirm = async (
     const existingOrder = customer
       ? await OrderModel.findOne({
           customerId: customer._id,
-          "notes.message": { $regex: resolvedCustomerPhone, $options: "i" },
+          "notes.message": { $regex: escapeRegex(resolvedCustomerPhone), $options: "i" },
         }).lean()
       : null;
     if (existingOrder) {

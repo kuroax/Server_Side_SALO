@@ -594,6 +594,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Fixtures/mocks: seeded boutique, n8n payloads, Claude/alert/image-search stubs.
 - Scripts: `test`, `test:watch`, `test:coverage`, `test:integration`.
 - Evals: `src/evals/` — offline prompt-quality harness over real processMessage; `npm run eval [-- keyword]`.
+- CI: `.github/workflows/ci.yml` — typecheck + integration tests on every PR/push to main.
 
 ---
 
@@ -613,8 +614,8 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `lifetimeValue` semantics = expected revenue, not received                                                           | Differs from dashboard cancelled-order exclusion                                                                                | Documented gap                                                                                                         |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
-| `webhook.service.ts` and `order.service.ts` use `ProductModel`/`InventoryModel` directly without `boutiqueId` filter | Bot and order logic will cross boutique boundaries when tenant #2 is onboarded                                                  | **Must fix before onboarding tenant #2**                                                                               |
-| `findFirstActiveBoutique()` shim in `webhook.service.ts` + `boutique.service.ts`                                     | Silently routes all messages to tenant #1 if `phoneNumberId` missing from n8n payload; breaks immediately when tenant #2 exists | **Remove after n8n is updated to forward `phoneNumberId`**                                                             |
+| `order.service.ts` fetchProductSnapshots queries products without `boutiqueId` (by `_id`) | Cross-tenant if a wrong `_id` is passed | Add `boutiqueId` filter (webhook bot queries now scoped) |
+| `findFirstActiveBoutique()` is now a dead import/export (webhook no longer calls it) | Unused shim lingers | Delete the function + import |
 | n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Every message uses the single-tenant fallback shim — WARN logged on every request                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
 | Owner-reply detection not wired (coexistence handoff) | Owner + bot can reply at once; no auto-flip to `human` | Blocked — needs n8n to forward status/echo events with `recipient_id` |
 | `human_takeover_needed` / `prospect_stage_changed` alerts defined but never sent | Owner gets no handoff or stage-change notification | Wire call sites on escalate/pause and stage change |
@@ -634,6 +635,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Receipt color/size parser is heuristic | Wrong/empty color fails inventory match | Capture variant at source |
 | Eval hits real `MONGODB_URI` + spends real Claude credits | Prod connection / cost | Gate behind test DB/flag |
 | `MOCK_SEARCH_PRODUCTS` ignores keyword (always Jersey) | Weak search coverage | Make it keyword-aware |
+| SAFE_FALLBACK now escalates on every path (incl. timeout/api_error) | Owner-alert noise on Claude blips | Retry/dedup before escalating |
 
 ---
 
@@ -655,6 +657,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never call `search_products` for `order_summary`
 - Never escalate `payment_info` to the owner
 - Never leave `/owner-confirm` unauthenticated — it creates orders and sends WhatsApp
+- Never accept accessToken or phoneNumberId in the owner-confirm body — read them from the boutique
 - Never send the bank image on first payment ask — confirm explicitly (PASO 2) first
 - Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown`
 - Never read `lifetimeValue === 0` as "new customer" — it is `undefined` for new customers
@@ -687,6 +690,6 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never call the real Claude/WhatsApp/Graph API in tests — mock claude/alert/image-search services
 - Never set env vars after the imports in `setup.ts` — `env.ts` validates at import and exits on miss
 - Never send `imageCaption: null` in a webhook payload — the schema requires a string; use `""`
-- Never escalate SAFE_FALLBACK on timeout/API error — only on tool_loop_exhausted
+- Never silence a SAFE_FALLBACK — all failure paths (timeout, api_error, max_tokens, non_json, schema_fail, loop_exhausted) must escalate to the owner
 - Never answer size/talla questions in plain text — always JSON (intent: general)
 - Never confirm or perform an order cancellation — always escalate (intent: needs_human)
