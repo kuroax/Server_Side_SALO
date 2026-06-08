@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { CustomerModel } from "#/modules/customers/customer.model.js";
 import { OrderModel } from "#/modules/orders/order.model.js";
 import { ProductModel } from "#/modules/products/product.model.js";
@@ -8,6 +9,7 @@ import {
 } from "#/modules/conversations/conversation.model.js";
 import { SentImageModel } from "#/modules/sentImages/sentImage.model.js";
 import { PendingPaymentModel } from "#/modules/pendingPayments/pendingPayment.model.js";
+import { ProcessedMessageModel } from "#/modules/processedMessages/processedMessage.model.js";
 import { createOrder } from "#/modules/orders/order.service.js";
 import { processMessage } from "#/integrations/whatsapp/claude.service.js";
 import { searchProductsByImage } from "#/integrations/whatsapp/image-search.service.js";
@@ -475,18 +477,36 @@ const imageSearchResultSchema = z.object({
 // the boutique by phoneNumberId at the start of every request and passes
 // boutique.businessInfo to ClaudeContext + escalation builders.
 
-// ─── Image message idempotency ────────────────────────────────────────────────
-
-// WARNING: process-local — deduplication breaks if Railway scales to >1 instance.
-// Replace with a Redis TTL key or MongoDB TTL collection before horizontal scaling.
-const recentImageMessageIds = new Set<string>();
-const IMAGE_DEDUP_WINDOW_MS = 5 * 60 * 1000;
-
-function trackImageMessageId(id: string): boolean {
-  if (recentImageMessageIds.has(id)) return false;
-  recentImageMessageIds.add(id);
-  setTimeout(() => recentImageMessageIds.delete(id), IMAGE_DEDUP_WINDOW_MS);
-  return true;
+// ─── Message idempotency (text + image) ──────────────────────────────────────
+// MongoDB TTL collection keyed by { messageId, boutiqueId }.
+// Inserting before processing; E11000 = already processed, skip.
+// Works across instances and survives restarts (unlike the prior in-memory Set).
+async function markMessageProcessed(
+  messageId: string,
+  boutiqueId: string,
+): Promise<boolean> {
+  try {
+    await ProcessedMessageModel.create({
+      messageId,
+      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+    });
+    return true; // first time seeing this message
+  } catch (err: unknown) {
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      (err as { code: number }).code === 11000
+    ) {
+      return false; // duplicate — already processed
+    }
+    // On unexpected DB errors, allow processing to continue rather than
+    // silently dropping the message. Log and proceed.
+    logger.warn(
+      { err, messageId, boutiqueId },
+      "[webhook] processedMessage insert failed — allowing through",
+    );
+    return true;
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1115,7 +1135,7 @@ export const handleIncomingMessage = async (
   // ── 2. Image message ──────────────────────────────────────────────────────
 
   if (messageType === "image") {
-    if (messageId && !trackImageMessageId(messageId)) {
+    if (messageId && !(await markMessageProcessed(messageId, boutiqueId))) {
       logger.info(
         { from, messageId, customerId },
         "Duplicate image messageId — skipping",
@@ -1436,6 +1456,22 @@ export const handleIncomingMessage = async (
   //    muted); return an empty result so n8n sends nothing. Only "ai" mode
   //    continues to the Luis/Claude flow below. Auto-resume already ran in
   //    section 0c, so an elapsed human handoff has been flipped back to "ai".
+
+  // Text message idempotency — same MongoDB TTL dedup as images. Guarded on
+  // messageType so gallery-reply images (already deduped in section 2, then
+  // falling through to this text flow) are not double-deduped and dropped.
+  if (
+    messageType !== "image" &&
+    messageId &&
+    !(await markMessageProcessed(messageId, boutiqueId))
+  ) {
+    logger.info(
+      { messageId, boutiqueId, from },
+      "[webhook] duplicate text message — skipping",
+    );
+    return emptyResult();
+  }
+
   const conversationMode = await getConversationMode(boutiqueId, from);
   if (conversationMode !== "ai") {
     logger.info(

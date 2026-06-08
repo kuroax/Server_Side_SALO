@@ -399,14 +399,7 @@ describe('WhatsApp buffer', () => {
 
 describe('Idempotency', () => {
   // ── Test 15 ─────────────────────────────────────────────────────────────────
-  // NOTE: This test encodes the INTENDED contract (one reply per messageId) and
-  // currently FAILS — it surfaces a real gap, not a flaky test. The backend only
-  // dedupes IMAGE messages (process-local `recentImageMessageIds` set in
-  // webhook.service.ts); duplicate TEXT messages run the full Claude flow every
-  // time. Text idempotency is delegated to n8n static data (see CLAUDE.md "Dedup
-  // in Extract Message uses n8n static data" — Open). Reported, not fixed, per
-  // the instruction to never modify production code to make a test pass.
-  it.fails('duplicate messageId: responds once and creates a single prospect', async () => {
+  it('duplicate messageId: responds once and creates a single prospect', async () => {
     await request(app)
       .post(WEBHOOK_URL)
       .set('x-webhook-secret', WEBHOOK_SECRET)
