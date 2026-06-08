@@ -19,7 +19,7 @@ Read this section first. These rules apply to every task in this repo.
 
 ## Project overview
 
-GraphQL API backend for SALO — a multi-tenant SaaS platform for clothing boutiques in Mexico. Handles orders, inventory, customers, products, authentication, and a WhatsApp AI bot ("Luis") powered by Claude.
+GraphQL API backend for SALO — a multi-tenant SaaS platform for clothing boutiques in Mexico. Handles orders, inventory, customers, products, auth, and a WhatsApp AI bot ("Luis") powered by Claude.
 
 **Architecture direction:** Multi-tenant SaaS. Each boutique is a separate tenant stored in the `boutiques` collection with its own Meta credentials, business info, and conversation mode. The first tenant is shopalogdl (manually onboarded). Axel Monterrubio is the developer/founder of Grimorio de Plata, not the boutique owner. Subsequent tenants onboard via WhatsApp Embedded Signup (in development). All domain collections (products, customers, orders, conversations) are scoped by `boutiqueId`.
 
@@ -90,10 +90,14 @@ src/
 │       ├── webhook.auth.ts           # requireBufferWebhookSecret middleware
 │       ├── webhook.controller.ts     # Express controller for Meta webhook
 │       ├── webhook.router.ts         # Mounts all /api/webhooks/whatsapp routes
-│       ├── webhook.service.ts        # Orchestrates full bot flow (1900+ lines — FRAGILE)
+│       ├── webhook.service.ts        # Orchestrates full bot flow (1387 lines; helpers extracted)
 │       │                                 # Reads boutique by phoneNumberId on every request
-│       │                                 # Falls back to findFirstActiveBoutique() if phoneNumberId absent
+│       │                                 # Early-returns (logs warn, no reply) if phoneNumberId absent
 │       │                                 # Passes boutique.businessInfo to ClaudeContext
+│       ├── webhook.cart.ts           # Cart/history parsers (pure)
+│       ├── webhook.escalation.ts     # Escalation + reply builders (pure)
+│       ├── webhook.product-search.ts # Product/inventory query layer
+│       ├── webhook.schemas.ts        # Webhook I/O Zod schemas, toSafeResult, idempotency
 │       └── webhook.validation.ts     # Zod schemas for Meta payload
 │                                         # phoneNumberId field added (optional, from metadata)
 ├── modules/
@@ -148,9 +152,8 @@ module.resolvers.ts   # GraphQL resolvers — auth guards + delegates to service
 module.typeDefs.ts    # GraphQL SDL (extends Query / extends Mutation)
 ```
 
-Note: some older modules may only have 5 files (missing typeDefs.ts) — do not
-retroactively add typeDefs.ts unless you are actively modifying that module's
-GraphQL surface.
+Note: some older modules have 5 files (no typeDefs.ts) — don't add it unless you're
+modifying that module's GraphQL surface.
 
 **Rule:** Resolvers never contain business logic. Services never contain GraphQL types. Validation always lives in the validation file — never inline in the service.
 
@@ -200,14 +203,14 @@ API directly — a deliberate exception (owner alerts only) to the no-direct-Met
 ### Webhook lookup
 
 `webhook.service.ts` reads `phoneNumberId` from the incoming n8n payload and
-calls `findBoutiqueByPhoneNumberId()` to get the boutique document. All
+calls `findBoutiqueByPhoneNumberIdWithToken()` to get the boutique document. All
 downstream calls (claude.service.ts, etc.) receive `boutique.businessInfo`
 instead of hardcoded constants.
 
 ### Onboarding
 
 - **Tenant #1 (shopalogdl):** Manually onboarded. `seed-boutique.ts` creates the
-  boutique document and backfills `boutiqueId` on all existing documents.
+  boutique doc and backfills `boutiqueId` on all existing docs.
 - **Subsequent tenants:** Onboarded via WhatsApp Embedded Signup (in development).
   Token exchange endpoint: `POST /api/boutiques/signup`. Requires `META_APP_ID`
   and `META_APP_SECRET` in Railway env vars.
@@ -285,7 +288,7 @@ All extend `AppError` which Apollo Server maps to GraphQL errors automatically.
 
 ### Atlas replica set — transactions supported
 
-The cluster is MongoDB Atlas (`setName` confirmed present). `mongoose.withTransaction()` is supported and used in `order.service.ts` for inventory deduction.
+MongoDB Atlas (`setName` present). `mongoose.withTransaction()` is used in `order.service.ts` for inventory deduction.
 
 ### MongoDB indexes on orders
 
@@ -328,12 +331,12 @@ tags: (data.tags ?? []) as CustomerTag[];
 status: validated.status as ProductStatus;
 ```
 
-These casts are correct — Zod has already validated the values. The assertions only satisfy
-Mongoose's generic type checker. Do not remove them.
+These casts are correct — Zod already validated the values; the assertions only satisfy
+Mongoose's type checker. Do not remove them.
 
 ### Mappers
 
-Every module has a `mapOrder()` / `mapProduct()` etc. function that converts raw `OrderLike` (ObjectIds as `Types.ObjectId`) to `SafeOrder` (all IDs as strings). Resolvers always return mapped types, never raw documents.
+Every module has a `mapOrder()` / `mapProduct()` etc. that converts raw `OrderLike` (ObjectIds as `Types.ObjectId`) to `SafeOrder` (IDs as strings). Resolvers return mapped types, never raw documents.
 
 ### Atomic sequential order numbers
 
@@ -359,11 +362,11 @@ pending → confirmed → processing → cancelled (terminal)
 
 ### Cancellation — use `cancelOrder` only
 
-`updateOrderStatus` rejects `"cancelled"` with a `BadRequestError`. Cancellation must go through `cancelOrder` so inventory restoration and LTV decrement run together.
+`updateOrderStatus` rejects `"cancelled"` (`BadRequestError`). Cancel via `cancelOrder` so inventory restoration and LTV decrement run together.
 
 ### Inventory deduction — wrapped in transaction
 
-The `confirmed` transition runs pre-check + deduction inside `mongoose.withTransaction()`. Throws inside the callback abort atomically — no manual per-item rollback needed.
+The `confirmed` transition runs pre-check + deduction inside `mongoose.withTransaction()`. Throws inside the callback abort atomically — no per-item rollback needed.
 
 ### Optional order schema fields
 
@@ -375,9 +378,11 @@ estimatedDelivery?: string    // e.g. "Jueves 8 de mayo"
 
 ### `safeUpdateLifetimeValue` rules
 
-Call on: create (+total), cancel (−total), hard-delete (−total, non-cancelled only),
-customer-assign (+total, non-cancelled only). Cancelled orders skip the delta on
-delete/assign. Accepts `Types.ObjectId | null | undefined` — null/undefined = skip, non-fatal.
+Tracks RECEIVED revenue. +total on payment confirmed (`updatePaymentStatus` → `paid`);
+−total on cancel only when `paymentStatus` was `paid`. NOT
+called on create. `assignCustomerToOrder`/`deleteOrder` still apply status-based ±total
+(legacy, not payment-gated — see debt). Accepts `Types.ObjectId | null | undefined` —
+null/undefined = skip, non-fatal.
 
 ### Field name: `productName`, not `name`
 
@@ -449,9 +454,8 @@ SYSTEM_USER_TOKEN  # System User SALO (ID: 61577448959274) master token
 
 **Per-boutique credentials (now in MongoDB, not env vars):**
 
-After the boutiques module is deployed and `seed-boutique.ts` has run, the
-following values are stored in the `boutiques` collection per tenant.
-The env vars below are kept as FALLBACK for the first boutique only:
+After `seed-boutique.ts` runs, these values live in the `boutiques` collection per
+tenant. The env vars below are FALLBACK for the first boutique only:
 
 ```
 WHATSAPP_ACCESS_TOKEN   # Fallback token for tenant #1 (Axel) only
@@ -466,7 +470,7 @@ in `boutique.accessToken` and `boutique.bankAccountImageUrl`.
 - `"*"` → exports `true` (allow all — development only, blocked in production)
 - `"https://a.com,https://b.com"` → exports `string[]`
 
-The `cors()` middleware in `app.ts` receives `CORS_ORIGINS` (typed `string[] | true`), not the raw `CORS_ORIGIN` string.
+The `cors()` middleware in `app.ts` receives `CORS_ORIGINS` (typed `string[] | true`), not the raw string.
 
 ---
 
@@ -505,7 +509,7 @@ Full type in `claude.service.ts`. Carries `customerName`, `customerGender`, `cus
 
 ### Image suppression rule
 
-Product images flow ONLY when `result.intent === "product_search"`. All other intents suppress accumulated images — prevents product gallery during availability checks, payment flows, or context-recall responses.
+Product images flow ONLY when `result.intent === "product_search"`. Other intents suppress accumulated images — avoids galleries during availability checks, payment flows, or context recall.
 
 ### ⭐️ format — required for cart extraction
 
@@ -515,13 +519,13 @@ When Luis confirms availability or gives payment info, product lines MUST use th
 
 These tags are injected into stored turns by the backend. Claude reads them for context. Never forward them to the customer.
 
-| Tag                                                                | Location              | Meaning                                                                                    |
+| Tag | Location | Meaning |
 | ------------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------ |
-| `[payment_info_sent]`                                              | End of assistant turn | Bank account info was sent. Used by `hasRecentPaymentInfoContext()` for receipt detection. |
-| `[Comprobante de pago enviado por el cliente]`                     | User turn             | Customer sent receipt. Claude must NOT ask which product.                                  |
-| `[Productos enviados al cliente en este turn: ...]`                | User turn             | Gallery products shown. Prevents re-searching.                                             |
-| `[El cliente esta respondiendo a una imagen del gallery anterior]` | User turn prefix      | Gallery reply — NEVER call `search_products`.                                              |
-| `[Producto exacto seleccionado por el cliente: NAME]`              | User turn prefix      | Exact selected product. Respond only about that product.                                   |
+| `[payment_info_sent]` | End of assistant turn | Bank account info was sent. Used by `hasRecentPaymentInfoContext()` for receipt detection. |
+| `[Comprobante de pago enviado por el cliente]` | User turn | Customer sent receipt. Claude must NOT ask which product. |
+| `[Productos enviados al cliente en este turn: ...]` | User turn | Gallery products shown. Prevents re-searching. |
+| `[El cliente esta respondiendo a una imagen del gallery anterior]` | User turn prefix | Gallery reply — NEVER call `search_products`. |
+| `[Producto exacto seleccionado por el cliente: NAME]` | User turn prefix | Exact selected product. Respond only about that product. |
 
 ### Receipt detection — dual signal
 
@@ -604,13 +608,12 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | Dedup in Extract Message uses n8n static data                                                                        | Lost on container restart                                                                                                       | Open                                                                                                                   |
 | `searchProductsForClaude` color regex is unanchored                                                                  | Regex special chars in Claude output = MongoError                                                                               | Open                                                                                                                   |
-| `webhook.service.ts` is 1900+ lines, 7+ responsibilities                                                             | High regression risk on any change                                                                                              | Open — post-launch refactor                                                                                            |
+| `webhook.service.ts` orchestrator ~1387 lines (pure helpers extracted), 7+ responsibilities                                                             | High regression risk on any change                                                                                              | Open — post-launch refactor                                                                                            |
 | Products fetched before intent known                                                                                 | Wasteful at scale                                                                                                               | Open                                                                                                                   |
 | `extractCartFromHistory` is regex-driven                                                                             | Any prompt change silently regresses receipt acks                                                                               | Deferred — structural fix post-demo                                                                                    |
 | `updateProduct` missing inventory cleanup on variant removal                                                         | Orphaned inventory records                                                                                                      | Deferred                                                                                                               |
 | Server-side pagination on orders/customers/products                                                                  | Fixed slice limits at scale                                                                                                     | Deferred                                                                                                               |
 | Conversation control system (ai/human/paused gate)                                                                  | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversationState` gate + new-prospect/receipt alerts live; owner auto-takeover detection pending    |
-| `lifetimeValue` semantics = expected revenue, not received                                                           | Differs from dashboard cancelled-order exclusion                                                                                | Documented gap                                                                                                         |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
 | `order.service.ts` fetchProductSnapshots queries products without `boutiqueId` (by `_id`) | Cross-tenant if a wrong `_id` is passed | Add `boutiqueId` filter (webhook bot queries now scoped) |
@@ -627,12 +630,13 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `[payment_info_sent]` now fires at PASO 2 (after confirmation) | Early receipt not context-detected | Rely on caption |
 | `owner-confirm` needs n8n to parse "CONFIRMAR PAGO" + send secret/creds | Unusable until n8n wired | Wire n8n command parsing |
 | Receipt without orderHints stores cart size/color as `?` | owner-confirm can't resolve → manual order | Capture full variant on receipt |
-| `LOOKUP_BY_BOUTIQUE` picks the most-recent pending | Can confirm wrong customer | Pass phone when present |
+| LOOKUP_BY_BOUTIQUE still used when owner omits phone | Ambiguous if >1 pending (now refused) but single-pending silently picks | Always pass customerPhone in CONFIRMAR PAGO command |
 | Receipt color/size parser is heuristic | Wrong/empty color fails inventory match | Capture variant at source |
 | Eval hits real `MONGODB_URI` + spends real Claude credits | Prod connection / cost | Gate behind test DB/flag |
 | `MOCK_SEARCH_PRODUCTS` ignores keyword (always Jersey) | Weak search coverage | Make it keyword-aware |
 | `boutique.accessToken` is select:false but still plaintext in MongoDB | DB breach exposes tokens | Encrypt at rest (AES) before tenant #2 |
 | SAFE_FALLBACK now escalates on every path (incl. timeout/api_error) | Owner-alert noise on Claude blips | Retry/dedup before escalating |
+| `assignCustomerToOrder`/`deleteOrder` LTV deltas are status-based, not payment-gated | Counts unpaid revenue; inconsistent with received-revenue model | Gate on `paymentStatus === "paid"` |
 
 ---
 
@@ -655,6 +659,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never escalate `payment_info` to the owner
 - Never leave `/owner-confirm` unauthenticated — it creates orders and sends WhatsApp
 - Never accept accessToken or phoneNumberId in the owner-confirm body — read them from the boutique
+- Never call createOrder in owner-confirm without first checking for an existing order scoped to the same customerId — guard against double-confirm
 - Never read `boutique.accessToken` without `.select("+accessToken")` — it is select:false by default
 - Never send the bank image on first payment ask — confirm explicitly (PASO 2) first
 - Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown`
@@ -682,6 +687,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never remove the `JSON_REMINDER` injection from claude.service.ts
 - Never register a second Mongoose model named `"Conversation"` — the gate model is `ConversationState`
 - Never blanket short-circuit image messages — preserve visual search and gallery-reply flows
+- Never import from webhook.service.ts directly — use the focused sub-modules (webhook.cart, webhook.escalation, webhook.schemas, webhook.product-search) for their respective concerns
 - Never let `sendOwnerAlert` throw or log `accessToken` — alerts must never break the webhook flow
 - Never read conversationState mode without first running `checkAndApplyAutoResume`
 - Never log `customerPhone` unmasked in `setHumanMode` — mask all but last 4 digits via `maskPhone`
