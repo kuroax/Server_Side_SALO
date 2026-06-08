@@ -59,6 +59,7 @@ const boutiqueSchema = new Schema(
     accessToken: {
       type: String,
       required: [true, "accessToken is required"],
+      select: false,
     },
 
     // Optional Meta Business Portfolio ID — captured during Embedded Signup

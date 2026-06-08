@@ -89,7 +89,9 @@ export const handleOwnerConfirm = async (
   const boutique = await BoutiqueModel.findOne({
     _id: new mongoose.Types.ObjectId(boutiqueId),
     status: "active",
-  }).lean();
+  })
+    .select("+accessToken")
+    .lean();
 
   if (!boutique) {
     logger.warn({ boutiqueId }, "ownerConfirm — boutique not found or inactive");

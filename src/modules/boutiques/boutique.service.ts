@@ -36,6 +36,19 @@ export const findBoutiqueByPhoneNumberId = async (
   }).lean<BoutiqueLean | null>();
 };
 
+// Use this instead of findBoutiqueByPhoneNumberId when accessToken is needed.
+// Explicitly selects the token — it is select: false by default.
+export const findBoutiqueByPhoneNumberIdWithToken = async (
+  phoneNumberId: string,
+): Promise<BoutiqueLean | null> => {
+  return BoutiqueModel.findOne({
+    phoneNumberId,
+    status: BOUTIQUE_STATUS.ACTIVE,
+  })
+    .select("+accessToken")
+    .lean<BoutiqueLean | null>();
+};
+
 export const findBoutiqueById = async (
   id: string,
 ): Promise<BoutiqueLean | null> => {

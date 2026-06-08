@@ -17,6 +17,7 @@ import { CUSTOMER_GENDERS } from "#/modules/customers/customer.types.js";
 import { logger } from "#/config/logger.js";
 import {
   findBoutiqueByPhoneNumberId,
+  findBoutiqueByPhoneNumberIdWithToken,
   findFirstActiveBoutique,
 } from "#/modules/boutiques/boutique.service.js";
 import {
@@ -965,7 +966,7 @@ export const handleIncomingMessage = async (
     );
     return emptyResult();
   }
-  const boutique = await findBoutiqueByPhoneNumberId(phoneNumberId);
+  const boutique = await findBoutiqueByPhoneNumberIdWithToken(phoneNumberId);
 
   if (!boutique) {
     logger.error(
