@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+
+    # Placeholder test values only — these satisfy the Zod validation in
+    # src/config/env.ts. They are NOT real credentials. The integration tests
+    # also set their own values in src/__tests__/setup.ts; these are a safe
+    # fallback so env.ts never fails validation in CI.
+    env:
+      NODE_ENV: test
+      PORT: "4001"
+      MONGODB_URI: "mongodb://127.0.0.1:27017/salo_test"
+      JWT_SECRET: test_jwt_secret_at_least_32_chars
+      JWT_REFRESH_SECRET: test_jwt_refresh_secret_32_chars
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      ANTHROPIC_API_KEY: test_anthropic_key
+      WEBHOOK_SECRET: "test_webhook_secret_32chars_min!!"
+      BUFFER_WEBHOOK_SECRET: "test_buffer_secret_32chars_min!!"
+      WHATSAPP_ACCESS_TOKEN: test_whatsapp_token
+      CORS_ORIGIN: "*"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run integration tests
+        run: npx vitest run src/__tests__/integration/
