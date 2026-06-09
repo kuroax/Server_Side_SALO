@@ -58,6 +58,9 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
     return;
   }
 
+  // Multi-tenant scoping: defaults to '' when the n8n payload omits it,
+  // matching the buffer schema default and preserving single-tenant behavior.
+  const phoneNumberId = asOptionalString(body.phoneNumberId)   ?? '';
   const message      = asOptionalString(body.message)          ?? '';
   const messageId    = asOptionalString(body.messageId);
   const messageType  = asMessageType(body.messageType);
@@ -67,13 +70,14 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
   const timestamp    = asOptionalTimestamp(body.timestamp)     ?? null;
 
   logger.info(
-    { from, executionId, messageId, messageType },
+    { from, phoneNumberId, executionId, messageId, messageType },
     'Buffer push request received',
   );
 
   try {
     const result = await pushToBuffer({
       from,
+      phoneNumberId,
       message,
       executionId,
       messageId,
@@ -86,7 +90,7 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
 
     if (result.duplicate) {
       logger.info(
-        { from, executionId, messageId },
+        { from, phoneNumberId, executionId, messageId },
         'Buffer push — duplicate detected at controller',
       );
     }
@@ -94,7 +98,7 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
     res.json(result);
   } catch (err) {
     logger.error(
-      { err, from, executionId, messageId },
+      { err, from, phoneNumberId, executionId, messageId },
       'Buffer push failed',
     );
     res.status(500).json({ error: 'Buffer push failed' });
@@ -119,17 +123,21 @@ export const bufferClaimHandler = async (req: Request, res: Response): Promise<v
     return;
   }
 
+  // Multi-tenant scoping: defaults to '' when omitted so the claim targets the
+  // same buffer document the push created (preserves single-tenant behavior).
+  const phoneNumberId = asOptionalString(body.phoneNumberId) ?? '';
+
   logger.info(
-    { from, executionId },
+    { from, phoneNumberId, executionId },
     'Buffer claim request received',
   );
 
   try {
-    const result = await claimBuffer(from, executionId);
+    const result = await claimBuffer(from, executionId, phoneNumberId);
 
     if (result.skip) {
       logger.info(
-        { from, executionId, reason: result.reason },
+        { from, phoneNumberId, executionId, reason: result.reason },
         'Buffer claim skipped at controller',
       );
     }
@@ -137,7 +145,7 @@ export const bufferClaimHandler = async (req: Request, res: Response): Promise<v
     res.json(result);
   } catch (err) {
     logger.error(
-      { err, from, executionId },
+      { err, from, phoneNumberId, executionId },
       'Buffer claim failed',
     );
     res.status(500).json({ error: 'Buffer claim failed' });

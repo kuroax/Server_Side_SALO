@@ -15,7 +15,6 @@ import { logger } from "#/config/logger.js";
 import {
   findBoutiqueByPhoneNumberId,
   findBoutiqueByPhoneNumberIdWithToken,
-  findFirstActiveBoutique,
 } from "#/modules/boutiques/boutique.service.js";
 import {
   getConversationMode,
@@ -1090,6 +1089,7 @@ ${incomingMessageForClaude}`;
         } else {
           const created = await createOrder(
             {
+              boutiqueId,
               customerId,
               channel: "whatsapp",
               items: resolvedItems,

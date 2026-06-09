@@ -55,17 +55,6 @@ export const findBoutiqueById = async (
   return BoutiqueModel.findById(id).lean<BoutiqueLean | null>();
 };
 
-// Single-tenant compatibility shim used by webhook.service.ts when an
-// incoming WhatsApp message has no phoneNumberId (older n8n payload format).
-// Returns the oldest active boutique. Once every n8n flow is migrated to
-// include phone_number_id in the webhook body, this can be removed and
-// callers must use findBoutiqueByPhoneNumberId exclusively.
-export const findFirstActiveBoutique = async (): Promise<BoutiqueLean | null> => {
-  return BoutiqueModel.findOne({ status: BOUTIQUE_STATUS.ACTIVE })
-    .sort({ createdAt: 1 })
-    .lean<BoutiqueLean | null>();
-};
-
 export const listBoutiques = async (): Promise<BoutiqueLean[]> => {
   return BoutiqueModel.find()
     .sort({ createdAt: -1 })

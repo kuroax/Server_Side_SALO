@@ -50,6 +50,10 @@ const orderNoteInputSchema = z.object({
 // ─── Mutations ────────────────────────────────────────────────────────────────
 
 export const createOrderSchema = z.object({
+  // Multi-tenant scope. Optional for backward compat with pre-multi-tenant
+  // callers, but ALL new callers should supply this so the order is scoped to
+  // the correct boutique (read from JWT context / boutique lookup, never client).
+  boutiqueId: objectIdSchema.optional(),
   // Nullable — bot may not have a confirmed customer record at creation time
   customerId: objectIdSchema.nullable().optional().default(null),
   channel:    z.enum(ORDER_CHANNELS, { error: 'Invalid channel' }),
@@ -108,6 +112,10 @@ export const getCustomerOrdersSchema = z.object({
 
 export const orderFilterSchema = z
   .object({
+    // Multi-tenant scope. GraphQL resolvers MUST always pass this from
+    // context.user.boutiqueId (JWT) — never accept it as a client argument —
+    // otherwise listOrders leaks orders across boutiques.
+    boutiqueId:    objectIdSchema.optional(),
     customerId:    objectIdSchema.optional(),
     status:        z.enum(ORDER_STATUSES,   { error: 'Invalid order status' }).optional(),
     paymentStatus: z.enum(PAYMENT_STATUSES, { error: 'Invalid payment status' }).optional(),

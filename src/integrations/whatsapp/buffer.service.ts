@@ -12,6 +12,11 @@ const ELAPSED_THRESHOLD_MS = env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS;
 
 export type PushPayload = {
   from: string;
+  // Boutique WhatsApp phoneNumberId — scopes the buffer per tenant so two
+  // boutiques receiving messages from the same customer phone do not collide.
+  // Falls back to '' when the caller (older n8n payload) omits it, matching the
+  // schema default; this keeps single-tenant behavior intact during migration.
+  phoneNumberId: string;
   message: string;
   executionId: string;
   messageId?: string;
@@ -66,6 +71,7 @@ export const pushToBuffer = async (
 ): Promise<PushResult> => {
   const {
     from,
+    phoneNumberId,
     message,
     executionId,
     messageId,
@@ -84,12 +90,13 @@ export const pushToBuffer = async (
   if (normalizedMessageId) {
     const duplicateExists = await ConversationBufferModel.exists({
       from,
+      phoneNumberId,
       "messages.messageId": normalizedMessageId,
     });
 
     if (duplicateExists) {
       logger.info(
-        { from, executionId, messageId: normalizedMessageId },
+        { from, phoneNumberId, executionId, messageId: normalizedMessageId },
         "Buffer push — duplicate messageId ignored",
       );
 
@@ -98,7 +105,7 @@ export const pushToBuffer = async (
   }
 
   await ConversationBufferModel.findOneAndUpdate(
-    { from },
+    { from, phoneNumberId },
     {
       $push: {
         messages: {
@@ -121,7 +128,7 @@ export const pushToBuffer = async (
   );
 
   logger.info(
-    { from, executionId, messageId: normalizedMessageId, messageType },
+    { from, phoneNumberId, executionId, messageId: normalizedMessageId, messageType },
     "Buffer push — message appended",
   );
 
@@ -139,11 +146,13 @@ export const pushToBuffer = async (
 export const claimBuffer = async (
   from: string,
   executionId: string,
+  phoneNumberId: string,
 ): Promise<ClaimResult> => {
   const cutoff = new Date(Date.now() - ELAPSED_THRESHOLD_MS);
 
   const claimedBuffer = await ConversationBufferModel.findOneAndDelete({
     from,
+    phoneNumberId,
     ownerExecutionId: executionId,
     lastSeen: { $lte: cutoff },
   });
@@ -152,12 +161,12 @@ export const claimBuffer = async (
     // Diagnostic read only.
     // This does NOT decide the winner; it only improves skip reason visibility.
     // Best-effort only: document may already be deleted by another execution.
-    const current = await ConversationBufferModel.findOne({ from })
+    const current = await ConversationBufferModel.findOne({ from, phoneNumberId })
       .select({ lastSeen: 1, ownerExecutionId: 1 })
       .lean();
 
     if (!current) {
-      logger.info({ from, executionId }, "Claim — no buffer found, skip");
+      logger.info({ from, phoneNumberId, executionId }, "Claim — no buffer found, skip");
       return { skip: true, reason: "buffer_not_found" };
     }
 
@@ -167,7 +176,7 @@ export const claimBuffer = async (
 
     if (typeof elapsed === "number" && elapsed < ELAPSED_THRESHOLD_MS) {
       logger.info(
-        { from, executionId, elapsed, threshold: ELAPSED_THRESHOLD_MS },
+        { from, phoneNumberId, executionId, elapsed, threshold: ELAPSED_THRESHOLD_MS },
         "Claim — elapsed too short, skip",
       );
       return { skip: true, reason: "elapsed_too_short" };
@@ -175,14 +184,14 @@ export const claimBuffer = async (
 
     if (current.ownerExecutionId !== executionId) {
       logger.info(
-        { from, executionId, owner: current.ownerExecutionId },
+        { from, phoneNumberId, executionId, owner: current.ownerExecutionId },
         "Claim — not owner, skip",
       );
       return { skip: true, reason: "not_owner" };
     }
 
     logger.warn(
-      { from, executionId },
+      { from, phoneNumberId, executionId },
       "Claim — atomic claim not granted despite ownership diagnostics",
     );
     return { skip: true, reason: "claim_not_granted" };
@@ -217,7 +226,7 @@ export const claimBuffer = async (
 
   if (!mergedMessage && !aggregatedImageMediaId) {
     logger.info(
-      { from, executionId },
+      { from, phoneNumberId, executionId },
       "Claim — buffer claimed but merged message was empty and no imageMediaId, skip",
     );
     return { skip: true, reason: "empty_merged_message" };
@@ -226,6 +235,7 @@ export const claimBuffer = async (
   logger.info(
     {
       from,
+      phoneNumberId,
       executionId,
       messageCount: messages.length,
       aggregatedMessageType,

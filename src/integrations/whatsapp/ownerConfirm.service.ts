@@ -239,6 +239,7 @@ export const handleOwnerConfirm = async (
     // 4. Create the order. createOrder(input, createdBy, sourceMessageId).
     const created = await createOrder(
       {
+        boutiqueId,
         customerId: customer._id.toString(),
         channel: "whatsapp",
         items: resolvedItems,

@@ -275,10 +275,19 @@ type ProductSnapshotLike = {
 
 async function fetchProductSnapshots(
   productIds: string[],
+  boutiqueId?: string,
 ): Promise<Map<string, { name: string; slug: string }>> {
   const uniqueIds = [...new Set(productIds)];
   const objectIds = uniqueIds.map((id) => new Types.ObjectId(id));
-  const products = await ProductModel.find({ _id: { $in: objectIds } })
+
+  // Multi-tenant guard: when boutiqueId is supplied, only resolve products that
+  // belong to that boutique so one tenant's products cannot be snapshotted into
+  // another tenant's order. Optional to stay backward-compatible with callers
+  // that have not yet been scoped (the missing-id check below still fires).
+  const filter: Record<string, unknown> = { _id: { $in: objectIds } };
+  if (boutiqueId) filter.boutiqueId = new Types.ObjectId(boutiqueId);
+
+  const products = await ProductModel.find(filter)
     .select("name slug")
     .lean<ProductSnapshotLike[]>();
 
@@ -315,6 +324,8 @@ export async function listOrders(input: unknown): Promise<SafeOrder[]> {
   const filter = orderFilterSchema.parse(input);
   const query: Record<string, unknown> = {};
 
+  if (filter.boutiqueId)
+    query.boutiqueId = new Types.ObjectId(filter.boutiqueId);
   if (filter.customerId)
     query.customerId = new Types.ObjectId(filter.customerId);
   if (filter.status) query.status = filter.status;
@@ -364,7 +375,7 @@ export async function createOrder(
   }
 
   const productIds = data.items.map((item) => item.productId);
-  const snapshots = await fetchProductSnapshots(productIds);
+  const snapshots = await fetchProductSnapshots(productIds, data.boutiqueId);
 
   const enrichedItems = data.items.map((item) => ({
     ...item,
@@ -392,6 +403,7 @@ export async function createOrder(
 
   const order = new OrderModel({
     orderNumber,
+    boutiqueId: data.boutiqueId ? new Types.ObjectId(data.boutiqueId) : undefined,
     customerId: data.customerId ? new Types.ObjectId(data.customerId) : null,
     channel: data.channel,
     sourceMessageId: normalizedSourceMessageId,
@@ -732,9 +744,20 @@ type MonthRevenue = {
   orderCount: number;
 };
 
-export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
+export async function getRevenueStats(
+  months = 3,
+  boutiqueId?: string,
+): Promise<MonthRevenue[]> {
   const now = new Date();
   const from = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+
+  // Multi-tenant scope: when supplied, restrict the aggregation to one boutique
+  // so revenue is not summed across every tenant in the dashboard.
+  const match: Record<string, unknown> = {
+    createdAt: { $gte: from },
+    status: { $ne: "cancelled" },
+  };
+  if (boutiqueId) match.boutiqueId = new Types.ObjectId(boutiqueId);
 
   const raw = await OrderModel.aggregate<{
     _id: { year: number; month: number };
@@ -742,10 +765,7 @@ export async function getRevenueStats(months = 3): Promise<MonthRevenue[]> {
     orderCount: number;
   }>([
     {
-      $match: {
-        createdAt: { $gte: from },
-        status: { $ne: "cancelled" },
-      },
+      $match: match,
     },
     {
       $group: {
@@ -800,9 +820,17 @@ type RevenueDetailResult = {
 export async function getRevenueDetail(
   months = 12,
   topProductsLimit = 10,
+  boutiqueId?: string,
 ): Promise<RevenueDetailResult> {
   const now = new Date();
   const from = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+
+  // Multi-tenant scope applied to all three pipelines below. When supplied,
+  // each $match also filters by boutiqueId so monthly stats, payment breakdown,
+  // and top products are scoped to one tenant instead of aggregating globally.
+  const boutiqueMatch: Record<string, unknown> = boutiqueId
+    ? { boutiqueId: new Types.ObjectId(boutiqueId) }
+    : {};
 
   const monthlyRaw = await OrderModel.aggregate<{
     _id: { year: number; month: number };
@@ -811,6 +839,7 @@ export async function getRevenueDetail(
   }>([
     {
       $match: {
+        ...boutiqueMatch,
         createdAt: { $gte: from },
         status: { $ne: "cancelled" },
       },
@@ -850,7 +879,7 @@ export async function getRevenueDetail(
     count: number;
     revenue: number;
   }>([
-    { $match: { status: { $ne: "cancelled" } } },
+    { $match: { ...boutiqueMatch, status: { $ne: "cancelled" } } },
     {
       $group: {
         _id: "$paymentStatus",
@@ -870,7 +899,7 @@ export async function getRevenueDetail(
     revenue: number;
     unitsSold: number;
   }>([
-    { $match: { status: { $ne: "cancelled" } } },
+    { $match: { ...boutiqueMatch, status: { $ne: "cancelled" } } },
     { $unwind: "$items" },
     {
       $group: {

@@ -45,6 +45,16 @@ export const orderSchema = new Schema(
   {
     orderNumber: { type: String, required: true, unique: true, trim: true },
 
+    // Multi-tenant scope. Required on all NEW orders (callers must pass it), but
+    // left optional here for backward compatibility with pre-multi-tenant data
+    // (Boutique #1's existing orders) so no data migration is needed to deploy.
+    boutiqueId: {
+      type: Schema.Types.ObjectId,
+      ref: "Boutique",
+      required: false,
+      default: undefined,
+    },
+
     // Nullable — bot may create the order before a customer record is confirmed
     customerId: { type: Schema.Types.ObjectId, ref: "Customer", default: null },
 
@@ -140,6 +150,14 @@ orderSchema.index(
 orderSchema.index(
   { customerId: 1, createdAt: -1 },
   { name: "customerId_createdAt_desc" },
+);
+
+// Multi-tenant: scopes dashboard lists and revenue aggregations to one boutique.
+// Without this, listOrders/getRevenueStats/getRevenueDetail scan and aggregate
+// across every tenant's orders, leaking cross-tenant data into the dashboard.
+orderSchema.index(
+  { boutiqueId: 1, createdAt: -1 },
+  { name: "boutiqueId_createdAt_desc" },
 );
 
 // No pre('save') hook for financial fields — all derived values are computed
