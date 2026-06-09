@@ -35,6 +35,21 @@ const businessInfoSchema = new Schema(
 // claude.service.ts via buildAgentSection(). The boutique-agnostic prompt rules
 // (JSON contract, intents, payment flow, etc.) live in prompt/base.prompt.ts.
 
+// Per-boutique style phrases — each optional. buildAgentSection assembles these
+// into the "ESTILO Y FRASES" block and they fill the placeholders the base
+// prompt references (e.g. [FRASE_AGRADECIMIENTO_PAGO]).
+const agentPhrasesSchema = new Schema(
+  {
+    paymentAck: { type: String, trim: true, default: undefined }, // [FRASE_AGRADECIMIENTO_PAGO]
+    orderConfirm: { type: String, trim: true, default: undefined }, // [FRASE_CONFIRMACION_PEDIDO]
+    negativeSticker: { type: String, trim: true, default: undefined }, // sticker negativo response
+    affirmations: { type: String, trim: true, default: undefined }, // "Vaaaa!, Sipi!, Padrísimo!"
+    closings: { type: String, trim: true, default: undefined }, // closing phrases
+    emojiSet: { type: String, trim: true, default: undefined }, // emoji palette
+  },
+  { _id: false },
+);
+
 const agentConfigSchema = new Schema(
   {
     // Agent display name used in the system prompt, e.g. "Luis".
@@ -42,16 +57,50 @@ const agentConfigSchema = new Schema(
     // One phrase describing the business type, e.g.
     // "tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga…".
     categoryDescription: { type: String, required: true, trim: true },
+
+    // ── Structured personality fields (all optional) ──────────────────────────
+    // Typed replacements for the free-form salesInstructions blob. When present,
+    // buildAgentSection assembles them into "INSTRUCCIONES DE VENTAS Y ESTILO"
+    // and the legacy blob is ignored.
+    phrases: { type: agentPhrasesSchema, default: undefined },
+    // Fills [CATEGORÍAS_DEL_CATÁLOGO] in the base prompt.
+    discoveryCategories: { type: String, trim: true, default: undefined },
+    // Free text: upsell patterns, set-completion / bundle rules.
+    upsellRules: { type: String, trim: true, default: undefined },
+    // Free text: size recommendations for this boutique's category.
+    sizeGuide: { type: String, trim: true, default: undefined },
     // Optional brand-specific product knowledge injected into the prompt, e.g.
     // "En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4".
     brandKnowledge: { type: String, trim: true, default: undefined },
-    // Optional per-boutique sales rules, phrases, emojis, upsell logic and size
-    // guidance. Resolves the placeholders the base prompt references under
-    // "INSTRUCCIONES DE VENTAS Y ESTILO". ShopaloGDL-specific content that used
-    // to be hardcoded in base.prompt.ts now lives here per tenant.
-    salesInstructions: { type: String, trim: true, default: undefined },
+    // Escape hatch for anything the structured fields don't cover.
+    customInstructions: { type: String, trim: true, default: undefined },
     // Optional additional tone/persona instructions specific to this boutique.
     personalityNotes: { type: String, trim: true, default: undefined },
+
+    // ── Backward-compat field (kept during migration window) ──────────────────
+    // Legacy free-form blob. Still injected by buildAgentSection when the
+    // structured fields above are absent. Removed in a future migration once all
+    // boutiques use structured fields.
+    salesInstructions: { type: String, trim: true, default: undefined },
+  },
+  { _id: false },
+);
+
+// Snapshot schema for previousAgentConfig — same shape as agentConfigSchema but
+// every field optional, so storing a prior snapshot never trips required-field
+// validation. Used for one-click rollback.
+const previousAgentConfigSchema = new Schema(
+  {
+    agentName: { type: String, trim: true, default: undefined },
+    categoryDescription: { type: String, trim: true, default: undefined },
+    phrases: { type: agentPhrasesSchema, default: undefined },
+    discoveryCategories: { type: String, trim: true, default: undefined },
+    upsellRules: { type: String, trim: true, default: undefined },
+    sizeGuide: { type: String, trim: true, default: undefined },
+    brandKnowledge: { type: String, trim: true, default: undefined },
+    customInstructions: { type: String, trim: true, default: undefined },
+    personalityNotes: { type: String, trim: true, default: undefined },
+    salesInstructions: { type: String, trim: true, default: undefined },
   },
   { _id: false },
 );
@@ -146,6 +195,21 @@ const boutiqueSchema = new Schema(
     agentConfig: {
       type: agentConfigSchema,
       required: true,
+    },
+
+    // ── agentConfig versioning ────────────────────────────────────────────────
+    // Lightweight audit/version trail for AI-personality edits made via the
+    // owner app (updateAgentConfig / rollbackAgentConfig). Lives on the boutique,
+    // not inside agentConfig, so a config snapshot round-trips cleanly.
+    agentConfigVersion: { type: Number, default: 1, min: 1 },
+    agentConfigUpdatedAt: { type: Date, default: undefined },
+    agentConfigUpdatedBy: { type: String, default: undefined }, // userId of last editor
+
+    // Snapshot of agentConfig before the most recent update — powers one-click
+    // rollback. Entirely optional; same shape as agentConfig.
+    previousAgentConfig: {
+      type: previousAgentConfigSchema,
+      default: undefined,
     },
 
     // Tenant-wide bot toggle. When "manual" the bot stays silent for every

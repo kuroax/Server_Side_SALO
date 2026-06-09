@@ -4,6 +4,7 @@ import {
   updateBoutiqueSchema,
   updateBoutiqueCredentialsSchema,
   setModeSchema,
+  updateAgentConfigSchema,
 } from "#/modules/boutiques/boutique.validation.js";
 import type {
   BoutiqueSchemaType,
@@ -152,6 +153,106 @@ export const setBoutiqueGlobalMode = async (
 
   if (doc) {
     logger.info({ boutiqueId: id, mode }, "Boutique global mode updated");
+  }
+
+  return doc;
+};
+
+// ─── Agent config ─────────────────────────────────────────────────────────────
+// Owner-app editing of the AI personality. Partial update: only supplied fields
+// change; the rest are preserved. Snapshots the prior config into
+// previousAgentConfig for one-click rollback and bumps agentConfigVersion.
+
+type AgentConfigDoc = BoutiqueSchemaType["agentConfig"];
+
+export const updateAgentConfig = async (
+  boutiqueId: string,
+  input: unknown,
+  updatedBy: string,
+): Promise<BoutiqueLean | null> => {
+  const data = updateAgentConfigSchema.parse(input);
+
+  // Load current config to snapshot it and to merge partial updates onto it.
+  const current = await BoutiqueModel.findById(boutiqueId).lean<BoutiqueLean | null>();
+  if (!current) {
+    return null;
+  }
+
+  const existing = current.agentConfig;
+
+  // Shallow merge; phrases is merged one level deep so a partial phrases update
+  // does not wipe sibling phrase fields.
+  const mergedAgentConfig = {
+    ...existing,
+    ...data,
+    phrases:
+      data.phrases !== undefined
+        ? { ...(existing.phrases ?? {}), ...data.phrases }
+        : existing.phrases,
+  } as AgentConfigDoc;
+
+  const doc = await BoutiqueModel.findByIdAndUpdate(
+    boutiqueId,
+    {
+      $set: {
+        agentConfig: mergedAgentConfig,
+        previousAgentConfig: existing,
+        agentConfigUpdatedAt: new Date(),
+        agentConfigUpdatedBy: updatedBy,
+      },
+      $inc: { agentConfigVersion: 1 },
+    },
+    { new: true, runValidators: true },
+  ).lean<BoutiqueLean | null>();
+
+  if (doc) {
+    logger.info(
+      { boutiqueId, agentConfigVersion: doc.agentConfigVersion, updatedBy },
+      "agentConfig updated",
+    );
+  }
+
+  return doc;
+};
+
+// Swaps agentConfig ↔ previousAgentConfig and bumps the version. No-op (returns
+// the unchanged doc) when there is no snapshot to restore.
+export const rollbackAgentConfig = async (
+  boutiqueId: string,
+  requestedBy: string,
+): Promise<BoutiqueLean | null> => {
+  const current = await BoutiqueModel.findById(boutiqueId).lean<BoutiqueLean | null>();
+  if (!current) {
+    return null;
+  }
+
+  if (!current.previousAgentConfig) {
+    logger.warn(
+      { boutiqueId, requestedBy },
+      "rollbackAgentConfig — no previous config to restore; returning current",
+    );
+    return current;
+  }
+
+  const doc = await BoutiqueModel.findByIdAndUpdate(
+    boutiqueId,
+    {
+      $set: {
+        agentConfig: current.previousAgentConfig as AgentConfigDoc,
+        previousAgentConfig: current.agentConfig,
+        agentConfigUpdatedAt: new Date(),
+        agentConfigUpdatedBy: requestedBy,
+      },
+      $inc: { agentConfigVersion: 1 },
+    },
+    { new: true, runValidators: true },
+  ).lean<BoutiqueLean | null>();
+
+  if (doc) {
+    logger.info(
+      { boutiqueId, agentConfigVersion: doc.agentConfigVersion, requestedBy },
+      "agentConfig rolled back",
+    );
   }
 
   return doc;

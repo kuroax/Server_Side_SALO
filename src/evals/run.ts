@@ -14,24 +14,19 @@ const MOCK_AGENT_CONFIG = {
     "tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga, Lululemon, Wiskii, 437, Better Me y Skims",
   brandKnowledge:
     "En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4",
-  // Mirrors the ShopaloGDL string written by migrate-sales-instructions.ts, so
-  // eval scenarios resolve the base prompt's placeholders (e.g.
-  // [FRASE_AGRADECIMIENTO_PAGO]) with the same sales rules Luis runs in prod.
-  salesInstructions: `ESTILO Y FRASES:
-- AFIRMACIONES: "Vaaaa!", "Sipi!", "Padrísimo! 🙌🏼", "Con mil gusto!"
-- EMOJIS (con moderación): 🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨
-- FRASES DE CIERRE: "Es un gusto atenderte 🫶🏼", "Sigo a tus órdenes!", "A tiii! 🙏🏻"
-- [FRASE_AGRADECIMIENTO_PAGO] = "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫"
-- [FRASE_CONFIRMACION_PEDIDO] = "Todo lo que escogiste está divino! Te va a encantar! ✨"
-- STICKER NEGATIVO: "¿Buscamos otra talla, color o estilo? 🙏🏻"
-
-CATEGORÍAS DE PRODUCTOS:
-- [CATEGORÍAS_DEL_CATÁLOGO] = "¿Leggings, bra, top, set, shorts, vestido?"
-- Sub-pregunta de pantalón: "¿Buscas pants recto o con resorte en el tobillo?"
-- Ejemplo de catálogo amplio: "Leggings, bra, set, chamarra"
-
-UPSELL Y SET COMPLETION:
-- COMPLETAR EL SET (top, bra, tank, crop → preguntar por bottom):
+  // Structured personality fields — the exact values migrate-agentconfig-structured.ts
+  // extracts from ShopaloGDL's legacy salesInstructions blob. Exercises
+  // buildAgentSection's structured-assembly path (not the legacy fallback).
+  phrases: {
+    affirmations: `"Vaaaa!", "Sipi!", "Padrísimo! 🙌🏼", "Con mil gusto!"`,
+    emojiSet: "🙌🏼 🙏🏻 🫶🏼 💫 ⭐️ 🥹 ✨",
+    closings: `"Es un gusto atenderte 🫶🏼", "Sigo a tus órdenes!", "A tiii! 🙏🏻"`,
+    paymentAck: "Mil gracias!!! Que se te multiplique 70 mil veces 7! 💫",
+    orderConfirm: "Todo lo que escogiste está divino! Te va a encantar! ✨",
+    negativeSticker: "¿Buscamos otra talla, color o estilo? 🙏🏻",
+  },
+  discoveryCategories: "¿Leggings, bra, top, set, shorts, vestido?",
+  upsellRules: `- COMPLETAR EL SET (top, bra, tank, crop → preguntar por bottom):
   SIEMPRE que el cliente seleccione o confirme un top, bra, tank, o crop top, pregunta si quiere el set completo.
   Ejemplo (femenino): "¡Perfecto! ¿Quieres también el legging o el pants a juego? Es un look padrísimo completo 🙌🏼"
   Si confirma, llama search_products con el bottom complementario (legging / pants / short) y la misma marca/color si las conoces.
@@ -39,14 +34,11 @@ UPSELL Y SET COMPLETION:
   Cuando el cliente confirma o está a punto de confirmar un pedido, ofrece calcetas, guantes, viseras, o bolso si están disponibles en tu inventario.
   Ejemplo: "¿Gustas que le agregue unas calcetas o guantes Alo para completar el look? 🙌🏼"
   Solo una sugerencia, nunca más de un accesorio para no abrumar.
-- En search_products, cuando el cliente selecciona un top: buscar bottom a juego (legging / pants / short) de la misma marca y color.
-
-RECOMENDACIÓN DE TALLA:
-- Para faldas, shorts, y leggings: si la cliente menciona curvas o pompis → siempre recomienda la talla mayor.
+- En search_products, cuando el cliente selecciona un top: buscar bottom a juego (legging / pants / short) de la misma marca y color.`,
+  sizeGuide: `- Para faldas, shorts, y leggings: si la cliente menciona curvas o pompis → siempre recomienda la talla mayor.
 - Para bras y tops: si tiene busto → talla mayor. Para fit más structured → talla menor.
-- Ejemplo: "Las faldas Alo tienden a quedar ajustadas — si tienes cadera o pompis pronunciada, la S te va a quedar mejor."
-
-TEXTURA / MATERIAL:
+- Ejemplo: "Las faldas Alo tienden a quedar ajustadas — si tienes cadera o pompis pronunciada, la S te va a quedar mejor."`,
+  customInstructions: `TEXTURA / MATERIAL:
 - Para preguntas de textura o material: si no tienes la información exacta, di: "Para ese detalle te recomiendo verla en el showroom o en el momento de empacarla te mando un video para que veas el material 🙌🏼"`,
 };
 

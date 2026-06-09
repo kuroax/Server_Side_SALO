@@ -144,6 +144,49 @@ export const embeddedSignupSchema = z.object({
   businessPortfolioId: z.string().trim().min(1).optional(),
 });
 
+// ─── Agent config ─────────────────────────────────────────────────────────────
+// Typed, validatable replacement for the free-form salesInstructions blob.
+// Owners edit these via the updateAgentConfig GraphQL mutation.
+
+export const agentPhrasesSchema = z.object({
+  paymentAck: z.string().trim().min(1).optional(),
+  orderConfirm: z.string().trim().min(1).optional(),
+  negativeSticker: z.string().trim().min(1).optional(),
+  affirmations: z.string().trim().min(1).optional(),
+  closings: z.string().trim().min(1).optional(),
+  emojiSet: z.string().trim().min(1).optional(),
+});
+
+export const agentConfigSchema = z.object({
+  agentName: z.string().trim().min(1).max(120),
+  categoryDescription: z.string().trim().min(1).max(500),
+  phrases: agentPhrasesSchema.optional(),
+  discoveryCategories: z.string().trim().min(1).max(300).optional(),
+  upsellRules: z.string().trim().min(1).max(2000).optional(),
+  sizeGuide: z.string().trim().min(1).max(1000).optional(),
+  brandKnowledge: z.string().trim().min(1).max(1000).optional(),
+  customInstructions: z.string().trim().min(1).max(2000).optional(),
+  personalityNotes: z.string().trim().min(1).max(1000).optional(),
+});
+
+// Partial update: agentName and categoryDescription are also optional, but at
+// least one field must be supplied.
+export const updateAgentConfigSchema = z
+  .object({
+    agentName: z.string().trim().min(1).max(120).optional(),
+    categoryDescription: z.string().trim().min(1).max(500).optional(),
+    phrases: agentPhrasesSchema.optional(),
+    discoveryCategories: z.string().trim().min(1).max(300).optional(),
+    upsellRules: z.string().trim().min(1).max(2000).optional(),
+    sizeGuide: z.string().trim().min(1).max(1000).optional(),
+    brandKnowledge: z.string().trim().min(1).max(1000).optional(),
+    customInstructions: z.string().trim().min(1).max(2000).optional(),
+    personalityNotes: z.string().trim().min(1).max(1000).optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    error: "At least one field must be provided",
+  });
+
 // ─── Set mode ─────────────────────────────────────────────────────────────────
 
 export const setModeSchema = z.object({
@@ -160,3 +203,5 @@ export type UpdateBoutiqueCredentialsData = z.infer<
 >;
 export type EmbeddedSignupData = z.infer<typeof embeddedSignupSchema>;
 export type SetModeData = z.infer<typeof setModeSchema>;
+export type AgentConfigData = z.infer<typeof agentConfigSchema>;
+export type UpdateAgentConfigData = z.infer<typeof updateAgentConfigSchema>;

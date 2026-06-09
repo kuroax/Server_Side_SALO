@@ -48,6 +48,14 @@ afterEach(async () => {
   for (const key in collections) {
     await collections[key].deleteMany({})
   }
+
+  // Reset the module-level boutique config cache so a boutique loaded in one
+  // test never leaks into the next. Dynamic import keeps this file's top-level
+  // imports free of any module that touches #/config/env.js before env is set.
+  const { clearBoutiqueCache } = await import(
+    '#/modules/boutiques/boutique.cache.js'
+  )
+  clearBoutiqueCache()
 })
 
 afterAll(async () => {

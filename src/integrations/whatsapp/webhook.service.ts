@@ -17,6 +17,10 @@ import {
   findBoutiqueByPhoneNumberIdWithToken,
 } from "#/modules/boutiques/boutique.service.js";
 import {
+  getCachedBoutique,
+  setCachedBoutique,
+} from "#/modules/boutiques/boutique.cache.js";
+import {
   getConversationMode,
   trackIncomingMessage,
   checkAndApplyAutoResume,
@@ -171,7 +175,15 @@ export const handleIncomingMessage = async (
     );
     return emptyResult();
   }
-  const boutique = await findBoutiqueByPhoneNumberIdWithToken(phoneNumberId);
+  // Check the in-memory cache first to avoid a DB read on every message.
+  // On miss, load from DB (with decrypted accessToken) and populate the cache.
+  let boutique = getCachedBoutique(phoneNumberId);
+  if (!boutique) {
+    boutique = await findBoutiqueByPhoneNumberIdWithToken(phoneNumberId);
+    if (boutique) {
+      setCachedBoutique(phoneNumberId, boutique);
+    }
+  }
 
   if (!boutique) {
     logger.error(
@@ -798,7 +810,25 @@ ${incomingMessageForClaude}`;
       agentName: boutique.agentConfig.agentName,
       categoryDescription: boutique.agentConfig.categoryDescription,
       brandKnowledge: boutique.agentConfig.brandKnowledge ?? undefined,
+      phrases: boutique.agentConfig.phrases
+        ? {
+            paymentAck: boutique.agentConfig.phrases.paymentAck ?? undefined,
+            orderConfirm: boutique.agentConfig.phrases.orderConfirm ?? undefined,
+            negativeSticker:
+              boutique.agentConfig.phrases.negativeSticker ?? undefined,
+            affirmations: boutique.agentConfig.phrases.affirmations ?? undefined,
+            closings: boutique.agentConfig.phrases.closings ?? undefined,
+            emojiSet: boutique.agentConfig.phrases.emojiSet ?? undefined,
+          }
+        : undefined,
+      discoveryCategories: boutique.agentConfig.discoveryCategories ?? undefined,
+      upsellRules: boutique.agentConfig.upsellRules ?? undefined,
+      sizeGuide: boutique.agentConfig.sizeGuide ?? undefined,
+      customInstructions: boutique.agentConfig.customInstructions ?? undefined,
       personalityNotes: boutique.agentConfig.personalityNotes ?? undefined,
+      // Legacy fallback — used by buildAgentSection only when no structured field
+      // is present.
+      salesInstructions: boutique.agentConfig.salesInstructions ?? undefined,
     },
     customerName,
     customerGender,
