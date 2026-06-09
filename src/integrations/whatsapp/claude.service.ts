@@ -195,15 +195,15 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
       keyword: {
         type: "string",
         description:
-          'Tipo de prenda, nombre o marca. Ej: "legging", "crop top", "bra", "short", "Alo", "Lululemon".',
+          'Tipo de producto, nombre o marca. Ej: el tipo de artículo que busca el cliente.',
       },
       gender: {
         type: "string",
         enum: ["female", "male", "unknown"],
         description:
           "Género DEL PRODUCTO buscado — NO el género del cliente. " +
-          "SOLO incluir 'female' si el cliente pide EXPLÍCITAMENTE ropa de mujer. " +
-          "SOLO incluir 'male' si pide EXPLÍCITAMENTE ropa de hombre. " +
+          "SOLO incluir 'female' si el cliente pide EXPLÍCITAMENTE productos para mujer. " +
+          "SOLO incluir 'male' si pide EXPLÍCITAMENTE productos para hombre. " +
           "En TODOS los demás casos omitir o usar 'unknown'.",
       },
       size: {
@@ -1014,7 +1014,7 @@ INFORMACIÓN DEL NEGOCIO:
         intent: validated.data.intent,
         responsePreview: validated.data.response.slice(0, 200),
       },
-      "[Luis] Hallucinated confirmation promise detected — review system prompt adherence",
+      "[Agent] Hallucinated confirmation promise detected — review system prompt adherence",
     );
   }
 
