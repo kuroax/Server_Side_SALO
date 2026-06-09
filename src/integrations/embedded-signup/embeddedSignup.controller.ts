@@ -5,6 +5,7 @@ import {
   META_APP_SECRET,
   META_ES_CONFIG_ID,
   SALO_BACKEND_URL,
+  SYSTEM_USER_TOKEN,
 } from "#/config/env.js";
 import { verifyAccessToken } from "#/modules/auth/auth.utils.js";
 import { updateBoutiqueCredentials } from "#/modules/boutiques/boutique.service.js";
@@ -330,6 +331,10 @@ export const embeddedSignupCallbackHandler = async (
     "Embedded Signup callback — boutique connected to WhatsApp Business",
   );
 
+  // Subscribe the WABA to the SALO app so Meta delivers webhooks. Best-effort —
+  // never throws and does not block the success response to the WebView.
+  await subscribeWabaToApp({ wabaId, boutiqueId });
+
   res
     .status(200)
     .type("text/html")
@@ -649,16 +654,27 @@ export const embeddedSignupTokenExchangeHandler = async (
     "Embedded Signup — boutique connected to WhatsApp Business",
   );
 
+  // Subscribe the WABA to the SALO app so Meta delivers webhooks. Best-effort —
+  // never throws and does not block the success response.
+  await subscribeWabaToApp({ wabaId, boutiqueId });
+
   res.status(200).json({ success: true, boutiqueId });
 };
 
 // ─── Meta Graph helpers ───────────────────────────────────────────────────────
 
-async function fetchMeta(url: string): Promise<unknown> {
+async function fetchMeta(
+  url: string,
+  init?: { method?: string; headers?: Record<string, string> },
+): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), META_API_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      method: init?.method ?? "GET",
+      headers: init?.headers,
+      signal: controller.signal,
+    });
     const bodyText = await response.text();
     let body: unknown = undefined;
     try {
@@ -741,6 +757,45 @@ async function resolveWabaIdFromDebugToken(args: {
     );
   }
   return wabaId;
+}
+
+// Subscribes the boutique's WABA to the SALO Meta app so Meta delivers webhook
+// events (messages, statuses) for that account. Best-effort: never throws — a
+// failure here must not break the signup flow (the boutique is already
+// connected; subscription can be retried later). Uses the platform-level
+// SYSTEM_USER_TOKEN, not the per-boutique token.
+async function subscribeWabaToApp(args: {
+  wabaId: string;
+  boutiqueId: string;
+}): Promise<void> {
+  if (!SYSTEM_USER_TOKEN) {
+    logger.warn(
+      { boutiqueId: args.boutiqueId, wabaId: args.wabaId },
+      "Embedded Signup — SYSTEM_USER_TOKEN not set; skipping WABA app subscription",
+    );
+    return;
+  }
+
+  try {
+    const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(
+      args.wabaId,
+    )}/subscribed_apps`;
+
+    await fetchMeta(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SYSTEM_USER_TOKEN}` },
+    });
+
+    logger.info(
+      { boutiqueId: args.boutiqueId, wabaId: args.wabaId },
+      "Embedded Signup — WABA subscribed to SALO app",
+    );
+  } catch (err) {
+    logger.error(
+      { err, boutiqueId: args.boutiqueId, wabaId: args.wabaId },
+      "Embedded Signup — WABA app subscription failed (non-blocking)",
+    );
+  }
 }
 
 async function resolveFirstPhoneNumberId(args: {

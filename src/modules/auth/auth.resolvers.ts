@@ -28,7 +28,7 @@ export const authResolvers = {
     ) => {
       // Owner and admin only — helpers cannot see the team list
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
-      return listUsers(context.user!.id);
+      return listUsers(context.user!.id, context.user!.boutiqueId);
     },
   },
 
@@ -98,7 +98,7 @@ export const authResolvers = {
     ) => {
       // Owner and admin only
       requireRoles(context, [ROLES.OWNER, ROLES.ADMIN] as Role[]);
-      return deactivateUser(id, context.user!.id);
+      return deactivateUser(id, context.user!.id, context.user!.boutiqueId);
     },
   },
 };

@@ -231,11 +231,14 @@ export const getCurrentUser = async (
 // ─── List Users ───────────────────────────────────────────────────────────────
 // Returns all active users except the caller themselves.
 // Owner and admin only — enforced at both resolver and service layers.
+// Scoped to the caller's boutique — cross-tenant team lists are never returned.
 
 export const listUsers = async (
   callerId: string,
+  boutiqueId: string,
 ): Promise<SafeUser[]> => {
   const users = await UserModel.find({
+    boutiqueId: new Types.ObjectId(boutiqueId), // tenant isolation
     isActive: true,
     _id: { $ne: callerId }, // exclude the caller from the list
   })
@@ -264,6 +267,7 @@ export const listUsers = async (
 export const deactivateUser = async (
   targetId: string,
   callerId: string,
+  callerBoutiqueId: string,
 ): Promise<boolean> => {
   // Cannot deactivate yourself
   if (targetId === callerId) {
@@ -274,6 +278,12 @@ export const deactivateUser = async (
 
   if (!target || !target.isActive) {
     throw new ValidationError('User not found or already inactive');
+  }
+
+  // Tenant isolation — the target must belong to the caller's boutique.
+  // Prevents an owner/admin from deactivating staff in another boutique.
+  if (target.boutiqueId.toString() !== callerBoutiqueId) {
+    throw new AuthorizationError('User not found or already inactive');
   }
 
   // Cannot deactivate the owner account — there must always be one owner
