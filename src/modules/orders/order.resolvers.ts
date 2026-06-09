@@ -54,7 +54,10 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_READ_ROLES);
-      return listOrders(args.filter ?? {});
+      // boutiqueId is read from the JWT and applied AFTER the client filter so a
+      // client-supplied filter.boutiqueId can never widen the tenant scope.
+      const filter = (args.filter ?? {}) as Record<string, unknown>;
+      return listOrders({ ...filter, boutiqueId: context.user?.boutiqueId });
     },
 
     async customerOrders(
@@ -72,7 +75,7 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireAuth(context);
-      return getRevenueStats(args.months ?? 3);
+      return getRevenueStats(args.months ?? 3, context.user?.boutiqueId);
     },
 
     async revenueDetail(
@@ -81,7 +84,11 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireAuth(context);
-      return getRevenueDetail(args.months ?? 12, args.topProductsLimit ?? 10);
+      return getRevenueDetail(
+        args.months ?? 12,
+        args.topProductsLimit ?? 10,
+        context.user?.boutiqueId,
+      );
     },
   },
 
@@ -92,7 +99,13 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_WRITE_ROLES);
-      return createOrder(args.input, context.user?.id ?? null);
+      // boutiqueId is read from the JWT and applied AFTER the client input so a
+      // client-supplied input.boutiqueId can never create a cross-tenant order.
+      const input = (args.input ?? {}) as Record<string, unknown>;
+      return createOrder(
+        { ...input, boutiqueId: context.user?.boutiqueId },
+        context.user?.id ?? null,
+      );
     },
 
     async updateOrderStatus(
