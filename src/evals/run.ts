@@ -54,6 +54,9 @@ async function runScenario(scenario: typeof scenarios[0]): Promise<EvalScenarioR
     let result;
     try {
       result = await processMessage({
+        // Offline eval — placeholder tenant id; the usage-log write is
+        // non-blocking and its failure (if the DB is unreachable) is swallowed.
+        boutiqueId: "000000000000000000000000",
         agentConfig: MOCK_AGENT_CONFIG,
         customerName: "Gisell Parra",
         customerGender: "female",

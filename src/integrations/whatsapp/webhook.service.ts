@@ -790,6 +790,8 @@ ${incomingMessageForClaude}`;
       : undefined;
 
   const rawResult = await processMessage({
+    // Tenant scope — used by claude.service.ts to attribute token usage.
+    boutiqueId,
     // Per-tenant agent identity. Mongoose infers string | null | undefined for
     // the optional fields; coerce null → undefined for the ClaudeContext contract.
     agentConfig: {

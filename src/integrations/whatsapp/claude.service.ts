@@ -1,7 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
+import mongoose from "mongoose";
 import { z } from "zod";
 import { ANTHROPIC_API_KEY } from "#/config/env.js";
 import { logger } from "#/config/logger.js";
+import { UsageLogModel } from "#/modules/usageLogs/usageLog.model.js";
 import { BASE_PLATFORM_PROMPT } from "./prompt/base.prompt.js";
 import {
   buildAgentSection,
@@ -77,6 +79,9 @@ export type OrderItem = {
 };
 
 export type ClaudeContext = {
+  // Tenant scope — passed from webhook.service.ts. Used to attribute Claude API
+  // token usage to the correct boutique (UsageLog).
+  boutiqueId: string;
   // Per-tenant agent identity — injected into the platform prompt at runtime.
   // Same shape as boutique.agentConfig in MongoDB.
   agentConfig: AgentConfig;
@@ -353,6 +358,11 @@ type AgenticResult = {
   text: string;
   stopReason: string;
   productImages: Array<{ url: string; caption?: string }>;
+  // Accumulated token usage across all loop iterations (input + output per
+  // callOnce response). Used for per-boutique usage logging.
+  inputTokens: number;
+  outputTokens: number;
+  toolIterations: number;
 };
 
 const MAX_PRODUCTS_PER_SEARCH = 4;
@@ -393,8 +403,20 @@ async function runAgenticLoop(
   ];
   const accumulatedImages: Array<{ url: string; caption?: string }> = [];
 
+  // Token + iteration accumulators — summed across every callOnce response in
+  // the loop (both tool_use turns and the final text turn).
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let iterationCount = 0;
+
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
     const message = await callOnce({ ...baseParams, messages }, timeoutMs);
+
+    // usage.input_tokens / output_tokens are always present on non-streaming
+    // responses. Accumulate before branching so every call is counted.
+    totalInputTokens += message.usage.input_tokens;
+    totalOutputTokens += message.usage.output_tokens;
+    iterationCount++;
 
     if (message.stop_reason !== "tool_use") {
       const text = message.content
@@ -411,6 +433,9 @@ async function runAgenticLoop(
         text,
         stopReason: message.stop_reason ?? "unknown",
         productImages: dedupedImages,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        toolIterations: iterationCount,
       };
     }
 
@@ -635,6 +660,9 @@ INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_prod
       text: "__TOOL_LOOP_EXHAUSTED_WITH_IMAGES__",
       stopReason: "tool_loop_exhausted",
       productImages: [],
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
+      toolIterations: iterationCount,
     };
   }
 
@@ -659,6 +687,33 @@ export const processMessage = async (
     conversationHistory,
     businessInfo,
   } = context;
+
+  // Non-blocking per-boutique usage logger. NEVER awaited and NEVER throws —
+  // a failed write must not add latency or break the WhatsApp response. Called
+  // on every exit path (success AND SAFE_FALLBACK). On early failures with no
+  // completed API call, tokens are 0 and toolIterations defaults to 1.
+  const logUsage = (args: {
+    intent?: ClaudeIntent;
+    inputTokens: number;
+    outputTokens: number;
+    toolIterations: number;
+  }): void => {
+    UsageLogModel.create({
+      boutiqueId: new mongoose.Types.ObjectId(context.boutiqueId),
+      model: CLAUDE_MODEL,
+      intent: args.intent ?? undefined,
+      inputTokens: args.inputTokens,
+      outputTokens: args.outputTokens,
+      totalTokens: args.inputTokens + args.outputTokens,
+      toolIterations: args.toolIterations,
+      createdAt: new Date(),
+    }).catch((err) => {
+      logger.warn(
+        { err, boutiqueId: context.boutiqueId },
+        "UsageLog write failed — non-critical",
+      );
+    });
+  };
 
   // Timeout: base + fixed headroom for tool calls.
   // A flat +5s (not per-turn) because Claude API latency is dominated by
@@ -776,6 +831,15 @@ INFORMACIÓN DEL NEGOCIO:
           ? "Claude agentic loop exhausted MAX_TOOL_ITERATIONS — returning safe fallback"
           : "Claude API call failed — returning safe fallback",
     );
+    // Log the failed call (intent unknown, 0 tokens — no API call completed,
+    // or it threw mid-loop). toolIterations defaults to 1 to satisfy the
+    // schema floor; a 0-token log still records that a call was attempted.
+    logUsage({
+      intent: undefined,
+      inputTokens: 0,
+      outputTokens: 0,
+      toolIterations: 1,
+    });
     // Escalate on any failure — silent drops lose sales.
     // tool_loop_exhausted and api_timeout both need owner awareness.
     return SAFE_FALLBACK(customerGender, true);
@@ -791,6 +855,13 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude response was truncated at token limit — increase MAX_TOKENS or reduce prompt size",
     );
+    // The API call(s) completed — log the real token usage even though we fall back.
+    logUsage({
+      intent: undefined,
+      inputTokens: agenticResult.inputTokens,
+      outputTokens: agenticResult.outputTokens,
+      toolIterations: agenticResult.toolIterations,
+    });
     // max_tokens: the cart or response was truncated — owner should know.
     return SAFE_FALLBACK(customerGender, true);
   }
@@ -807,6 +878,12 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Tool loop exhausted with images — discarding images, returning safe fallback",
     );
+    logUsage({
+      intent: undefined,
+      inputTokens: agenticResult.inputTokens,
+      outputTokens: agenticResult.outputTokens,
+      toolIterations: agenticResult.toolIterations,
+    });
     return SAFE_FALLBACK(customerGender, true);
   }
 
@@ -881,6 +958,12 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude returned non-JSON (after sanitization) — returning safe fallback",
     );
+    logUsage({
+      intent: undefined,
+      inputTokens: agenticResult.inputTokens,
+      outputTokens: agenticResult.outputTokens,
+      toolIterations: agenticResult.toolIterations,
+    });
     // Non-JSON response: Claude broke the contract — owner should know.
     return SAFE_FALLBACK(customerGender, true);
   }
@@ -895,6 +978,12 @@ INFORMACIÓN DEL NEGOCIO:
       },
       "Claude output failed schema validation — returning safe fallback",
     );
+    logUsage({
+      intent: undefined,
+      inputTokens: agenticResult.inputTokens,
+      outputTokens: agenticResult.outputTokens,
+      toolIterations: agenticResult.toolIterations,
+    });
     // Schema validation failed — Claude output was malformed.
     return SAFE_FALLBACK(customerGender, true);
   }
@@ -928,6 +1017,14 @@ INFORMACIÓN DEL NEGOCIO:
       "[Luis] Hallucinated confirmation promise detected — review system prompt adherence",
     );
   }
+
+  // Success — log the real token usage attributed to the resolved intent.
+  logUsage({
+    intent: validated.data.intent,
+    inputTokens: agenticResult.inputTokens,
+    outputTokens: agenticResult.outputTokens,
+    toolIterations: agenticResult.toolIterations,
+  });
 
   return {
     ...validated.data,
