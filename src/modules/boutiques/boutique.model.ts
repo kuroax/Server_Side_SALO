@@ -45,6 +45,11 @@ const agentConfigSchema = new Schema(
     // Optional brand-specific product knowledge injected into the prompt, e.g.
     // "En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4".
     brandKnowledge: { type: String, trim: true, default: undefined },
+    // Optional per-boutique sales rules, phrases, emojis, upsell logic and size
+    // guidance. Resolves the placeholders the base prompt references under
+    // "INSTRUCCIONES DE VENTAS Y ESTILO". ShopaloGDL-specific content that used
+    // to be hardcoded in base.prompt.ts now lives here per tenant.
+    salesInstructions: { type: String, trim: true, default: undefined },
     // Optional additional tone/persona instructions specific to this boutique.
     personalityNotes: { type: String, trim: true, default: undefined },
   },

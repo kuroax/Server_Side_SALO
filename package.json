@@ -20,6 +20,7 @@
     "eval": "npx tsx src/evals/run.ts",
     "migrate:encrypt-tokens": "npx tsx src/scripts/migrate-encrypt-tokens.ts",
     "migrate:add-agent-config": "npx tsx src/scripts/migrate-add-agent-config.ts",
+    "migrate:sales-instructions": "npx tsx src/scripts/migrate-sales-instructions.ts",
     "migrate:boutique-slugs": "npx tsx src/scripts/migrate-boutique-slugs.ts",
     "create-boutique": "npx tsx src/scripts/create-boutique.ts"
   },
