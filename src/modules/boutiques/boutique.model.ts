@@ -9,6 +9,7 @@ import {
   BOUTIQUE_STATUS,
   CONVERSATION_MODE,
 } from "#/modules/boutiques/boutique.types.js";
+import { encrypt, decrypt, isEncrypted } from "#/shared/crypto.js";
 
 // ─── Business info subdocument ────────────────────────────────────────────────
 
@@ -128,6 +129,68 @@ const boutiqueSchema = new Schema(
 // avoid the Mongoose "duplicate index" warning.
 
 boutiqueSchema.index({ status: 1 });
+
+// ─── accessToken at-rest encryption ─────────────────────────────────────────────
+//
+// accessToken is encrypted (AES-256-GCM) before it ever touches MongoDB and
+// decrypted transparently on read, so callers always see plaintext.
+//
+// Decryption lives at the MODEL layer (post find/findOne) rather than in
+// boutique.service.ts because accessToken is read from TWO independent places:
+//   - boutique.service.ts (findBoutiqueByPhoneNumberIdWithToken)
+//   - ownerConfirm.service.ts (its own direct .select("+accessToken") query)
+// A model-level hook is the single point that gives BOTH plaintext with zero
+// caller changes. All hooks are idempotent via isEncrypted() so a deploy that
+// precedes the migration still works (legacy plaintext is read/written as-is).
+
+// Mutates a read result in place: decrypts accessToken when present + encrypted.
+// Legacy plaintext (pre-migration) is left untouched so reads never break.
+function decryptAccessTokenInPlace(doc: unknown): void {
+  if (!doc || typeof doc !== "object") return;
+  const record = doc as { accessToken?: unknown };
+  if (typeof record.accessToken === "string" && isEncrypted(record.accessToken)) {
+    record.accessToken = decrypt(record.accessToken);
+  }
+}
+
+// Encrypt on document save() — covers createBoutique and any model.create().
+boutiqueSchema.pre("save", function () {
+  if (
+    this.isModified("accessToken") &&
+    typeof this.accessToken === "string" &&
+    this.accessToken &&
+    !isEncrypted(this.accessToken)
+  ) {
+    this.accessToken = encrypt(this.accessToken);
+  }
+});
+
+// Encrypt on $set updates — covers updateBoutiqueCredentials (findByIdAndUpdate)
+// and any updateOne. Only touches $set.accessToken; all other fields untouched.
+boutiqueSchema.pre(["findOneAndUpdate", "updateOne"], function () {
+  const update = this.getUpdate() as {
+    $set?: { accessToken?: unknown };
+  } | null;
+  const set = update?.$set;
+  if (
+    set &&
+    typeof set.accessToken === "string" &&
+    set.accessToken &&
+    !isEncrypted(set.accessToken)
+  ) {
+    set.accessToken = encrypt(set.accessToken);
+  }
+});
+
+// Decrypt on read — fires for find, findOne, findById (findById → findOne).
+// Query middleware runs regardless of .lean(), so lean reads are covered.
+boutiqueSchema.post("findOne", function (doc) {
+  decryptAccessTokenInPlace(doc);
+});
+
+boutiqueSchema.post("find", function (docs) {
+  if (Array.isArray(docs)) docs.forEach(decryptAccessTokenInPlace);
+});
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

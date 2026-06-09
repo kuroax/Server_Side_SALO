@@ -66,7 +66,10 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_READ_ROLES);
-      return getCustomerOrders({ customerId: args.customerId });
+      return getCustomerOrders(
+        { customerId: args.customerId },
+        context.user?.boutiqueId,
+      );
     },
 
     async revenueStats(

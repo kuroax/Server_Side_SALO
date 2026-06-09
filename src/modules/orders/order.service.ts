@@ -341,12 +341,20 @@ export async function listOrders(input: unknown): Promise<SafeOrder[]> {
   return orders.map(mapOrder);
 }
 
-export async function getCustomerOrders(input: unknown): Promise<SafeOrder[]> {
+export async function getCustomerOrders(
+  input: unknown,
+  boutiqueId?: string,
+): Promise<SafeOrder[]> {
   const { customerId } = getCustomerOrdersSchema.parse(input);
 
-  const orders = await OrderModel.find({
+  // Multi-tenant guard: when boutiqueId is supplied, scope the lookup so a
+  // customerId from another tenant cannot resolve cross-boutique orders.
+  const query: Record<string, unknown> = {
     customerId: new Types.ObjectId(customerId),
-  })
+  };
+  if (boutiqueId) query.boutiqueId = new Types.ObjectId(boutiqueId);
+
+  const orders = await OrderModel.find(query)
     .sort({ createdAt: -1 })
     .lean<OrderLike[]>();
 

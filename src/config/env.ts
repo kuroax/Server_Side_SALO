@@ -39,6 +39,14 @@ const envSchema = z
     JWT_REFRESH_EXPIRES_IN: durationSchema.default("7d"),
 
     // Security
+    // AES-256 key used to encrypt boutique.accessToken at rest in MongoDB.
+    // 32-byte key expressed as 64 hex characters.
+    // Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    // Set in Railway and in local .env — never commit to source control.
+    BOUTIQUE_TOKEN_ENCRYPTION_KEY: z.string().trim().min(64, {
+      message:
+        "BOUTIQUE_TOKEN_ENCRYPTION_KEY must be at least 64 hex characters (32-byte AES-256 key)",
+    }),
     BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900000),
     RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(100),
@@ -177,6 +185,7 @@ export const {
   JWT_EXPIRES_IN,
   JWT_REFRESH_SECRET,
   JWT_REFRESH_EXPIRES_IN,
+  BOUTIQUE_TOKEN_ENCRYPTION_KEY,
   BCRYPT_SALT_ROUNDS,
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,

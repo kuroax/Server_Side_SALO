@@ -108,6 +108,10 @@ export const getOrderByOrderNumberSchema = z.object({
 
 export const getCustomerOrdersSchema = z.object({
   customerId: objectIdSchema,
+  // Multi-tenant scope. Optional for backward compat, but resolvers should pass
+  // it from context.user.boutiqueId so a customerId from another tenant cannot
+  // resolve cross-boutique orders.
+  boutiqueId: objectIdSchema.optional(),
 });
 
 export const orderFilterSchema = z

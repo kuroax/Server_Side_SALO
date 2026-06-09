@@ -21,6 +21,10 @@ process.env.ANTHROPIC_API_KEY = 'test_anthropic_key'
 process.env.WEBHOOK_SECRET = 'test_webhook_secret_32chars_min!!'
 process.env.BUFFER_WEBHOOK_SECRET = 'test_buffer_secret_32chars_min!!'
 process.env.WHATSAPP_ACCESS_TOKEN = 'test_whatsapp_token'
+// 32-byte AES-256 key as 64 hex chars — fixed test value so encrypt/decrypt of
+// boutique.accessToken round-trips deterministically against the in-memory DB.
+process.env.BOUTIQUE_TOKEN_ENCRYPTION_KEY =
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 process.env.CORS_ORIGIN = '*'
 // Match production timing so buffer claim semantics are exercised realistically.
 process.env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS = '55000'

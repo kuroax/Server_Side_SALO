@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run src/__tests__/integration",
-    "eval": "npx tsx src/evals/run.ts"
+    "eval": "npx tsx src/evals/run.ts",
+    "migrate:encrypt-tokens": "npx tsx src/scripts/migrate-encrypt-tokens.ts"
   },
   "imports": {
     "#/*": "./src/*"
