@@ -788,6 +788,14 @@ ${incomingMessageForClaude}`;
       : undefined;
 
   const rawResult = await processMessage({
+    // Per-tenant agent identity. Mongoose infers string | null | undefined for
+    // the optional fields; coerce null → undefined for the ClaudeContext contract.
+    agentConfig: {
+      agentName: boutique.agentConfig.agentName,
+      categoryDescription: boutique.agentConfig.categoryDescription,
+      brandKnowledge: boutique.agentConfig.brandKnowledge ?? undefined,
+      personalityNotes: boutique.agentConfig.personalityNotes ?? undefined,
+    },
     customerName,
     customerGender,
     customerLifetimeValue,

@@ -27,6 +27,29 @@ const businessInfoSchema = new Schema(
   { _id: false },
 );
 
+// ─── Agent config subdocument ─────────────────────────────────────────────────
+// Per-tenant identity for the WhatsApp AI agent. Lets a new boutique change the
+// agent's name, business category, brand knowledge and persona WITHOUT any code
+// change — these values are injected into the platform prompt at runtime by
+// claude.service.ts via buildAgentSection(). The boutique-agnostic prompt rules
+// (JSON contract, intents, payment flow, etc.) live in prompt/base.prompt.ts.
+
+const agentConfigSchema = new Schema(
+  {
+    // Agent display name used in the system prompt, e.g. "Luis".
+    agentName: { type: String, required: true, trim: true },
+    // One phrase describing the business type, e.g.
+    // "tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga…".
+    categoryDescription: { type: String, required: true, trim: true },
+    // Optional brand-specific product knowledge injected into the prompt, e.g.
+    // "En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4".
+    brandKnowledge: { type: String, trim: true, default: undefined },
+    // Optional additional tone/persona instructions specific to this boutique.
+    personalityNotes: { type: String, trim: true, default: undefined },
+  },
+  { _id: false },
+);
+
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 const boutiqueSchema = new Schema(
@@ -90,6 +113,13 @@ const boutiqueSchema = new Schema(
     // webhook.service.ts. Each tenant owns its own copy.
     businessInfo: {
       type: businessInfoSchema,
+      required: true,
+    },
+
+    // Per-tenant agent identity — injected into the platform prompt at runtime.
+    // Required: every active boutique must define its agent's name + category.
+    agentConfig: {
+      type: agentConfigSchema,
       required: true,
     },
 

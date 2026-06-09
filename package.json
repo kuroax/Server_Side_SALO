@@ -18,7 +18,8 @@
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run src/__tests__/integration",
     "eval": "npx tsx src/evals/run.ts",
-    "migrate:encrypt-tokens": "npx tsx src/scripts/migrate-encrypt-tokens.ts"
+    "migrate:encrypt-tokens": "npx tsx src/scripts/migrate-encrypt-tokens.ts",
+    "migrate:add-agent-config": "npx tsx src/scripts/migrate-add-agent-config.ts"
   },
   "imports": {
     "#/*": "./src/*"

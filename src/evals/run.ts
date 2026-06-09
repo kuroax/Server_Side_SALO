@@ -5,7 +5,17 @@ import { processMessage } from "#/integrations/whatsapp/claude.service.js";
 import { scenarios } from "./scenarios.js";
 import type { EvalScenarioResult, EvalTurnResult } from "./types.js";
 
-// Minimal mock context — eval uses real Claude but fake boutique/customer data
+// Minimal mock context — eval uses real Claude but fake boutique/customer data.
+// agentConfig reproduces ShopaloGDL's original hardcoded identity so eval
+// scenarios exercise the same prompt Luis ran before the refactor.
+const MOCK_AGENT_CONFIG = {
+  agentName: "Luis",
+  categoryDescription:
+    "tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga, Lululemon, Wiskii, 437, Better Me y Skims",
+  brandKnowledge:
+    "En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4",
+};
+
 const MOCK_BUSINESS_INFO = {
   showroomAddress: "Guadalajara, Jalisco",
   businessHours: "Lunes a Sábado 10am - 7pm",
@@ -44,6 +54,7 @@ async function runScenario(scenario: typeof scenarios[0]): Promise<EvalScenarioR
     let result;
     try {
       result = await processMessage({
+        agentConfig: MOCK_AGENT_CONFIG,
         customerName: "Gisell Parra",
         customerGender: "female",
         recentOrder: null,

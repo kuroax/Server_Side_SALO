@@ -55,6 +55,15 @@ const FIRST_BOUTIQUE = {
     paymentDays: 20,
     deliveryInfo: "3 a 7 días hábiles una vez confirmado el pago",
   },
+  // Per-tenant agent identity — mirrors the original hardcoded SYSTEM_PROMPT
+  // opening for Luis. New tenants set their own values; no code change needed.
+  agentConfig: {
+    agentName: "Luis",
+    categoryDescription:
+      "tienda de ropa deportiva y lifestyle de marcas premium como Alo Yoga, Lululemon, Wiskii, 437, Better Me y Skims",
+    brandKnowledge:
+      "En Lululemon: talla M = talla 8, talla S = talla 6, talla XS = talla 4",
+  },
 } as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -159,6 +168,7 @@ async function run() {
         accessToken: WHATSAPP_ACCESS_TOKEN,
         bankAccountImageUrl: BANK_ACCOUNT_IMAGE_URL,
         businessInfo: FIRST_BOUTIQUE.businessInfo,
+        agentConfig: FIRST_BOUTIQUE.agentConfig,
         // connectedAt intentionally omitted — Axel was onboarded manually
         // before Embedded Signup existed.
       },

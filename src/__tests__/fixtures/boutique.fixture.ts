@@ -28,5 +28,10 @@ export async function createTestBoutique(): Promise<void> {
       paymentDays: 3,
       deliveryInfo: '3 a 7 dias habiles una vez confirmado el pago',
     },
+    agentConfig: {
+      agentName: 'Luis',
+      categoryDescription:
+        'tienda de ropa deportiva y lifestyle de marcas premium',
+    },
   })
 }
