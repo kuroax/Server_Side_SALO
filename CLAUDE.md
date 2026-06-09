@@ -616,9 +616,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Conversation control system (ai/human/paused gate)                                                                  | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversationState` gate + new-prospect/receipt alerts live; owner auto-takeover detection pending    |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
-| `order.service.ts` fetchProductSnapshots queries products without `boutiqueId` (by `_id`) | Cross-tenant if a wrong `_id` is passed | Add `boutiqueId` filter (webhook bot queries now scoped) |
-| `findFirstActiveBoutique()` is now a dead import/export (webhook no longer calls it) | Unused shim lingers | Delete the function + import |
-| n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Every message uses the single-tenant fallback shim — WARN logged on every request                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
+| `order.service.ts` fetchProductSnapshots queries products without `boutiqueId` (by `_id`) | Cross-tenant if a wrong `_id` is passed | Optional `boutiqueId` param added + passed by createOrder/resolvers; still by `_id` if omitted — make it required || n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Messages without `phoneNumberId` are dropped (early-return, no reply, WARN logged) — fallback shim removed                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
 | Owner-reply detection not wired (coexistence handoff) | Owner + bot can reply at once; no auto-flip to `human` | Blocked — needs n8n to forward status/echo events with `recipient_id` |
 | `human_takeover_needed` / `prospect_stage_changed` alerts defined but never sent | Owner gets no handoff or stage-change notification | Wire call sites on escalate/pause and stage change |
 | `alert.service.ts` calls WhatsApp Graph API directly | Breaks "all Meta creds in n8n" invariant; token used in backend | Accepted for owner alerts; revisit if alerts move to n8n |
@@ -680,10 +678,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never put per-boutique config (showroomAddress, shippingPrice, etc.) back in
   env vars — it belongs in `boutique.businessInfo` in MongoDB
 - Never add `unique: true` directly on the `phone` or `instagramHandle` fields
-  in customer.model.ts — uniqueness is scoped per boutique via compound indexes
-- Never call `findFirstActiveBoutique()` in new code — it is a temporary shim
-  that will be removed before tenant #2 is onboarded
-- Never remove `stripMarkdownFences()` from claude.service.ts
+  in customer.model.ts — uniqueness is scoped per boutique via compound indexes- Never remove `stripMarkdownFences()` from claude.service.ts
 - Never remove the `JSON_REMINDER` injection from claude.service.ts
 - Never register a second Mongoose model named `"Conversation"` — the gate model is `ConversationState`
 - Never blanket short-circuit image messages — preserve visual search and gallery-reply flows

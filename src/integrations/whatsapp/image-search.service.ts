@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ProductModel } from "#/modules/products/product.model.js";
-import { ANTHROPIC_API_KEY, WHATSAPP_ACCESS_TOKEN } from "#/config/env.js";
+import { ANTHROPIC_API_KEY } from "#/config/env.js";
 import { logger } from "#/config/logger.js";
 
 // ─── Client ───────────────────────────────────────────────────────────────────
@@ -28,9 +28,10 @@ export type ImageSearchResult = {
 
 async function downloadMetaImage(
   mediaId: string,
+  accessToken: string,
 ): Promise<{ base64: string; mediaType: string }> {
   const metaRes = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
-    headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` },
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!metaRes.ok) {
@@ -40,7 +41,7 @@ async function downloadMetaImage(
   const { url } = (await metaRes.json()) as { url: string };
 
   const imgRes = await fetch(url, {
-    headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` },
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!imgRes.ok) {
@@ -137,11 +138,12 @@ async function findMatchingProducts(attrs: ClothingAttributes) {
 
 export async function searchProductsByImage(
   mediaId: string,
+  accessToken: string,
 ): Promise<ImageSearchResult> {
   try {
     logger.info({ mediaId }, "Starting image-based product search");
 
-    const { base64, mediaType } = await downloadMetaImage(mediaId);
+    const { base64, mediaType } = await downloadMetaImage(mediaId, accessToken);
     const attrs = await analyzeClothingImage(base64, mediaType);
 
     logger.info({ attrs }, "Clothing attributes extracted from image");

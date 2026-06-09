@@ -71,8 +71,10 @@ const envSchema = z
       .trim()
       .min(16, "WEBHOOK_SECRET must be at least 16 characters"),
 
-    // Meta permanent access token — used to download customer-sent images from
-    // WhatsApp media servers for visual inventory search.
+    // Meta permanent access token — fallback credential for tenant #1 only.
+    // image-search.service.ts no longer reads this; it now uses the per-boutique
+    // boutique.accessToken passed in from webhook.service.ts. Still consumed by
+    // scripts/seed-boutique.ts to seed the first boutique's accessToken.
     WHATSAPP_ACCESS_TOKEN: requiredTrimmedString("WHATSAPP_ACCESS_TOKEN"),
 
     // Shared secret used by n8n buffer endpoints (push + claim).

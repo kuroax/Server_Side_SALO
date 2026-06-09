@@ -159,10 +159,10 @@ export const handleIncomingMessage = async (
 
   // ── 0b. Resolve tenant (boutique) ─────────────────────────────────────────
   // Look up the boutique by the Meta phone_number_id from the payload.
-  // During the multi-tenant rollout n8n may not yet be sending phoneNumberId
-  // in the webhook body — when missing, fall back to the only active
-  // boutique so single-tenant traffic keeps flowing. Remove the fallback
-  // once every n8n workflow has been migrated and a second boutique is live.
+  // phoneNumberId is required to identify the tenant: when it is missing
+  // (e.g. an n8n workflow not yet sending it) the message is dropped — we log
+  // a warning and return emptyResult() (no reply). The single-tenant fallback
+  // to "the only active boutique" has been removed.
   const phoneNumberId = payload.phoneNumberId;
   if (!phoneNumberId) {
     logger.warn(
@@ -556,6 +556,7 @@ export const handleIncomingMessage = async (
       try {
         const rawSearchResult = await searchProductsByImage(
           payload.imageMediaId as string,
+          boutique.accessToken,
         );
         const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
         if (!searchResult.success) {
