@@ -1,3 +1,4 @@
+import { Types } from 'mongoose';
 import { CustomerModel } from '#/modules/customers/customer.model.js';
 import {
   createCustomerSchema,
@@ -90,8 +91,13 @@ const normalizeCustomerData = (data: CreateCustomerData): CreateCustomerData => 
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const findCustomerByIdOrThrow = async (id: string) => {
-  const doc = await CustomerModel.findById(id);
+// Tenant-scoped finder — never findById alone. A customer belonging to another
+// boutique returns NotFound (existence is not leaked across tenants).
+const findCustomerByIdOrThrow = async (id: string, boutiqueId: string) => {
+  const doc = await CustomerModel.findOne({
+    _id: id,
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
   if (!doc) throw new NotFoundError('Customer not found');
   return doc;
 };
@@ -124,13 +130,17 @@ const mapDuplicateCustomerError = (error: unknown): never => {
 // normalizeCustomerData runs first here for consistency — the hook is a
 // safety net, not the primary normalization path.
 
-export const createCustomer = async (input: unknown): Promise<CustomerResponse> => {
+export const createCustomer = async (
+  input: unknown,
+  boutiqueId: string,
+): Promise<CustomerResponse> => {
   const parsed: CreateCustomerData = createCustomerSchema.parse(input);
   const data = normalizeCustomerData(parsed);
 
   try {
     const doc = await CustomerModel.create({
       ...data,
+      boutiqueId: new Types.ObjectId(boutiqueId),
       tags:     (data.tags ?? []) as CustomerTag[],
       gender:   data.gender ?? CUSTOMER_GENDERS.UNKNOWN,
       isActive: true,
@@ -155,9 +165,12 @@ export const createCustomer = async (input: unknown): Promise<CustomerResponse> 
 
 // ─── Get by ID ────────────────────────────────────────────────────────────────
 
-export const getCustomerById = async (input: unknown): Promise<CustomerResponse> => {
+export const getCustomerById = async (
+  input: unknown,
+  boutiqueId: string,
+): Promise<CustomerResponse> => {
   const { id } = customerIdSchema.parse(input);
-  const doc = await findCustomerByIdOrThrow(id);
+  const doc = await findCustomerByIdOrThrow(id, boutiqueId);
   return toCustomerResponse(doc.toObject() as CustomerLike);
 };
 
@@ -167,19 +180,26 @@ export const getCustomerById = async (input: unknown): Promise<CustomerResponse>
 
 export const getCustomerByPhone = async (
   input: unknown,
+  boutiqueId: string,
 ): Promise<CustomerResponse | null> => {
   const { phone } = getCustomerByPhoneSchema.parse(input);
 
   const normalizedPhone = normalizePhoneForLookup(phone);
   if (!normalizedPhone) return null;
 
-  const doc = await CustomerModel.findOne({ phone: normalizedPhone }).lean<CustomerLike | null>();
+  const doc = await CustomerModel.findOne({
+    phone: normalizedPhone,
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  }).lean<CustomerLike | null>();
   return doc ? toCustomerResponse(doc) : null;
 };
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 
-export const listCustomers = async (input: unknown): Promise<{
+export const listCustomers = async (
+  boutiqueId: string,
+  input: unknown,
+): Promise<{
   customers:  CustomerResponse[];
   total:      number;
   page:       number;
@@ -195,7 +215,11 @@ export const listCustomers = async (input: unknown): Promise<{
     search,
   }: ListCustomersData = listCustomersSchema.parse(input);
 
-  const filter: Record<string, unknown> = {};
+  // Tenant scope FIRST — every read (find + countDocuments share this filter)
+  // is constrained to the caller's boutique before any other criteria apply.
+  const filter: Record<string, unknown> = {
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  };
 
   if (contactChannel) filter.contactChannel = contactChannel;
   if (typeof isActive === 'boolean') filter.isActive = isActive;
@@ -243,6 +267,7 @@ export const listCustomers = async (input: unknown): Promise<{
 export const updateCustomer = async (
   id: string,
   input: unknown,
+  boutiqueId: string,
 ): Promise<CustomerResponse> => {
   customerIdSchema.parse({ id });
 
@@ -252,7 +277,7 @@ export const updateCustomer = async (
     throw new BadRequestError('No fields provided for update');
   }
 
-  const existing = await findCustomerByIdOrThrow(id);
+  const existing = await findCustomerByIdOrThrow(id, boutiqueId);
 
   const merged = normalizeCustomerData({
   name:            patch.name                          ?? existing.name,
@@ -268,8 +293,9 @@ export const updateCustomer = async (
   const validatedCustomer = createCustomerSchema.parse(merged);
 
   try {
-    const doc = await CustomerModel.findByIdAndUpdate(
-      id,
+    const doc = await CustomerModel.findOneAndUpdate(
+      // Tenant-scoped filter — a guessed _id from another boutique never matches.
+      { _id: id, boutiqueId: new Types.ObjectId(boutiqueId) },
       {
         $set: {
           name:            validatedCustomer.name,
@@ -301,11 +327,14 @@ export const updateCustomer = async (
 
 // ─── Deactivate / Activate ────────────────────────────────────────────────────
 
-export const deactivateCustomer = async (input: unknown): Promise<CustomerResponse> => {
+export const deactivateCustomer = async (
+  input: unknown,
+  boutiqueId: string,
+): Promise<CustomerResponse> => {
   const { id } = customerIdSchema.parse(input);
 
-  const doc = await CustomerModel.findByIdAndUpdate(
-    id,
+  const doc = await CustomerModel.findOneAndUpdate(
+    { _id: id, boutiqueId: new Types.ObjectId(boutiqueId) },
     { $set: { isActive: false } },
     { new: true },
   ).lean<CustomerLike | null>();
@@ -317,11 +346,14 @@ export const deactivateCustomer = async (input: unknown): Promise<CustomerRespon
   return toCustomerResponse(doc);
 };
 
-export const activateCustomer = async (input: unknown): Promise<CustomerResponse> => {
+export const activateCustomer = async (
+  input: unknown,
+  boutiqueId: string,
+): Promise<CustomerResponse> => {
   const { id } = customerIdSchema.parse(input);
 
-  const doc = await CustomerModel.findByIdAndUpdate(
-    id,
+  const doc = await CustomerModel.findOneAndUpdate(
+    { _id: id, boutiqueId: new Types.ObjectId(boutiqueId) },
     { $set: { isActive: true } },
     { new: true },
   ).lean<CustomerLike | null>();

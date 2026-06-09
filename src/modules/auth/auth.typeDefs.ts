@@ -20,6 +20,10 @@ export const authTypeDefs = `
     isActive: Boolean!
     createdAt: String!
     updatedAt: String!
+    # Tenant display info — only populated by the me query (loaded from the
+    # boutique document). Null on User objects returned by login/register.
+    boutiqueName: String
+    boutiqueSlug: String
   }
 
   type AuthPayload {

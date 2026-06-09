@@ -27,7 +27,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_READERS);
-      return getCustomerById({ id: args.id });
+      return getCustomerById({ id: args.id }, context.user!.boutiqueId);
     },
 
     // Returns null if not found — bot-friendly, no error thrown
@@ -37,7 +37,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_READERS);
-      return getCustomerByPhone({ phone: args.phone });
+      return getCustomerByPhone({ phone: args.phone }, context.user!.boutiqueId);
     },
 
     customers: (
@@ -46,7 +46,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_READERS);
-      return listCustomers(args.input ?? {});
+      return listCustomers(context.user!.boutiqueId, args.input ?? {});
     },
   },
 
@@ -57,7 +57,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_WRITERS);
-      return createCustomer(args.input);
+      return createCustomer(args.input, context.user!.boutiqueId);
     },
 
     updateCustomer: (
@@ -66,7 +66,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_WRITERS);
-      return updateCustomer(args.id, args.input);
+      return updateCustomer(args.id, args.input, context.user!.boutiqueId);
     },
 
     // Soft deactivation — owner and admin only
@@ -76,7 +76,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_MANAGERS);
-      return deactivateCustomer({ id: args.id });
+      return deactivateCustomer({ id: args.id }, context.user!.boutiqueId);
     },
 
     activateCustomer: (
@@ -85,7 +85,7 @@ export const customerResolvers = {
       context: GraphQLContext,
     ) => {
       requireRoles(context, CUSTOMER_MANAGERS);
-      return activateCustomer({ id: args.id });
+      return activateCustomer({ id: args.id }, context.user!.boutiqueId);
     },
   },
 };

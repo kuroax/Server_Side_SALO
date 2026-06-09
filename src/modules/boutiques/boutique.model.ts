@@ -8,6 +8,7 @@ import {
 import {
   BOUTIQUE_STATUS,
   CONVERSATION_MODE,
+  BOUTIQUE_ONBOARDING_STATUS,
 } from "#/modules/boutiques/boutique.types.js";
 import { encrypt, decrypt, isEncrypted } from "#/shared/crypto.js";
 
@@ -61,29 +62,48 @@ const boutiqueSchema = new Schema(
       maxlength: [120, "Boutique name must be at most 120 characters"],
     },
 
-    // Meta WhatsApp Cloud API phone number ID — globally unique across the
-    // platform: one phone number can only be owned by one boutique.
-    phoneNumberId: {
+    // Human-readable URL-safe identifier (e.g. "shopalogdl"). Optional —
+    // existing boutiques predate this field and are backfilled by
+    // scripts/migrate-boutique-slugs.ts. The sparse-unique index is declared
+    // explicitly below (boutiqueSchema.index) — do NOT add an index shortcut
+    // (sparse/unique/index) here or Mongoose builds the index twice.
+    slug: {
       type: String,
-      required: [true, "phoneNumberId is required"],
-      unique: true,
       trim: true,
+      lowercase: true,
     },
 
-    // WhatsApp Business Account ID.
+    // Meta WhatsApp Cloud API phone number ID — globally unique across the
+    // platform: one phone number can only be owned by one boutique.
+    //
+    // Optional + sparse: a boutique can be created (scripts/create-boutique.ts)
+    // BEFORE its WhatsApp account is connected. The field is left unset until
+    // Embedded Signup fills it in. Sparse-unique keeps the one-number-per-tenant
+    // guarantee for connected boutiques while allowing many unconnected ones
+    // (which simply omit the field) to coexist without colliding.
+    phoneNumberId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      default: undefined,
+    },
+
+    // WhatsApp Business Account ID. Optional until Embedded Signup completes.
     wabaId: {
       type: String,
-      required: [true, "wabaId is required"],
       trim: true,
+      default: undefined,
     },
 
     // Permanent access token used by n8n to send messages on the boutique's
     // behalf. Never expose in GraphQL responses — boutique.resolvers.ts must
-    // strip this field before returning.
+    // strip this field before returning. Optional until Embedded Signup
+    // completes; encrypted at rest by the hooks below when present.
     accessToken: {
       type: String,
-      required: [true, "accessToken is required"],
       select: false,
+      default: undefined,
     },
 
     // Optional Meta Business Portfolio ID — captured during Embedded Signup
@@ -138,6 +158,15 @@ const boutiqueSchema = new Schema(
       default: BOUTIQUE_STATUS.ACTIVE,
     },
 
+    // Onboarding funnel stage — see BOUTIQUE_ONBOARDING_STATUS. Defaults to
+    // CREATED for boutiques minted by scripts/create-boutique.ts, advanced as
+    // the tenant connects WhatsApp and goes live.
+    onboardingStatus: {
+      type: String,
+      enum: Object.values(BOUTIQUE_ONBOARDING_STATUS),
+      default: BOUTIQUE_ONBOARDING_STATUS.CREATED,
+    },
+
     // Set when the boutique completed Embedded Signup. Null/undefined for
     // the first boutique (Axel Monterrubio) which was onboarded manually.
     connectedAt: {
@@ -159,6 +188,10 @@ const boutiqueSchema = new Schema(
 // avoid the Mongoose "duplicate index" warning.
 
 boutiqueSchema.index({ status: 1 });
+
+// Sparse-unique slug — lets boutiques without a slug coexist (sparse skips
+// null/missing) while guaranteeing no two boutiques share the same slug.
+boutiqueSchema.index({ slug: 1 }, { unique: true, sparse: true });
 
 // ─── accessToken at-rest encryption ─────────────────────────────────────────────
 //

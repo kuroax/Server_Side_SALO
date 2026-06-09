@@ -98,6 +98,17 @@ export const handleOwnerConfirm = async (
     return { status: "error", reason: "Boutique not found" };
   }
 
+  // Confirming a payment sends a WhatsApp message to the customer, which needs
+  // the boutique's Meta credentials. A boutique whose WhatsApp is not yet
+  // connected (no phoneNumberId/accessToken) cannot run this flow.
+  if (!boutique.accessToken || !boutique.phoneNumberId) {
+    logger.warn(
+      { boutiqueId },
+      "ownerConfirm — boutique has no WhatsApp credentials (not connected)",
+    );
+    return { status: "error", reason: "Boutique WhatsApp not connected" };
+  }
+
   const accessToken = boutique.accessToken;
   const phoneNumberId = boutique.phoneNumberId;
   const boutiqueObjectId = new mongoose.Types.ObjectId(boutiqueId);

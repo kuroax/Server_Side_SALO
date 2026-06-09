@@ -11,6 +11,7 @@ import {
 import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
 import { UserModel } from '#/modules/auth/auth.model.js';
+import { findBoutiqueById } from '#/modules/boutiques/boutique.service.js';
 
 // ─── Resolvers ────────────────────────────────────────────────────────────────
 
@@ -18,7 +19,17 @@ export const authResolvers = {
   Query: {
     me: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
       if (!context.user) return null;
-      return getCurrentUser(context.user.id);
+      const user = await getCurrentUser(context.user.id);
+      if (!user) return null;
+      // Enrich with the tenant's display name + slug so the app can title the
+      // UI with the boutique name instead of a hardcoded "SALO". boutiqueId
+      // comes from the JWT context — never from the client.
+      const boutique = await findBoutiqueById(context.user.boutiqueId);
+      return {
+        ...user,
+        boutiqueName: boutique?.name ?? null,
+        boutiqueSlug: boutique?.slug ?? null,
+      };
     },
 
     listUsers: async (

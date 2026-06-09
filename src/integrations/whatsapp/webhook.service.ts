@@ -229,10 +229,10 @@ export const handleIncomingMessage = async (
     payload.contactName,
   );
 
-  if (isNewProspect && boutique.ownerPhone) {
+  if (isNewProspect && boutique.ownerPhone && boutique.accessToken) {
     await sendOwnerAlert({
       ownerPhone: boutique.ownerPhone,
-      phoneNumberId: boutique.phoneNumberId,
+      phoneNumberId, // validated non-null above; same value the boutique matched
       accessToken: boutique.accessToken,
       customerPhone: from,
       alertType: "new_prospect",
@@ -495,10 +495,10 @@ export const handleIncomingMessage = async (
       //    and confirm the order. Non-blocking — sendOwnerAlert never throws.
       //    The customer-facing acknowledgment (receiptAck) is already built
       //    above and returned below, so no separate customer reply is needed.
-      if (boutique.ownerPhone) {
+      if (boutique.ownerPhone && boutique.accessToken) {
         await sendOwnerAlert({
           ownerPhone: boutique.ownerPhone,
-          phoneNumberId: boutique.phoneNumberId,
+          phoneNumberId, // validated non-null above; same value the boutique matched
           accessToken: boutique.accessToken,
           customerPhone: from,
           alertType: "receipt_received",
@@ -556,7 +556,9 @@ export const handleIncomingMessage = async (
       try {
         const rawSearchResult = await searchProductsByImage(
           payload.imageMediaId as string,
-          boutique.accessToken,
+          // A boutique matched by an active phoneNumberId is WhatsApp-connected,
+          // so its accessToken is present (set alongside phoneNumberId at signup).
+          boutique.accessToken as string,
         );
         const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
         if (!searchResult.success) {
