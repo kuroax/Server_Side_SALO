@@ -20,11 +20,25 @@ export async function getUsageSummary(
   totalTokens: number;
   totalCalls: number;
   estimatedCostUSD: number;
-  byIntent: Array<{ intent: string; calls: number; tokens: number }>;
+  periodStart: string;
+  periodEnd: string;
+  byIntent: Array<{
+    intent: string;
+    calls: number;
+    tokens: number;
+    estimatedCostUSD: number;
+  }>;
+  dailyUsage: Array<{
+    date: string;
+    calls: number;
+    totalTokens: number;
+    estimatedCostUSD: number;
+  }>;
 }> {
   const boutiqueObjectId = new Types.ObjectId(boutiqueId);
 
-  const since = new Date();
+  const now = new Date();
+  const since = new Date(now);
   since.setMonth(since.getMonth() - months);
 
   const match = { boutiqueId: boutiqueObjectId, createdAt: { $gte: since } };
@@ -48,6 +62,8 @@ export async function getUsageSummary(
   const byIntentRaw = await UsageLogModel.aggregate<{
     _id: string;
     calls: number;
+    inputTokens: number;
+    outputTokens: number;
     tokens: number;
   }>([
     { $match: match },
@@ -56,10 +72,32 @@ export async function getUsageSummary(
         // Logs with no resolved intent (failed calls) bucket under "unknown".
         _id: { $ifNull: ["$intent", "unknown"] },
         calls: { $sum: 1 },
+        inputTokens: { $sum: "$inputTokens" },
+        outputTokens: { $sum: "$outputTokens" },
         tokens: { $sum: "$totalTokens" },
       },
     },
     { $sort: { tokens: -1 } },
+  ]);
+
+  const dailyRaw = await UsageLogModel.aggregate<{
+    _id: string;
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  }>([
+    { $match: match },
+    {
+      $group: {
+        _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+        calls: { $sum: 1 },
+        inputTokens: { $sum: "$inputTokens" },
+        outputTokens: { $sum: "$outputTokens" },
+        totalTokens: { $sum: "$totalTokens" },
+      },
+    },
+    { $sort: { _id: 1 } },
   ]);
 
   const totalInputTokens = totals?.totalInputTokens ?? 0;
@@ -69,15 +107,29 @@ export async function getUsageSummary(
 
   // Cost splits input vs output — the two prices differ 5×, so a single blended
   // rate would be inaccurate.
-  const estimatedCostUSD =
-    (totalInputTokens / 1_000_000) * PRICE_INPUT_USD_PER_MTOK +
-    (totalOutputTokens / 1_000_000) * PRICE_OUTPUT_USD_PER_MTOK;
+  const costUSD = (input: number, output: number): number =>
+    (input / 1_000_000) * PRICE_INPUT_USD_PER_MTOK +
+    (output / 1_000_000) * PRICE_OUTPUT_USD_PER_MTOK;
+
+  const estimatedCostUSD = costUSD(totalInputTokens, totalOutputTokens);
 
   const byIntent = byIntentRaw.map((row) => ({
     intent: row._id,
     calls: row.calls,
     tokens: row.tokens,
+    estimatedCostUSD: costUSD(row.inputTokens, row.outputTokens),
   }));
+
+  const dailyUsage = dailyRaw.map((row) => ({
+    date: row._id,
+    calls: row.calls,
+    totalTokens: row.totalTokens,
+    estimatedCostUSD: costUSD(row.inputTokens, row.outputTokens),
+  }));
+
+  // ISO date (YYYY-MM-DD) for the first day of the period and today.
+  const periodStart = since.toISOString().slice(0, 10);
+  const periodEnd = now.toISOString().slice(0, 10);
 
   return {
     totalInputTokens,
@@ -85,6 +137,9 @@ export async function getUsageSummary(
     totalTokens,
     totalCalls,
     estimatedCostUSD,
+    periodStart,
+    periodEnd,
     byIntent,
+    dailyUsage,
   };
 }
