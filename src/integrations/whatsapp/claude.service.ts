@@ -666,9 +666,19 @@ INSTRUCCIÓN CRÍTICA: El cliente ya vio este producto — NO llames search_prod
     };
   }
 
-  throw new Error(
+  // Attach the real token usage accumulated across the loop so processMessage's
+  // catch can log it instead of zeros — these tokens were genuinely consumed.
+  const exhaustionError = new Error(
     "runAgenticLoop: tool_loop_exhausted — exceeded MAX_TOOL_ITERATIONS without final text response",
-  );
+  ) as Error & {
+    inputTokens?: number;
+    outputTokens?: number;
+    toolIterations?: number;
+  };
+  exhaustionError.inputTokens = totalInputTokens;
+  exhaustionError.outputTokens = totalOutputTokens;
+  exhaustionError.toolIterations = iterationCount;
+  throw exhaustionError;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -730,10 +740,17 @@ export const processMessage = async (
     ? `\nPROMOCIÓN ACTIVA: ${businessInfo.activePromotion} — menciónala UNA VEZ proactivamente cuando el cliente esté viendo productos o vacilando en comprar.`
     : "";
 
+  // customerName comes from the WhatsApp profile name — attacker-controlled.
+  // Strip bracket/brace/angle characters used in prompt-injection attempts and
+  // cap the length before it is interpolated into the system prompt.
+  const safeCustomerName = customerName
+    ? customerName.replace(/[[\]{}<>]/g, "").slice(0, 60).trim() || null
+    : null;
+
   const contextSection = `
 ─── CONTEXTO ACTUAL ───────────────────────────────────────────────────────────
 
-CLIENTE: ${customerName ?? "Cliente nueva"}
+CLIENTE: ${safeCustomerName ?? "Cliente nueva"}
 ${buildGenderContext(customerGender)}${buildVipContext(customerLifetimeValue)}
 
 PRODUCTOS: Usa la herramienta search_products para buscar en el inventario bajo demanda.
@@ -832,14 +849,21 @@ INFORMACIÓN DEL NEGOCIO:
           ? "Claude agentic loop exhausted MAX_TOOL_ITERATIONS — returning safe fallback"
           : "Claude API call failed — returning safe fallback",
     );
-    // Log the failed call (intent unknown, 0 tokens — no API call completed,
-    // or it threw mid-loop). toolIterations defaults to 1 to satisfy the
-    // schema floor; a 0-token log still records that a call was attempted.
+    // Log the failed call. For tool_loop_exhausted the loop DID consume tokens
+    // before throwing — read the accumulators attached to the error so usage is
+    // not undercounted. Timeout / api_error paths carry no accumulators and fall
+    // back to 0 tokens / 1 iteration (schema floor).
+    const accInputTokens =
+      (err as { inputTokens?: number }).inputTokens ?? 0;
+    const accOutputTokens =
+      (err as { outputTokens?: number }).outputTokens ?? 0;
+    const accToolIterations =
+      (err as { toolIterations?: number }).toolIterations ?? 1;
     logUsage({
       intent: undefined,
-      inputTokens: 0,
-      outputTokens: 0,
-      toolIterations: 1,
+      inputTokens: accInputTokens,
+      outputTokens: accOutputTokens,
+      toolIterations: accToolIterations,
     });
     // Escalate on any failure — silent drops lose sales.
     // tool_loop_exhausted and api_timeout both need owner awareness.

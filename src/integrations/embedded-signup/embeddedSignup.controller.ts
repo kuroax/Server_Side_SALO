@@ -669,12 +669,33 @@ async function fetchMeta(
 ): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), META_API_TIMEOUT_MS);
+
+  // Endpoint path WITHOUT the query string. Meta Graph URLs carry secrets in the
+  // query (client_secret, app access token "APP_ID|APP_SECRET", per-boutique
+  // access_token), so no thrown error — and therefore no log — may ever include
+  // the full URL or its query params. Only this path is safe to surface.
+  let safePath = "(unparseable URL)";
   try {
-    const response = await fetch(url, {
-      method: init?.method ?? "GET",
-      headers: init?.headers,
-      signal: controller.signal,
-    });
+    safePath = new URL(url).pathname;
+  } catch {
+    // keep the fallback
+  }
+
+  try {
+    let response: globalThis.Response;
+    try {
+      response = await fetch(url, {
+        method: init?.method ?? "GET",
+        headers: init?.headers,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // Network / abort error — rethrow referencing only the safe path so the
+      // raw error (which could, defensively, reference the URL) never leaks.
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`Meta Graph API request to ${safePath} failed: ${reason}`);
+    }
+
     const bodyText = await response.text();
     let body: unknown = undefined;
     try {
@@ -683,8 +704,9 @@ async function fetchMeta(
       // Non-JSON body — keep undefined; caller will treat as failure if status non-2xx.
     }
     if (!response.ok) {
+      // Include status + path + Meta's response body — never the request URL.
       throw new Error(
-        `Meta Graph API returned ${response.status}: ${bodyText.slice(0, 500)}`,
+        `Meta Graph API ${safePath} returned ${response.status}: ${bodyText.slice(0, 500)}`,
       );
     }
     return body;

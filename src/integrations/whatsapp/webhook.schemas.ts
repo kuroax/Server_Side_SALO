@@ -143,13 +143,14 @@ export async function markMessageProcessed(
     ) {
       return false; // duplicate — already processed
     }
-    // On unexpected DB errors, allow processing to continue rather than
-    // silently dropping the message. Log and proceed.
+    // On unexpected DB errors, BLOCK processing rather than allow through. A
+    // blocked message is safer than a duplicate order/alert — n8n will retry the
+    // delivery, and the next attempt can record the dedup marker cleanly.
     logger.warn(
       { err, messageId, boutiqueId },
-      "[webhook] processedMessage insert failed — allowing through",
+      "[webhook] processedMessage insert failed — blocking to prevent duplicate",
     );
-    return true;
+    return false;
   }
 }
 

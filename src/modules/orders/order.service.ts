@@ -304,18 +304,32 @@ async function fetchProductSnapshots(
 
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
-export async function getOrderById(input: unknown): Promise<SafeOrder> {
+export async function getOrderById(
+  input: unknown,
+  boutiqueId: string,
+): Promise<SafeOrder> {
   const { orderId } = getOrderByIdSchema.parse(input);
-  const order = await OrderModel.findById(orderId).lean<OrderLike>();
+  // Tenant-scoped lookup — an orderId from another boutique returns NotFound
+  // (existence is not leaked across tenants).
+  const order = await OrderModel.findOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  }).lean<OrderLike>();
   if (!order) throw new NotFoundError("Order not found");
   return mapOrder(order);
 }
 
 export async function getOrderByOrderNumber(
   input: unknown,
+  boutiqueId: string,
 ): Promise<SafeOrder> {
   const { orderNumber } = getOrderByOrderNumberSchema.parse(input);
-  const order = await OrderModel.findOne({ orderNumber }).lean<OrderLike>();
+  // Tenant-scoped lookup — order numbers are sequential and enumerable, so the
+  // boutiqueId filter is what prevents cross-tenant reads.
+  const order = await OrderModel.findOne({
+    orderNumber,
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  }).lean<OrderLike>();
   if (!order) throw new NotFoundError("Order not found");
   return mapOrder(order);
 }
@@ -376,9 +390,16 @@ export async function createOrder(
       : null;
 
   if (data.customerId) {
-    const customerExists = await CustomerModel.exists({
+    // Tenant-scoped existence check — a customerId from another boutique must
+    // not be attachable to this boutique's order. boutiqueId comes from the JWT
+    // (resolver) / boutique lookup (webhook), never from raw client input.
+    const customerFilter: Record<string, unknown> = {
       _id: new Types.ObjectId(data.customerId),
-    });
+    };
+    if (data.boutiqueId) {
+      customerFilter.boutiqueId = new Types.ObjectId(data.boutiqueId);
+    }
+    const customerExists = await CustomerModel.exists(customerFilter);
     if (!customerExists) throw new NotFoundError("Customer not found");
   }
 
@@ -455,7 +476,10 @@ export async function createOrder(
   return mapOrder(order.toObject() as OrderLike);
 }
 
-export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
+export async function updateOrderStatus(
+  input: unknown,
+  boutiqueId: string,
+): Promise<SafeOrder> {
   const { orderId, status } = updateOrderStatusSchema.parse(input);
 
   // Cancellation must go through cancelOrder so inventory restoration and
@@ -467,7 +491,11 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
     );
   }
 
-  const order = await OrderModel.findById(orderId);
+  // Tenant-scoped lookup — an order from another boutique returns NotFound.
+  const order = await OrderModel.findOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
   if (!order) throw new NotFoundError("Order not found");
 
   assertValidTransition(order.status as OrderStatus, status);
@@ -490,6 +518,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
             productId: item.productId,
             size: item.size,
             color: item.color,
+            boutiqueId: order.boutiqueId,
           })
             .select("quantity")
             .session(session)
@@ -515,6 +544,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
               productId: item.productId,
               size: item.size,
               color: item.color,
+              boutiqueId: order.boutiqueId,
               quantity: { $gte: item.quantity },
             },
             { $inc: { quantity: -item.quantity } },
@@ -526,6 +556,7 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
               productId: item.productId,
               size: item.size,
               color: item.color,
+              boutiqueId: order.boutiqueId,
             })
               .select("quantity")
               .session(session)
@@ -560,10 +591,17 @@ export async function updateOrderStatus(input: unknown): Promise<SafeOrder> {
   return mapOrder(order.toObject() as OrderLike);
 }
 
-export async function updatePaymentStatus(input: unknown): Promise<SafeOrder> {
+export async function updatePaymentStatus(
+  input: unknown,
+  boutiqueId: string,
+): Promise<SafeOrder> {
   const { orderId, paymentStatus } = updatePaymentStatusSchema.parse(input);
 
-  const order = await OrderModel.findById(orderId);
+  // Tenant-scoped lookup — an order from another boutique returns NotFound.
+  const order = await OrderModel.findOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
   if (!order) throw new NotFoundError("Order not found");
 
   if (order.status === "cancelled") {
@@ -596,10 +634,17 @@ export async function updatePaymentStatus(input: unknown): Promise<SafeOrder> {
   return mapOrder(order.toObject() as OrderLike);
 }
 
-export async function cancelOrder(input: unknown): Promise<SafeOrder> {
+export async function cancelOrder(
+  input: unknown,
+  boutiqueId: string,
+): Promise<SafeOrder> {
   const { orderId } = cancelOrderSchema.parse(input);
 
-  const order = await OrderModel.findById(orderId);
+  // Tenant-scoped lookup — an order from another boutique returns NotFound.
+  const order = await OrderModel.findOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
   if (!order) throw new NotFoundError("Order not found");
 
   assertValidTransition(order.status as OrderStatus, "cancelled");
@@ -610,7 +655,12 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
   if (order.inventoryApplied) {
     for (const item of order.items) {
       await InventoryModel.findOneAndUpdate(
-        { productId: item.productId, size: item.size, color: item.color },
+        {
+          productId: item.productId,
+          size: item.size,
+          color: item.color,
+          boutiqueId: order.boutiqueId,
+        },
         { $inc: { quantity: item.quantity } },
         { new: true },
       ).lean();
@@ -642,6 +692,7 @@ export async function cancelOrder(input: unknown): Promise<SafeOrder> {
 export async function addOrderNote(
   input: unknown,
   createdBy: string | null,
+  boutiqueId: string,
 ): Promise<SafeOrder> {
   const { orderId, note } = addOrderNoteSchema.parse(input);
 
@@ -652,8 +703,12 @@ export async function addOrderNote(
     createdAt: new Date(),
   };
 
-  const order = await OrderModel.findByIdAndUpdate(
-    orderId,
+  // Tenant-scoped update — an order from another boutique returns NotFound.
+  const order = await OrderModel.findOneAndUpdate(
+    {
+      _id: new Types.ObjectId(orderId),
+      boutiqueId: new Types.ObjectId(boutiqueId),
+    },
     { $push: { notes: noteDoc } },
     { new: true },
   ).lean<OrderLike>();
@@ -666,6 +721,7 @@ export async function addOrderNote(
 
 export async function assignCustomerToOrder(
   input: unknown,
+  boutiqueId: string,
 ): Promise<SafeOrder> {
   const { orderId, customerId } = assignCustomerSchema.parse(input);
 
@@ -674,7 +730,11 @@ export async function assignCustomerToOrder(
   });
   if (!customerExists) throw new NotFoundError("Customer not found");
 
-  const order = await OrderModel.findById(orderId);
+  // Tenant-scoped lookup — an order from another boutique returns NotFound.
+  const order = await OrderModel.findOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
   if (!order) throw new NotFoundError("Order not found");
 
   // The guard below confirms the order had no customer before this call —
@@ -704,16 +764,28 @@ export async function assignCustomerToOrder(
   return mapOrder(order.toObject() as OrderLike);
 }
 
-export async function deleteOrder(input: unknown): Promise<boolean> {
+export async function deleteOrder(
+  input: unknown,
+  boutiqueId: string,
+): Promise<boolean> {
   const { orderId } = cancelOrderSchema.parse(input);
 
-  const order = await OrderModel.findById(orderId);
+  // Tenant-scoped lookup — an order from another boutique returns NotFound.
+  const order = await OrderModel.findOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
   if (!order) throw new NotFoundError("Order not found");
 
   if (order.inventoryApplied) {
     for (const item of order.items) {
       await InventoryModel.findOneAndUpdate(
-        { productId: item.productId, size: item.size, color: item.color },
+        {
+          productId: item.productId,
+          size: item.size,
+          color: item.color,
+          boutiqueId: order.boutiqueId,
+        },
         { $inc: { quantity: item.quantity } },
         { new: true },
       ).lean();
@@ -724,7 +796,11 @@ export async function deleteOrder(input: unknown): Promise<boolean> {
     );
   }
 
-  await OrderModel.findByIdAndDelete(orderId);
+  // Tenant-scoped delete — compound filter guards against cross-tenant deletion.
+  await OrderModel.deleteOne({
+    _id: new Types.ObjectId(orderId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  });
 
   logger.info(
     { orderId, orderNumber: order.orderNumber },

@@ -1,6 +1,5 @@
 import {
   findBoutiqueById,
-  listBoutiques,
   updateBoutique,
   setBoutiqueGlobalMode,
   updateAgentConfig,
@@ -11,7 +10,7 @@ import { invalidateBoutiqueCache } from "#/modules/boutiques/boutique.cache.js";
 import type { GraphQLContext } from "#/graphql/context.js";
 import type { Role } from "#/modules/auth/auth.types.js";
 import { requireAuth, requireRoles } from "#/shared/utils/auth.guards.js";
-import { NotFoundError } from "#/shared/errors/index.js";
+import { AuthorizationError, NotFoundError } from "#/shared/errors/index.js";
 
 // ─── Role constants ───────────────────────────────────────────────────────────
 
@@ -50,6 +49,14 @@ export const boutiqueResolvers = {
       context: GraphQLContext,
     ): Promise<SafeBoutique | null> => {
       requireRoles(context, BOUTIQUE_READERS);
+      // Tenant isolation: a boutique user may only read their own boutique.
+      // The id from client args is rejected if it does not match the JWT's
+      // boutiqueId — cross-tenant reads are never permitted.
+      if (args.id !== context.user!.boutiqueId) {
+        throw new AuthorizationError(
+          "You do not have permission to access this boutique.",
+        );
+      }
       const doc = await findBoutiqueById(args.id);
       return doc ? toSafeBoutique(doc) : null;
     },
@@ -60,8 +67,11 @@ export const boutiqueResolvers = {
       context: GraphQLContext,
     ): Promise<SafeBoutique[]> => {
       requireRoles(context, BOUTIQUE_READERS);
-      const docs = await listBoutiques();
-      return docs.map(toSafeBoutique);
+      // Tenant isolation: regular boutique users only ever see their own
+      // boutique. listBoutiques() (platform-wide) is reserved for a future
+      // platform_admin role and is intentionally NOT exposed here.
+      const doc = await findBoutiqueById(context.user!.boutiqueId);
+      return doc ? [toSafeBoutique(doc)] : [];
     },
   },
 

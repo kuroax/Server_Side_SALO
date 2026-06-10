@@ -58,9 +58,15 @@ export const bufferPushHandler = async (req: Request, res: Response): Promise<vo
     return;
   }
 
-  // Multi-tenant scoping: defaults to '' when the n8n payload omits it,
-  // matching the buffer schema default and preserving single-tenant behavior.
-  const phoneNumberId = asOptionalString(body.phoneNumberId)   ?? '';
+  // Multi-tenant scoping: phoneNumberId is REQUIRED — it keys the buffer per
+  // tenant. Without it, two boutiques receiving messages from the same customer
+  // phone would collide in one buffer document. Reject rather than default to ''.
+  const phoneNumberId = asNonEmptyString(body.phoneNumberId);
+  if (!phoneNumberId) {
+    res.status(400).json({ error: 'phoneNumberId is required' });
+    return;
+  }
+
   const message      = asOptionalString(body.message)          ?? '';
   const messageId    = asOptionalString(body.messageId);
   const messageType  = asMessageType(body.messageType);
@@ -123,9 +129,13 @@ export const bufferClaimHandler = async (req: Request, res: Response): Promise<v
     return;
   }
 
-  // Multi-tenant scoping: defaults to '' when omitted so the claim targets the
-  // same buffer document the push created (preserves single-tenant behavior).
-  const phoneNumberId = asOptionalString(body.phoneNumberId) ?? '';
+  // Multi-tenant scoping: phoneNumberId is REQUIRED to target the correct
+  // per-tenant buffer document. Reject rather than default to ''.
+  const phoneNumberId = asNonEmptyString(body.phoneNumberId);
+  if (!phoneNumberId) {
+    res.status(400).json({ error: 'phoneNumberId is required' });
+    return;
+  }
 
   logger.info(
     { from, phoneNumberId, executionId },

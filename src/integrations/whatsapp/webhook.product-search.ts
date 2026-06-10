@@ -12,6 +12,12 @@ import type {
   ProductSearchItem,
 } from "#/integrations/whatsapp/claude.service.js";
 
+// Escapes regex metacharacters so a Claude-derived color string can be used
+// safely inside a $regex query without throwing a MongoError or behaving as a
+// pattern. Mirrors the helper used in ownerConfirm.service.ts / customer.service.ts.
+const escapeRegex = (s: string): string =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 export function findProductByHint(
   hint: string,
   catalog: { id: string; name: string; price: number }[],
@@ -268,7 +274,7 @@ export async function searchProductsForClaude(
     // inventory.color is stored lowercase via pre-save hook
     // Support partial color match: "negro" matches "negro intenso", etc.
     inventoryFilter.color = {
-      $regex: hints.color.trim().toLowerCase(),
+      $regex: escapeRegex(hints.color.trim().toLowerCase()),
       $options: "i",
     };
   }

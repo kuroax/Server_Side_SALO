@@ -310,6 +310,7 @@ describe('Auto-resume', () => {
 describe('WhatsApp buffer', () => {
   const pushBody = (overrides: Record<string, unknown> = {}) => ({
     from: CUSTOMER_PHONE,
+    phoneNumberId: TEST_PHONE_NUMBER_ID,
     message: 'busco leggings negros',
     executionId: 'exec-default',
     messageId: 'wamid.buf1',
@@ -347,7 +348,11 @@ describe('WhatsApp buffer', () => {
     const res = await request(app)
       .post(`${WEBHOOK_URL}/buffer/claim`)
       .set('x-webhook-secret', BUFFER_SECRET)
-      .send({ from: CUSTOMER_PHONE, executionId: 'exec-13' })
+      .send({
+        from: CUSTOMER_PHONE,
+        phoneNumberId: TEST_PHONE_NUMBER_ID,
+        executionId: 'exec-13',
+      })
 
     expect(res.status).toBe(200)
     expect(res.body.shouldRespond === false || res.body.skip === true).toBe(
@@ -387,7 +392,11 @@ describe('WhatsApp buffer', () => {
     const res = await request(app)
       .post(`${WEBHOOK_URL}/buffer/claim`)
       .set('x-webhook-secret', BUFFER_SECRET)
-      .send({ from: CUSTOMER_PHONE, executionId: 'exec-14' })
+      .send({
+        from: CUSTOMER_PHONE,
+        phoneNumberId: TEST_PHONE_NUMBER_ID,
+        executionId: 'exec-14',
+      })
 
     expect(res.status).toBe(200)
     expect(res.body.shouldRespond).toBe(true)

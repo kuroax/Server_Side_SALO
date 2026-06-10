@@ -32,6 +32,7 @@ export type OwnerConfirmResult =
   | { status: "order_created"; orderNumber: string }
   | { status: "no_pending_payment" }
   | { status: "customer_not_found" }
+  | { status: "unauthorized" }
   | { status: "error"; reason: string };
 
 const GRAPH_API_VERSION = "v20.0";
@@ -83,7 +84,7 @@ async function sendWhatsAppText(
 export const handleOwnerConfirm = async (
   input: OwnerConfirmInput,
 ): Promise<OwnerConfirmResult> => {
-  const { boutiqueId, customerPhone } = input;
+  const { boutiqueId, customerPhone, ownerPhone } = input;
 
   // Look up boutique credentials server-side — never accept tokens from the caller.
   const boutique = await BoutiqueModel.findOne({
@@ -96,6 +97,17 @@ export const handleOwnerConfirm = async (
   if (!boutique) {
     logger.warn({ boutiqueId }, "ownerConfirm — boutique not found or inactive");
     return { status: "error", reason: "Boutique not found" };
+  }
+
+  // Authorization: the shared webhook secret only proves the request came from
+  // n8n — it does NOT prove the caller is THIS boutique's owner. Verify the
+  // supplied ownerPhone matches the boutique's stored ownerPhone (digits-only)
+  // so a secret holder cannot confirm payments for an arbitrary boutiqueId.
+  const normalizedIncoming = ownerPhone.replace(/\D/g, "");
+  const normalizedStored = boutique.ownerPhone?.replace(/\D/g, "");
+  if (!normalizedStored || normalizedIncoming !== normalizedStored) {
+    logger.warn({ boutiqueId }, "owner-confirm: ownerPhone mismatch");
+    return { status: "unauthorized" };
   }
 
   // Confirming a payment sends a WhatsApp message to the customer, which needs
@@ -223,17 +235,19 @@ export const handleOwnerConfirm = async (
   }
 
   try {
-    // Guard against duplicate orders if owner confirms twice.
-    // Check if an order already exists for this customer that was created
-    // from a pendingPayment (notes contain the customer phone).
-    // Scoped to this boutique via customerId to avoid cross-tenant matches.
-    // Find the customer first (already resolved above), then scope the order.
-    const existingOrder = customer
-      ? await OrderModel.findOne({
-          customerId: customer._id,
-          "notes.message": { $regex: escapeRegex(resolvedCustomerPhone), $options: "i" },
-        }).lean()
-      : null;
+    // Guard against duplicate orders if the owner confirms twice.
+    // Scope-safe guard: same boutique + same customer + a still-open order
+    // (pending/confirmed) created within the last 24h. This replaces the old
+    // notes.message regex, which both false-positived (a returning customer's
+    // old order matched and silently dropped the new sale) and false-negatived
+    // (auto-created orders have no phone in their notes, so duplicates slipped
+    // through). The 24h window + non-cancelled status closes both gaps.
+    const existingOrder = await OrderModel.findOne({
+      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+      customerId: customer._id,
+      status: { $in: ["pending", "confirmed"] },
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+    }).lean();
     if (existingOrder) {
       logger.warn(
         { boutiqueId, resolvedCustomerPhone, existingOrderId: existingOrder._id },

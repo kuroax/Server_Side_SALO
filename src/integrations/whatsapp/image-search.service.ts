@@ -1,5 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { Types } from "mongoose";
 import { ProductModel } from "#/modules/products/product.model.js";
+import { UsageLogModel } from "#/modules/usageLogs/usageLog.model.js";
 import { ANTHROPIC_API_KEY } from "#/config/env.js";
 import { logger } from "#/config/logger.js";
 
@@ -60,6 +62,7 @@ async function downloadMetaImage(
 async function analyzeClothingImage(
   base64: string,
   mediaType: string,
+  boutiqueId: string,
 ): Promise<ClothingAttributes> {
   const response = await client.messages.create({
     model: "claude-sonnet-4-6",
@@ -96,6 +99,23 @@ Respond ONLY with a JSON object — no markdown, no explanation, no text before 
     ],
   });
 
+  // Non-blocking per-boutique usage log for the vision call. Without this, every
+  // visual search consumed Claude tokens that were never attributed to the
+  // boutique. Never awaited and never throws — a failed write must not break the
+  // search flow.
+  UsageLogModel.create({
+    boutiqueId: new Types.ObjectId(boutiqueId),
+    model: "claude-sonnet-4-6",
+    intent: "image_search",
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+    totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+    toolIterations: 1,
+    createdAt: new Date(),
+  }).catch((err) =>
+    logger.warn({ err }, "UsageLog image-search write failed"),
+  );
+
   const raw = response.content
     .filter((b) => b.type === "text")
     .map((b) => (b as { type: "text"; text: string }).text)
@@ -106,8 +126,16 @@ Respond ONLY with a JSON object — no markdown, no explanation, no text before 
 
 // ─── Step 3 — Search MongoDB by extracted attributes ──────────────────────────
 
-async function findMatchingProducts(attrs: ClothingAttributes) {
-  const query: Record<string, unknown> = { status: "active" };
+async function findMatchingProducts(
+  attrs: ClothingAttributes,
+  boutiqueId: string,
+) {
+  // Tenant scope FIRST — the boutiqueId filter prevents visual search from
+  // returning products that belong to another boutique.
+  const query: Record<string, unknown> = {
+    boutiqueId: new Types.ObjectId(boutiqueId),
+    status: "active",
+  };
 
   if (attrs.categoryGroup) {
     query["categoryGroup"] = { $regex: attrs.categoryGroup, $options: "i" };
@@ -139,16 +167,17 @@ async function findMatchingProducts(attrs: ClothingAttributes) {
 export async function searchProductsByImage(
   mediaId: string,
   accessToken: string,
+  boutiqueId: string,
 ): Promise<ImageSearchResult> {
   try {
     logger.info({ mediaId }, "Starting image-based product search");
 
     const { base64, mediaType } = await downloadMetaImage(mediaId, accessToken);
-    const attrs = await analyzeClothingImage(base64, mediaType);
+    const attrs = await analyzeClothingImage(base64, mediaType, boutiqueId);
 
     logger.info({ attrs }, "Clothing attributes extracted from image");
 
-    const products = await findMatchingProducts(attrs);
+    const products = await findMatchingProducts(attrs, boutiqueId);
 
     if (products.length === 0) {
       logger.info({ attrs }, "No matching products found for image");

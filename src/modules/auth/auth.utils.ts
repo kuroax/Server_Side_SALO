@@ -33,7 +33,9 @@ export const signRefreshToken = (payload: JWTPayload): string => {
 
 const verifyTokenBase = (token: string, secret: string): JWTPayload => {
   try {
-    return jwt.verify(token, secret) as JWTPayload;
+    // Pin the algorithm so a forged token cannot downgrade to "none" or another
+    // scheme — we only ever sign with HS256.
+    return jwt.verify(token, secret, { algorithms: ["HS256"] }) as JWTPayload;
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
       throw new Error('Token expired');

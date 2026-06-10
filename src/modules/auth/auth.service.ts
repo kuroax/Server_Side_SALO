@@ -46,13 +46,19 @@ export const register = async (
 ): Promise<AuthPayload> => {
   const validated = registerSchema.parse(input);
 
-  // ── Owner uniqueness constraint ──────────────────────────────────────────────
-  // Exactly one owner may exist in the system. This is enforced here regardless
-  // of who is calling — even another owner cannot create a second owner.
+  // ── Owner uniqueness constraint (per boutique) ───────────────────────────────
+  // Exactly one owner may exist PER BOUTIQUE — not one globally. A global guard
+  // would block every tenant after the first from ever creating its own owner,
+  // breaking multi-tenant onboarding. Scope the check to validated.boutiqueId.
   if (validated.role === ROLES.OWNER) {
-    const ownerExists = await UserModel.exists({ role: ROLES.OWNER });
+    const ownerExists = await UserModel.exists({
+      role: ROLES.OWNER,
+      boutiqueId: new Types.ObjectId(validated.boutiqueId),
+    });
     if (ownerExists) {
-      throw new ValidationError('An owner account already exists');
+      throw new ValidationError(
+        'An owner account already exists for this boutique',
+      );
     }
   }
 

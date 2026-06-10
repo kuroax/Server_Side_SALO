@@ -14,6 +14,7 @@ import type {
   ConversationMode,
 } from "#/modules/boutiques/boutique.types.js";
 import { BOUTIQUE_STATUS } from "#/modules/boutiques/boutique.types.js";
+import { invalidateBoutiqueCache } from "#/modules/boutiques/boutique.cache.js";
 import { logger } from "#/config/logger.js";
 
 // ─── Lean type ────────────────────────────────────────────────────────────────
@@ -105,6 +106,9 @@ export const updateBoutique = async (
   ).lean<BoutiqueLean | null>();
 
   if (doc) {
+    // Drop the cached boutique so the next WhatsApp message reads fresh config
+    // (businessInfo, bankAccountImageUrl, ownerPhone, etc.) instead of stale.
+    invalidateBoutiqueCache(id);
     logger.info({ boutiqueId: id }, "Boutique updated");
   }
 
@@ -128,6 +132,10 @@ export const updateBoutiqueCredentials = async (
   ).lean<BoutiqueLean | null>();
 
   if (doc) {
+    // Critical: drop the cache so the rotated accessToken / phoneNumberId is
+    // used on the very next message. Without this the webhook keeps using the
+    // stale token for up to the cache TTL and media downloads / alerts fail.
+    invalidateBoutiqueCache(id);
     logger.info(
       { boutiqueId: id, phoneNumberId: doc.phoneNumberId },
       "Boutique credentials updated",
@@ -152,6 +160,9 @@ export const setBoutiqueGlobalMode = async (
   ).lean<BoutiqueLean | null>();
 
   if (doc) {
+    // Drop the cache so the globalMode kill switch takes effect on the next
+    // message instead of after the cache TTL expires.
+    invalidateBoutiqueCache(id);
     logger.info({ boutiqueId: id, mode }, "Boutique global mode updated");
   }
 

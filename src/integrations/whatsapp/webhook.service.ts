@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { CustomerModel } from "#/modules/customers/customer.model.js";
 import { OrderModel } from "#/modules/orders/order.model.js";
 import { ProductModel } from "#/modules/products/product.model.js";
@@ -205,6 +206,19 @@ export const handleIncomingMessage = async (
   }
 
   const boutiqueId = boutique._id.toString();
+
+  // ─── Boutique-wide kill switch ────────────────────────────────────────────
+  // globalMode "manual" silences the bot for EVERY conversation of this
+  // boutique — the owner is handling all chats manually. This runs before the
+  // per-conversation conversationMode gate (section 3) because the boutique-wide
+  // switch always takes priority. Returns emptyResult so n8n sends nothing.
+  if (boutique.globalMode === "manual") {
+    logger.info(
+      { boutiqueId, from, messageId },
+      "Boutique globalMode is manual — bot silent for entire boutique",
+    );
+    return emptyResult();
+  }
 
   // ─── Idempotency gate ─────────────────────────────────────────────────────
   // Must run before any bookkeeping (prospect bump, message count, etc.)
@@ -499,8 +513,9 @@ export const handleIncomingMessage = async (
             },
           },
           $set: { lastMessageAt: new Date() },
+          $setOnInsert: { boutiqueId: new mongoose.Types.ObjectId(boutiqueId) },
         },
-        { upsert: true, returnDocument: "after" },
+        { upsert: true, returnDocument: "after", runValidators: true },
       );
 
       // E. Notify the owner that a payment receipt arrived so they can verify
@@ -571,6 +586,9 @@ export const handleIncomingMessage = async (
           // A boutique matched by an active phoneNumberId is WhatsApp-connected,
           // so its accessToken is present (set alongside phoneNumberId at signup).
           boutique.accessToken as string,
+          // Tenant scope — resolved from the boutique document at the top of
+          // handleIncomingMessage; keeps visual search within this boutique only.
+          boutiqueId,
         );
         const searchResult = imageSearchResultSchema.safeParse(rawSearchResult);
         if (!searchResult.success) {
@@ -603,8 +621,9 @@ export const handleIncomingMessage = async (
               },
             },
             $set: { lastMessageAt: new Date() },
+            $setOnInsert: { boutiqueId: new mongoose.Types.ObjectId(boutiqueId) },
           },
-          { upsert: true, returnDocument: "after" },
+          { upsert: true, returnDocument: "after", runValidators: true },
         );
 
         return toSafeResult(
@@ -645,8 +664,9 @@ export const handleIncomingMessage = async (
               },
             },
             $set: { lastMessageAt: new Date() },
+            $setOnInsert: { boutiqueId: new mongoose.Types.ObjectId(boutiqueId) },
           },
-          { upsert: true, returnDocument: "after" },
+          { upsert: true, returnDocument: "after", runValidators: true },
         );
 
         return toSafeResult(
@@ -915,8 +935,9 @@ ${incomingMessageForClaude}`;
           },
         },
         $set: { lastMessageAt: new Date() },
+        $setOnInsert: { boutiqueId: new mongoose.Types.ObjectId(boutiqueId) },
       },
-      { upsert: true, returnDocument: "after" },
+      { upsert: true, returnDocument: "after", runValidators: true },
     );
 
     return toSafeResult(
@@ -1298,7 +1319,7 @@ ${incomingMessageForClaude}`;
   // Shorten to a compact form that still signals the message type.
   const storedUserContent = message.startsWith("[Nota de voz")
     ? "[Audio]"
-    : message;
+    : message.slice(0, 2000);
 
   // When product images are being sent, extract product data from captions and
   // append a structured summary to the assistant turn content.
@@ -1369,8 +1390,9 @@ ${incomingMessageForClaude}`;
         },
       },
       $set: { lastMessageAt: new Date() },
+      $setOnInsert: { boutiqueId: new mongoose.Types.ObjectId(boutiqueId) },
     },
-    { upsert: true, returnDocument: "after" },
+    { upsert: true, returnDocument: "after", runValidators: true },
   );
 
   logger.info(

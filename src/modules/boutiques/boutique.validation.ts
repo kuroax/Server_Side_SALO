@@ -149,12 +149,12 @@ export const embeddedSignupSchema = z.object({
 // Owners edit these via the updateAgentConfig GraphQL mutation.
 
 export const agentPhrasesSchema = z.object({
-  paymentAck: z.string().trim().min(1).optional(),
-  orderConfirm: z.string().trim().min(1).optional(),
-  negativeSticker: z.string().trim().min(1).optional(),
-  affirmations: z.string().trim().min(1).optional(),
-  closings: z.string().trim().min(1).optional(),
-  emojiSet: z.string().trim().min(1).optional(),
+  paymentAck: z.string().trim().min(1).max(200).optional(),
+  orderConfirm: z.string().trim().min(1).max(200).optional(),
+  negativeSticker: z.string().trim().min(1).max(200).optional(),
+  affirmations: z.string().trim().min(1).max(300).optional(),
+  closings: z.string().trim().min(1).max(300).optional(),
+  emojiSet: z.string().trim().min(1).max(100).optional(),
 });
 
 export const agentConfigSchema = z.object({

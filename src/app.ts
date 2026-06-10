@@ -83,7 +83,12 @@ export const createApp = async (): Promise<Application> => {
       standardHeaders: true,
       legacyHeaders:   false,
       message:         { success: false, message: 'Too many requests — please try again later.' },
-      skip:            () => IS_DEVELOPMENT,
+      // Exempt the WhatsApp webhook routes: all their traffic originates from a
+      // single n8n IP, so a shared IP-keyed bucket would let one busy boutique
+      // exhaust the limit and drop legitimate inbound messages. Those routes are
+      // protected by their own shared-secret middleware instead.
+      skip:            (req) =>
+        IS_DEVELOPMENT || req.path.startsWith('/api/webhooks/whatsapp'),
     }),
   );
 

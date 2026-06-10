@@ -36,7 +36,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_READ_ROLES);
-      return getOrderById({ orderId: args.orderId });
+      // boutiqueId is read from the JWT context — never from client args.
+      return getOrderById({ orderId: args.orderId }, context.user!.boutiqueId);
     },
 
     async orderByOrderNumber(
@@ -45,7 +46,11 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_READ_ROLES);
-      return getOrderByOrderNumber({ orderNumber: args.orderNumber });
+      // boutiqueId is read from the JWT context — never from client args.
+      return getOrderByOrderNumber(
+        { orderNumber: args.orderNumber },
+        context.user!.boutiqueId,
+      );
     },
 
     async orders(
@@ -117,7 +122,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_WRITE_ROLES);
-      return updateOrderStatus(args.input);
+      // boutiqueId is read from the JWT context — never from client args.
+      return updateOrderStatus(args.input, context.user!.boutiqueId);
     },
 
     async updatePaymentStatus(
@@ -126,7 +132,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_WRITE_ROLES);
-      return updatePaymentStatus(args.input);
+      // boutiqueId is read from the JWT context — never from client args.
+      return updatePaymentStatus(args.input, context.user!.boutiqueId);
     },
 
     async cancelOrder(
@@ -135,7 +142,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_CANCEL_ROLES);
-      return cancelOrder(args.input);
+      // boutiqueId is read from the JWT context — never from client args.
+      return cancelOrder(args.input, context.user!.boutiqueId);
     },
 
     async addOrderNote(
@@ -144,7 +152,12 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_WRITE_ROLES);
-      return addOrderNote(args.input, context.user?.id ?? null);
+      // boutiqueId is read from the JWT context — never from client args.
+      return addOrderNote(
+        args.input,
+        context.user?.id ?? null,
+        context.user!.boutiqueId,
+      );
     },
 
     async assignCustomerToOrder(
@@ -153,7 +166,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_WRITE_ROLES);
-      return assignCustomerToOrder(args.input);
+      // boutiqueId is read from the JWT context — never from client args.
+      return assignCustomerToOrder(args.input, context.user!.boutiqueId);
     },
 
     async deleteOrder(
@@ -162,7 +176,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_DELETE_ROLES);
-      return deleteOrder(args.input);
+      // boutiqueId is read from the JWT context — never from client args.
+      return deleteOrder(args.input, context.user!.boutiqueId);
     },
   },
 };
