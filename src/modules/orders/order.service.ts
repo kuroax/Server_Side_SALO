@@ -275,17 +275,19 @@ type ProductSnapshotLike = {
 
 async function fetchProductSnapshots(
   productIds: string[],
-  boutiqueId?: string,
+  boutiqueId: string,
 ): Promise<Map<string, { name: string; slug: string }>> {
   const uniqueIds = [...new Set(productIds)];
   const objectIds = uniqueIds.map((id) => new Types.ObjectId(id));
 
-  // Multi-tenant guard: when boutiqueId is supplied, only resolve products that
-  // belong to that boutique so one tenant's products cannot be snapshotted into
-  // another tenant's order. Optional to stay backward-compatible with callers
-  // that have not yet been scoped (the missing-id check below still fires).
-  const filter: Record<string, unknown> = { _id: { $in: objectIds } };
-  if (boutiqueId) filter.boutiqueId = new Types.ObjectId(boutiqueId);
+  // Multi-tenant guard: boutiqueId is REQUIRED so one tenant's products can
+  // never be snapshotted into another tenant's order. Every snapshot query is
+  // scoped to the boutique; an _id from another tenant simply won't match and
+  // the missing-id check below throws NotFoundError.
+  const filter: Record<string, unknown> = {
+    _id: { $in: objectIds },
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  };
 
   const products = await ProductModel.find(filter)
     .select("name slug")
@@ -383,6 +385,14 @@ export async function createOrder(
   sourceMessageId: string | null = null,
 ): Promise<SafeOrder> {
   const data = createOrderSchema.parse(input);
+
+  // boutiqueId is required to create an order — it scopes the product snapshot
+  // lookup and the customer-existence check to the correct tenant. Both real
+  // callers (GraphQL resolver from JWT, webhook from the boutique lookup) always
+  // supply it; guard here so fetchProductSnapshots receives a non-null value.
+  if (!data.boutiqueId) {
+    throw new BadRequestError("boutiqueId is required to create an order");
+  }
 
   const normalizedSourceMessageId =
     typeof sourceMessageId === "string" && sourceMessageId.trim()
