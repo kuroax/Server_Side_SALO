@@ -29,14 +29,17 @@ process.env.CORS_ORIGIN = '*'
 // Match production timing so buffer claim semantics are exercised realistically.
 process.env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS = '55000'
 
-import { MongoMemoryServer } from 'mongodb-memory-server'
+// Single-node replica set (not standalone) — production is an Atlas replica
+// set and the code under test uses transactions (order confirm inventory
+// deduction, ownerConfirm duplicate guard), which standalone mongod rejects.
+import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import mongoose from 'mongoose'
 import { beforeAll, afterAll, afterEach } from 'vitest'
 
-let mongod: MongoMemoryServer
+let mongod: MongoMemoryReplSet
 
 beforeAll(async () => {
-  mongod = await MongoMemoryServer.create()
+  mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } })
   const uri = mongod.getUri()
   await mongoose.connect(uri)
 })

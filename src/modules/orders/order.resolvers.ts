@@ -62,7 +62,9 @@ export const orderResolvers = {
       // boutiqueId is read from the JWT and applied AFTER the client filter so a
       // client-supplied filter.boutiqueId can never widen the tenant scope.
       const filter = (args.filter ?? {}) as Record<string, unknown>;
-      return listOrders({ ...filter, boutiqueId: context.user?.boutiqueId });
+      // requireRoles above guarantees context.user — non-null assertion is safe
+      // and ensures the tenant filter can never silently degrade to undefined.
+      return listOrders({ ...filter, boutiqueId: context.user!.boutiqueId });
     },
 
     async customerOrders(
@@ -71,9 +73,11 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireRoles(context, ORDER_READ_ROLES);
+      // requireRoles above guarantees context.user — boutiqueId is required by
+      // the service so the tenant scope always applies.
       return getCustomerOrders(
         { customerId: args.customerId },
-        context.user?.boutiqueId,
+        context.user!.boutiqueId,
       );
     },
 
@@ -83,7 +87,8 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireAuth(context);
-      return getRevenueStats(args.months ?? 3, context.user?.boutiqueId);
+      // requireAuth above guarantees context.user.
+      return getRevenueStats(args.months ?? 3, context.user!.boutiqueId);
     },
 
     async revenueDetail(
@@ -92,10 +97,11 @@ export const orderResolvers = {
       context: GraphQLContext,
     ) {
       requireAuth(context);
+      // requireAuth above guarantees context.user.
       return getRevenueDetail(
         args.months ?? 12,
         args.topProductsLimit ?? 10,
-        context.user?.boutiqueId,
+        context.user!.boutiqueId,
       );
     },
   },

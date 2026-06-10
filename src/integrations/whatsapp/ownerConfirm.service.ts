@@ -5,7 +5,12 @@ import {
   PendingPaymentModel,
   type IPendingPayment,
 } from "#/modules/pendingPayments/pendingPayment.model.js";
-import { createOrder } from "#/modules/orders/order.service.js";
+import {
+  createOrder,
+  updateOrderStatus,
+  updatePaymentStatus,
+} from "#/modules/orders/order.service.js";
+import type { SafeOrder } from "#/modules/orders/order.types.js";
 import { OrderModel } from "#/modules/orders/order.model.js";
 import { CustomerModel } from "#/modules/customers/customer.model.js";
 import { InventoryModel } from "#/modules/inventory/inventory.model.js";
@@ -234,71 +239,63 @@ export const handleOwnerConfirm = async (
     return { status: "error", reason: "no resolvable cart items" };
   }
 
+  // 4. Duplicate guard + order creation — atomic.
+  // Guard against duplicate orders if the owner confirms twice.
+  // Scope-safe guard: same boutique + same customer + a still-open order
+  // (pending/confirmed) created within the last 24h. This replaces the old
+  // notes.message regex, which both false-positived (a returning customer's
+  // old order matched and silently dropped the new sale) and false-negatived
+  // (auto-created orders have no phone in their notes, so duplicates slipped
+  // through). The 24h window + non-cancelled status closes both gaps.
+  //
+  // The guard read and the order insert run inside ONE transaction so two
+  // concurrent CONFIRMAR PAGO messages cannot both pass the findOne check and
+  // create two orders — the second transaction sees the first one's committed
+  // order (or aborts on write conflict and retries via withTransaction).
+  type TxOutcome =
+    | { kind: "duplicate"; orderNumber: string }
+    | { kind: "created"; order: SafeOrder };
+
+  let outcome: TxOutcome;
+  const session = await mongoose.startSession();
   try {
-    // Guard against duplicate orders if the owner confirms twice.
-    // Scope-safe guard: same boutique + same customer + a still-open order
-    // (pending/confirmed) created within the last 24h. This replaces the old
-    // notes.message regex, which both false-positived (a returning customer's
-    // old order matched and silently dropped the new sale) and false-negatived
-    // (auto-created orders have no phone in their notes, so duplicates slipped
-    // through). The 24h window + non-cancelled status closes both gaps.
-    const existingOrder = await OrderModel.findOne({
-      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
-      customerId: customer._id,
-      status: { $in: ["pending", "confirmed"] },
-      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-    }).lean();
-    if (existingOrder) {
-      logger.warn(
-        { boutiqueId, resolvedCustomerPhone, existingOrderId: existingOrder._id },
-        "ownerConfirm — duplicate confirm detected, order already exists",
-      );
-      // Delete the pending payment so this guard triggers only once
-      await PendingPaymentModel.deleteOne({
-        boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
-        customerPhone: resolvedCustomerPhone,
-      });
-      return { status: "order_created", orderNumber: existingOrder.orderNumber };
-    }
+    outcome = await session.withTransaction(
+      async (): Promise<TxOutcome> => {
+        const existingOrder = await OrderModel.findOne({
+          boutiqueId: boutiqueObjectId,
+          customerId: customer._id,
+          status: { $in: ["pending", "confirmed"] },
+          createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        })
+          .session(session)
+          .lean();
+        if (existingOrder) {
+          return {
+            kind: "duplicate",
+            orderNumber: existingOrder.orderNumber,
+          };
+        }
 
-    // 4. Create the order. createOrder(input, createdBy, sourceMessageId).
-    const created = await createOrder(
-      {
-        boutiqueId,
-        customerId: customer._id.toString(),
-        channel: "whatsapp",
-        items: resolvedItems,
-        notes: [
+        const order = await createOrder(
           {
-            message: `Pago confirmado manualmente por el dueño. Cliente: ${resolvedCustomerPhone}.`,
-            kind: "system",
+            boutiqueId,
+            customerId: customer._id.toString(),
+            channel: "whatsapp",
+            items: resolvedItems,
+            notes: [
+              {
+                message: `Pago confirmado manualmente por el dueño. Cliente: ${resolvedCustomerPhone}.`,
+                kind: "system",
+              },
+            ],
           },
-        ],
+          null,
+          null,
+          session,
+        );
+        return { kind: "created", order };
       },
-      null,
-      null,
     );
-
-    logger.info(
-      { orderNumber: created.orderNumber, resolvedCustomerPhone, boutiqueId },
-      "ownerConfirm — order created",
-    );
-
-    // 5. Delete the pending payment to prevent duplicates.
-    await PendingPaymentModel.deleteOne({
-      boutiqueId: boutiqueObjectId,
-      customerPhone: resolvedCustomerPhone,
-    });
-
-    // 6. Notify the customer.
-    await sendWhatsAppText(
-      phoneNumberId,
-      accessToken,
-      resolvedCustomerPhone,
-      `¡Tu pago fue confirmado! 🙌🏼 Tu pedido ${created.orderNumber} está en proceso. Te avisamos en cuanto vaya en camino 🙏🏻`,
-    );
-
-    return { status: "order_created", orderNumber: created.orderNumber };
   } catch (err) {
     logger.error(
       { err, resolvedCustomerPhone, boutiqueId },
@@ -308,5 +305,76 @@ export const handleOwnerConfirm = async (
       status: "error",
       reason: err instanceof Error ? err.message : "unknown",
     };
+  } finally {
+    await session.endSession();
   }
+
+  if (outcome.kind === "duplicate") {
+    logger.warn(
+      { boutiqueId, resolvedCustomerPhone, orderNumber: outcome.orderNumber },
+      "ownerConfirm — duplicate confirm detected, order already exists",
+    );
+    // Delete the pending payment so this guard triggers only once.
+    await PendingPaymentModel.deleteOne({
+      boutiqueId: boutiqueObjectId,
+      customerPhone: resolvedCustomerPhone,
+    }).catch((err) => {
+      logger.warn(
+        { err, boutiqueId, resolvedCustomerPhone },
+        "ownerConfirm — pendingPayment delete failed (duplicate path) — TTL will expire it",
+      );
+    });
+    return { status: "order_created", orderNumber: outcome.orderNumber };
+  }
+
+  const created = outcome.order;
+
+  logger.info(
+    { orderNumber: created.orderNumber, resolvedCustomerPhone, boutiqueId },
+    "ownerConfirm — order created",
+  );
+
+  // 5. The owner just verified the deposit, so reflect that on the order:
+  //    paid (credits customer lifetimeValue) then confirmed (deducts inventory
+  //    inside its own transaction). Best-effort: the order already exists and
+  //    the payment IS verified — a bookkeeping failure here (e.g. stock sold
+  //    out between resolution and confirm) leaves the order pending/paid for
+  //    the owner to resolve in the app, and must not report the confirm as
+  //    failed or block the customer notification.
+  try {
+    await updatePaymentStatus(
+      { orderId: created.id, paymentStatus: "paid" },
+      boutiqueId,
+    );
+    await updateOrderStatus(
+      { orderId: created.id, status: "confirmed" },
+      boutiqueId,
+    );
+  } catch (err) {
+    logger.error(
+      { err, orderNumber: created.orderNumber, boutiqueId },
+      "ownerConfirm — order created but paid/confirmed transition failed — resolve manually in the app",
+    );
+  }
+
+  // 6. Delete the pending payment to prevent duplicates.
+  await PendingPaymentModel.deleteOne({
+    boutiqueId: boutiqueObjectId,
+    customerPhone: resolvedCustomerPhone,
+  }).catch((err) => {
+    logger.warn(
+      { err, boutiqueId, resolvedCustomerPhone },
+      "ownerConfirm — pendingPayment delete failed — duplicate guard still covers re-confirms",
+    );
+  });
+
+  // 7. Notify the customer.
+  await sendWhatsAppText(
+    phoneNumberId,
+    accessToken,
+    resolvedCustomerPhone,
+    `¡Tu pago fue confirmado! 🙌🏼 Tu pedido ${created.orderNumber} está en proceso. Te avisamos en cuanto vaya en camino 🙏🏻`,
+  );
+
+  return { status: "order_created", orderNumber: created.orderNumber };
 };

@@ -702,6 +702,12 @@ export const processMessage = async (
   // a failed write must not add latency or break the WhatsApp response. Called
   // on every exit path (success AND SAFE_FALLBACK). On early failures with no
   // completed API call, tokens are 0 and toolIterations defaults to 1.
+  //
+  // Usage logging is intentionally fire-and-forget (.catch swallows
+  // errors) to avoid adding latency to customer responses.
+  // Trade-off: a DB hiccup silently drops the record. For metered
+  // billing, consider a write-ahead buffer or periodic reconciliation
+  // against the Anthropic usage API as a future improvement.
   const logUsage = (args: {
     intent?: ClaudeIntent;
     inputTokens: number;
@@ -747,6 +753,13 @@ export const processMessage = async (
     ? customerName.replace(/[[\]{}<>]/g, "").slice(0, 60).trim() || null
     : null;
 
+  // TRUST BOUNDARIES: customerName is sanitized (safeCustomerName).
+  // incomingMessage, conversationHistory, and product tool results
+  // are intentionally unsanitized — they are the expected inputs to
+  // the model. agentConfig fields are owner-controlled (self-scoped)
+  // and length-capped by boutique.validation.ts. The strict JSON
+  // output contract (claudeResultSchema) limits the blast radius of
+  // any successful injection.
   const contextSection = `
 ─── CONTEXTO ACTUAL ───────────────────────────────────────────────────────────
 

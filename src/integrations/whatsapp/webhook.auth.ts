@@ -7,6 +7,12 @@ import { env } from '#/config/env.js';
 // Validates x-webhook-secret header using timing-safe comparison.
 // Applied at the router level to all /buffer/* routes.
 
+// NOTE: Meta X-Hub-Signature-256 HMAC body verification is not
+// implemented here because messages arrive via n8n (not directly
+// from Meta). The static shared secret (BUFFER_WEBHOOK_SECRET)
+// with timing-safe comparison is the current authentication
+// boundary. If Meta→backend direct delivery is ever implemented,
+// add raw-body HMAC-SHA256 verification here.
 export const requireBufferWebhookSecret = (
   req:  Request,
   res:  Response,

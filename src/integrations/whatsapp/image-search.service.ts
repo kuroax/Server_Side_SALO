@@ -9,6 +9,12 @@ import { logger } from "#/config/logger.js";
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
+// Escape regex metacharacters so Claude-vision-derived strings are safe in
+// $regex queries (same pattern as webhook.product-search.ts) — an unescaped
+// special char would throw a MongoError and kill the visual search.
+const escapeRegex = (s: string): string =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ClothingAttributes = {
@@ -138,7 +144,10 @@ async function findMatchingProducts(
   };
 
   if (attrs.categoryGroup) {
-    query["categoryGroup"] = { $regex: attrs.categoryGroup, $options: "i" };
+    query["categoryGroup"] = {
+      $regex: escapeRegex(attrs.categoryGroup),
+      $options: "i",
+    };
   }
 
   if (attrs.gender && attrs.gender !== "unisex") {
@@ -150,9 +159,10 @@ async function findMatchingProducts(
     .filter((w) => w.length > 3);
 
   if (subcategoryTerms.length > 0) {
+    const subcategoryPattern = subcategoryTerms.map(escapeRegex).join("|");
     query["$or"] = [
-      { subcategory: { $regex: subcategoryTerms.join("|"), $options: "i" } },
-      { name: { $regex: subcategoryTerms.join("|"), $options: "i" } },
+      { subcategory: { $regex: subcategoryPattern, $options: "i" } },
+      { name: { $regex: subcategoryPattern, $options: "i" } },
     ];
   }
 

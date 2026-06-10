@@ -1,3 +1,4 @@
+import { Types } from "mongoose";
 import { BoutiqueModel } from "#/modules/boutiques/boutique.model.js";
 import {
   createBoutiqueSchema,
@@ -90,11 +91,20 @@ export const createBoutique = async (
 export const updateBoutique = async (
   id: string,
   input: unknown,
+  boutiqueId: string,
 ): Promise<BoutiqueLean | null> => {
   const data = updateBoutiqueSchema.parse(input);
 
-  const doc = await BoutiqueModel.findByIdAndUpdate(
-    id,
+  // Defense in depth: the resolver already enforces id === JWT boutiqueId, but
+  // the filter requires both to match the document so a future caller cannot
+  // write across tenants by mistake.
+  const doc = await BoutiqueModel.findOneAndUpdate(
+    {
+      $and: [
+        { _id: new Types.ObjectId(id) },
+        { _id: new Types.ObjectId(boutiqueId) },
+      ],
+    },
     {
       $set: {
         ...data,
@@ -150,11 +160,18 @@ export const updateBoutiqueCredentials = async (
 export const setBoutiqueGlobalMode = async (
   id: string,
   input: unknown,
+  boutiqueId: string,
 ): Promise<BoutiqueLean | null> => {
   const { mode } = setModeSchema.parse(input);
 
-  const doc = await BoutiqueModel.findByIdAndUpdate(
-    id,
+  // Defense in depth: same tenant-scoped compound filter as updateBoutique.
+  const doc = await BoutiqueModel.findOneAndUpdate(
+    {
+      $and: [
+        { _id: new Types.ObjectId(id) },
+        { _id: new Types.ObjectId(boutiqueId) },
+      ],
+    },
     { $set: { globalMode: mode as ConversationMode } },
     { new: true, runValidators: true },
   ).lean<BoutiqueLean | null>();

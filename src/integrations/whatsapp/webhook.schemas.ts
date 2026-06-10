@@ -154,6 +154,32 @@ export async function markMessageProcessed(
   }
 }
 
+// Compensating rollback for markMessageProcessed: when processing throws AFTER
+// the marker was inserted, delete it so the n8n retry is processed instead of
+// being silently dropped as a duplicate. Best-effort — if the delete itself
+// fails, the retry is treated as a duplicate (the pre-existing behavior);
+// this must never throw into the webhook flow.
+export async function unmarkMessageProcessed(
+  messageId: string,
+  boutiqueId: string,
+): Promise<void> {
+  try {
+    await ProcessedMessageModel.deleteOne({
+      messageId,
+      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+    });
+    logger.info(
+      { messageId, boutiqueId },
+      "[webhook] processedMessage marker rolled back after processing error",
+    );
+  } catch (err) {
+    logger.warn(
+      { err, messageId, boutiqueId },
+      "[webhook] processedMessage rollback failed — n8n retry will be treated as duplicate",
+    );
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 export function normalizePhoneForLookup(value: unknown): string {

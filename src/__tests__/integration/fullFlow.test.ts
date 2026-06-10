@@ -239,6 +239,30 @@ describe('JOURNEY: Frida-style complete purchase flow', () => {
 
   // ── Test 4 — customer confirms → bank image sent ────────────────────────────
   it('4. "Sí confirmo" — injects the bank account image (payment_info)', async () => {
+    // Re-seed the conversation (cleared by afterEach) from the shared thread so
+    // the two-step payment gate sees Test 3's ⭐️ order summary in a prior
+    // assistant turn — without it the backend withholds the bank image.
+    const seedCustomer = await CustomerModel.create({
+      boutiqueId: boutiqueObjectId,
+      name: 'Frida',
+      phone: JOURNEY_PHONE,
+      contactChannel: 'whatsapp',
+      gender: 'unknown',
+      isActive: true,
+      tags: [],
+    })
+    await ConversationModel.create({
+      boutiqueId: boutiqueObjectId,
+      customerId: seedCustomer._id,
+      channel: 'whatsapp',
+      turns: conversationTurns.map((t) => ({
+        role: t.role,
+        content: t.content,
+        createdAt: new Date(),
+      })),
+      lastMessageAt: new Date(),
+    })
+
     const reply = '¡Perfecto bonita! Aquí van los datos de depósito 🙌🏼'
     vi.mocked(processMessage).mockResolvedValue({
       intent: 'payment_info',

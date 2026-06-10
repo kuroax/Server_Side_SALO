@@ -61,6 +61,7 @@ import {
   ProcessMessageResult,
   imageSearchResultSchema,
   markMessageProcessed,
+  unmarkMessageProcessed,
   normalizePhoneForLookup,
 } from "#/integrations/whatsapp/webhook.schemas.js";
 
@@ -74,8 +75,36 @@ import {
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
+// Tracks whether THIS request inserted the dedup marker, so the wrapper below
+// can roll it back if processing throws afterwards.
+type DedupMarker = { messageId: string | null; boutiqueId: string | null };
+
+// Thin wrapper around the orchestrator: if processing throws AFTER the dedup
+// marker was inserted, delete the marker before rethrowing. Without this, the
+// marker is permanent on failure and the n8n retry (controller returns 500 →
+// n8n redelivers) is silently dropped as a duplicate. The orchestrator has too
+// many success exits to move the marker to the end safely — compensating
+// rollback on the single error path is the smaller, safer change.
 export const handleIncomingMessage = async (
   payload: WebhookPayload,
+): Promise<WebhookResult> => {
+  const dedupMarker: DedupMarker = { messageId: null, boutiqueId: null };
+  try {
+    return await processIncomingMessage(payload, dedupMarker);
+  } catch (err) {
+    if (dedupMarker.messageId && dedupMarker.boutiqueId) {
+      await unmarkMessageProcessed(
+        dedupMarker.messageId,
+        dedupMarker.boutiqueId,
+      );
+    }
+    throw err;
+  }
+};
+
+const processIncomingMessage = async (
+  payload: WebhookPayload,
+  dedupMarker: DedupMarker,
 ): Promise<WebhookResult> => {
   const rawFrom = payload.from;
   const from = normalizePhoneForLookup(rawFrom);
@@ -230,6 +259,13 @@ export const handleIncomingMessage = async (
     );
     return emptyResult();
   }
+  // Marker inserted by this request — record it so the handleIncomingMessage
+  // wrapper can roll it back if anything below throws. Duplicate deliveries
+  // never reach here, so a failed duplicate can never erase the original marker.
+  if (messageId) {
+    dedupMarker.messageId = messageId;
+    dedupMarker.boutiqueId = boutiqueId;
+  }
 
   // ── 0c. Hybrid pipeline bookkeeping ───────────────────────────────────────
   // Runs for every inbound message (text or image) BEFORE any Claude call.
@@ -263,6 +299,16 @@ export const handleIncomingMessage = async (
       customerPhone: from,
       alertType: "new_prospect",
     });
+  } else if (isNewProspect) {
+    logger.warn(
+      {
+        boutiqueId,
+        reason: !boutique.ownerPhone
+          ? "missing ownerPhone"
+          : "missing accessToken",
+      },
+      "Owner alert skipped — boutique missing required fields",
+    );
   }
 
   // D. Track the inbound message on the conversation-state counter.
@@ -270,21 +316,43 @@ export const handleIncomingMessage = async (
 
   // ── 1. Identify / create customer ─────────────────────────────────────────
 
-  const customer = await CustomerModel.findOneAndUpdate(
-    { boutiqueId, phone: from },
-    {
-      $setOnInsert: {
-        boutiqueId,
-        name: payload.contactName ?? `WhatsApp ${from}`,
-        phone: from,
-        contactChannel: "whatsapp",
-        gender: CUSTOMER_GENDERS.UNKNOWN,
-        isActive: true,
-        tags: [],
+  let customer;
+  try {
+    customer = await CustomerModel.findOneAndUpdate(
+      { boutiqueId, phone: from },
+      {
+        $setOnInsert: {
+          boutiqueId,
+          name: payload.contactName ?? `WhatsApp ${from}`,
+          phone: from,
+          contactChannel: "whatsapp",
+          gender: CUSTOMER_GENDERS.UNKNOWN,
+          isActive: true,
+          tags: [],
+        },
       },
-    },
-    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
-  ).lean();
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
+    ).lean();
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code: number }).code === 11000
+    ) {
+      // Upsert race: two buffered messages from the same new customer can both
+      // miss the findOne and race the insert; the loser gets E11000 on the
+      // unique { boutiqueId, phone } index. The customer now exists — fetch it.
+      // Same pattern as prospect.service.ts.
+      logger.info(
+        { boutiqueId, from, messageId },
+        "Customer upsert E11000 race — fetching existing document",
+      );
+      customer = await CustomerModel.findOne({ boutiqueId, phone: from }).lean();
+    } else {
+      throw err;
+    }
+  }
 
   if (!customer) {
     logger.error({ phone: from }, "Customer upsert returned null — unexpected");
@@ -530,6 +598,16 @@ export const handleIncomingMessage = async (
           customerPhone: from,
           alertType: "receipt_received",
         });
+      } else {
+        logger.warn(
+          {
+            boutiqueId,
+            reason: !boutique.ownerPhone
+              ? "missing ownerPhone"
+              : "missing accessToken",
+          },
+          "Owner alert skipped — boutique missing required fields",
+        );
       }
 
       return toSafeResult(
@@ -730,7 +808,12 @@ export const handleIncomingMessage = async (
 
   // NOTE: add { customerId: 1, createdAt: -1 } compound index on orders if
   // this sort becomes slow when order volume grows beyond pilot scale.
-  const recentOrder = await OrderModel.findOne({ customerId })
+  // Tenant-scoped: customerId alone could surface another boutique's order
+  // (e.g. legacy docs from before the boutiqueId backfill).
+  const recentOrder = await OrderModel.findOne({
+    customerId,
+    boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+  })
     .sort({ createdAt: -1 })
     .lean();
 
@@ -773,6 +856,9 @@ ${incomingMessageForClaude}`;
 
   if (isGalleryReply && contextMessageId) {
     try {
+      // sentMessageId is globally unique (set by the Meta API).
+      // No boutiqueId filter needed — the ID cannot collide across
+      // tenants. If this assumption ever changes, add boutiqueId here.
       const sentImage = await SentImageModel.findOne({
         sentMessageId: contextMessageId,
       }).lean();
@@ -1188,7 +1274,16 @@ ${incomingMessageForClaude}`;
   // image pipeline (IF Has Product Images → Send Image) delivers it automatically.
   // No n8n changes needed — reuses the existing gallery pipeline.
   if (result.intent === "payment_info") {
-    if (boutique.bankAccountImageUrl) {
+    // Two-step payment gate (backend enforcement of the PASO 2 rule): only
+    // send the bank image after a prior assistant turn carries a ⭐️ order
+    // summary, i.e. the explicit confirmation step already happened. The
+    // system prompt instructs Claude to confirm first, but a misclassified
+    // first payment ask must not leak the bank image early — the text reply
+    // still goes through; only the image is gated.
+    const hasPriorOrderSummary = conversationHistory.some(
+      (turn) => turn.role === "assistant" && turn.content.includes("⭐️"),
+    );
+    if (boutique.bankAccountImageUrl && hasPriorOrderSummary) {
       productImages.push({
         url: boutique.bankAccountImageUrl,
         caption: "Datos bancarios para tu depósito 🏦",
@@ -1196,6 +1291,11 @@ ${incomingMessageForClaude}`;
       logger.info(
         { customerId, messageId, boutiqueId: boutique._id.toString() },
         "payment_info — bank account image injected",
+      );
+    } else if (boutique.bankAccountImageUrl) {
+      logger.info(
+        { customerId, messageId, boutiqueId: boutique._id.toString() },
+        "payment_info — bank image withheld: no prior ⭐️ order summary in history (two-step gate)",
       );
     } else {
       // Image URL not configured for this boutique — escalate so owner can

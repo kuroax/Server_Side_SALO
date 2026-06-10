@@ -359,18 +359,16 @@ export async function listOrders(input: unknown): Promise<SafeOrder[]> {
 
 export async function getCustomerOrders(
   input: unknown,
-  boutiqueId?: string,
+  boutiqueId: string,
 ): Promise<SafeOrder[]> {
   const { customerId } = getCustomerOrdersSchema.parse(input);
 
-  // Multi-tenant guard: when boutiqueId is supplied, scope the lookup so a
-  // customerId from another tenant cannot resolve cross-boutique orders.
-  const query: Record<string, unknown> = {
+  // Multi-tenant guard: boutiqueId is REQUIRED so a customerId from another
+  // tenant can never resolve cross-boutique orders.
+  const orders = await OrderModel.find({
     customerId: new Types.ObjectId(customerId),
-  };
-  if (boutiqueId) query.boutiqueId = new Types.ObjectId(boutiqueId);
-
-  const orders = await OrderModel.find(query)
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  })
     .sort({ createdAt: -1 })
     .lean<OrderLike[]>();
 
@@ -383,6 +381,10 @@ export async function createOrder(
   input: unknown,
   createdBy: string | null,
   sourceMessageId: string | null = null,
+  // Optional caller-owned transaction session. When supplied, the order insert
+  // joins the caller's transaction (e.g. ownerConfirm's atomic duplicate guard)
+  // so a guard read + this write commit or abort together.
+  session: mongoose.ClientSession | null = null,
 ): Promise<SafeOrder> {
   const data = createOrderSchema.parse(input);
 
@@ -462,7 +464,7 @@ export async function createOrder(
   });
 
   try {
-    await order.save();
+    await order.save({ session });
   } catch (err) {
     const recovered = await resolveCreateOrderDuplicate(err, {
       channel: data.channel,

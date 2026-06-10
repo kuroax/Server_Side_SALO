@@ -82,7 +82,15 @@ export const boutiqueResolvers = {
       context: GraphQLContext,
     ): Promise<SafeBoutique | null> => {
       requireRoles(context, BOUTIQUE_WRITERS);
-      const doc = await updateBoutique(args.id, args.input);
+      // Tenant isolation: a boutique user may only modify their own boutique.
+      if (args.id !== context.user!.boutiqueId) {
+        throw new AuthorizationError("Cannot modify another boutique");
+      }
+      const doc = await updateBoutique(
+        args.id,
+        args.input,
+        context.user!.boutiqueId,
+      );
       return doc ? toSafeBoutique(doc) : null;
     },
 
@@ -92,7 +100,15 @@ export const boutiqueResolvers = {
       context: GraphQLContext,
     ): Promise<SafeBoutique | null> => {
       requireRoles(context, BOUTIQUE_WRITERS);
-      const doc = await setBoutiqueGlobalMode(args.id, { mode: args.mode });
+      // Tenant isolation: a boutique user may only modify their own boutique.
+      if (args.id !== context.user!.boutiqueId) {
+        throw new AuthorizationError("Cannot modify another boutique");
+      }
+      const doc = await setBoutiqueGlobalMode(
+        args.id,
+        { mode: args.mode },
+        context.user!.boutiqueId,
+      );
       return doc ? toSafeBoutique(doc) : null;
     },
   },
