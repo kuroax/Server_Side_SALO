@@ -178,6 +178,9 @@ query MUST filter by `boutiqueId`. Resolvers receive `boutiqueId` from
 GraphQL arguments. Passing `boutiqueId` as a client argument is a security
 vulnerability that allows cross-tenant data access.
 
+`updateBoutique` and `setBoutiqueGlobalMode` reject ids that differ from the
+JWT `boutiqueId` (resolver check + tenant-scoped `findOneAndUpdate` in the service).
+
 ### Conversation mode (hybrid AI/human)
 
 `conversation.mode` controls per-conversation bot behavior:
@@ -213,7 +216,9 @@ instead of hardcoded constants.
 order when the owner confirms a deposit. It reads Meta credentials (`accessToken`,
 `phoneNumberId`) from the boutique document server-side — never from the request
 body — refuses `LOOKUP_BY_BOUTIQUE` when >1 pending payment exists, and returns the
-existing order instead of creating a duplicate.
+existing order instead of creating a duplicate. The duplicate guard + `createOrder`
+run in one `withTransaction`; the new order is then set `paid` + `confirmed`
+(LTV credit, inventory deduction).
 
 ### Onboarding
 
@@ -560,6 +565,9 @@ Meta webhook → n8n → POST /api/webhooks/whatsapp
   → n8n sends WhatsApp reply / images / bank account image / owner alert
 ```
 
+Dedup: if processing throws after `markMessageProcessed`, `unmarkMessageProcessed`
+rolls the marker back so the n8n retry is processed, not silently dropped.
+
 ---
 
 ## WhatsApp buffer system
@@ -601,7 +609,7 @@ All typeDefs use `extend type Query` / `extend type Mutation` — merged in `src
 
 Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm test`.
 
-- `src/__tests__/setup.ts` — in-memory MongoDB + env bootstrap; all external APIs mocked.
+- `src/__tests__/setup.ts` — in-memory single-node `MongoMemoryReplSet` (transactions) + env bootstrap; all external APIs mocked.
 - `src/__tests__/integration/webhook.test.ts` — 15 tests: gate, prospects, buffer, set-human-mode.
 - Fixtures/mocks: seeded boutique, n8n payloads, Claude/alert/image-search stubs.
 - Scripts: `test`, `test:watch`, `test:coverage`, `test:integration`.
@@ -624,7 +632,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | Conversation control system (ai/human/paused gate)                                                                  | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversationState` gate + new-prospect/receipt alerts live; owner auto-takeover detection pending    |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
-| `order.service.ts` fetchProductSnapshots queries products without `boutiqueId` (by `_id`) | Cross-tenant if a wrong `_id` is passed | **Open — half-done**: `boutiqueId` param is optional (falls back to `_id` when absent) — make it required and scope every snapshot query || n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Messages without `phoneNumberId` are dropped (early-return, no reply, WARN logged) — fallback shim removed                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
+| n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Messages without `phoneNumberId` are dropped (early-return, no reply, WARN logged) — fallback shim removed                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
 | Owner-reply detection not wired (coexistence handoff) | Owner + bot can reply at once; no auto-flip to `human` | Blocked — needs n8n to forward status/echo events with `recipient_id` |
 | `human_takeover_needed` / `prospect_stage_changed` alerts defined but never sent | Owner gets no handoff or stage-change notification | Wire call sites on escalate/pause and stage change |
 | `alert.service.ts` calls WhatsApp Graph API directly | Breaks "all Meta creds in n8n" invariant; token used in backend | Accepted for owner alerts; revisit if alerts move to n8n |
@@ -666,6 +674,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never leave `/owner-confirm` unauthenticated — it creates orders and sends WhatsApp
 - Never accept accessToken or phoneNumberId in the owner-confirm body — read them from the boutique
 - Never call createOrder in owner-confirm without first checking for an existing order scoped to the same customerId — guard against double-confirm
+- Never run the owner-confirm duplicate guard and `createOrder` outside one `withTransaction` session
 - Never read `boutique.accessToken` without `.select("+accessToken")` — it is select:false by default
 - Never send the bank image on first payment ask — confirm explicitly (PASO 2) first
 - Never cast a Mongoose lean document directly to `Record<string, unknown>` — cast through `unknown`
@@ -683,6 +692,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never accept `boutiqueId` as a GraphQL argument from the client — always
   read it from `context.user.boutiqueId` (signed into JWT at login)
 - Never expose `boutique.accessToken` in any GraphQL resolver response
+- Never let `updateBoutique`/`setBoutiqueGlobalMode` act on an id that differs from `context.user.boutiqueId`
 - Never put per-boutique config (showroomAddress, shippingPrice, etc.) back in
   env vars — it belongs in `boutique.businessInfo` in MongoDB
 - Never add `unique: true` directly on the `phone` or `instagramHandle` fields
