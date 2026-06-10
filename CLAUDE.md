@@ -207,6 +207,14 @@ calls `findBoutiqueByPhoneNumberIdWithToken()` to get the boutique document. All
 downstream calls (claude.service.ts, etc.) receive `boutique.businessInfo`
 instead of hardcoded constants.
 
+### Owner payment confirmation
+
+`ownerConfirm.service.ts` (`POST /api/webhooks/whatsapp/owner-confirm`) creates the
+order when the owner confirms a deposit. It reads Meta credentials (`accessToken`,
+`phoneNumberId`) from the boutique document server-side — never from the request
+body — refuses `LOOKUP_BY_BOUTIQUE` when >1 pending payment exists, and returns the
+existing order instead of creating a duplicate.
+
 ### Onboarding
 
 - **Tenant #1 (shopalogdl):** Manually onboarded. `seed-boutique.ts` creates the
