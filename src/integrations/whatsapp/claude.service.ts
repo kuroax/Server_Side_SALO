@@ -195,7 +195,7 @@ const SEARCH_PRODUCTS_TOOL: Anthropic.Tool = {
       keyword: {
         type: "string",
         description:
-          'Tipo de producto, nombre o marca. Ej: el tipo de artículo que busca el cliente.',
+          "Tipo de producto, nombre o marca. Ej: el tipo de artículo que busca el cliente.",
       },
       gender: {
         type: "string",
@@ -719,8 +719,9 @@ export const processMessage = async (
   // A flat +5s (not per-turn) because Claude API latency is dominated by
   // generation time, not context length. Per-turn growth adds 20s at MAX_TURNS
   // and makes WhatsApp UX unacceptably slow.
-  const requestTimeoutMs = context.requestTimeoutOverrideMs
-    ?? Math.min(BASE_TIMEOUT_MS + 5_000, MAX_TIMEOUT_MS);
+  const requestTimeoutMs =
+    context.requestTimeoutOverrideMs ??
+    Math.min(BASE_TIMEOUT_MS + 5_000, MAX_TIMEOUT_MS);
 
   const sanitizedMessage = incomingMessage.slice(0, 2000);
 
