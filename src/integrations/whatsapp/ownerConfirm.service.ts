@@ -89,6 +89,10 @@ async function sendWhatsAppText(
 export const handleOwnerConfirm = async (
   input: OwnerConfirmInput,
 ): Promise<OwnerConfirmResult> => {
+  // boutiqueId is supplied in the request body and authenticated
+  // only by the shared BUFFER_WEBHOOK_SECRET + ownerPhone match.
+  // Defense-in-depth improvement: resolve boutiqueId server-side
+  // from the ownerPhone instead of trusting the body value.
   const { boutiqueId, customerPhone, ownerPhone } = input;
 
   // Look up boutique credentials server-side — never accept tokens from the caller.
@@ -131,38 +135,29 @@ export const handleOwnerConfirm = async (
   const boutiqueObjectId = new mongoose.Types.ObjectId(boutiqueId);
 
   // 1. Find the pending payment record (boutique-scoped).
-  // If customerPhone is "LOOKUP_BY_BOUTIQUE", find the most recent pending
-  // payment for this boutique — used when the owner confirms via natural
-  // language ("ya confirmé el pago") without specifying the customer phone.
-  let pending: IPendingPayment | null = null;
-
-  if (customerPhone === "LOOKUP_BY_BOUTIQUE") {
-    // Guard: refuse when multiple pending payments exist for this boutique.
-    // Picking the wrong customer with real money is worse than returning an error.
-    const pendingCount = await PendingPaymentModel.countDocuments({
-      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
-    });
-    if (pendingCount > 1) {
-      logger.warn(
-        { boutiqueId, pendingCount },
-        "ownerConfirm — LOOKUP_BY_BOUTIQUE refused: multiple pending payments exist, specify customerPhone",
-      );
-      return {
-        status: "error",
-        reason: `Ambiguous: ${pendingCount} pending payments exist for this boutique. Reply with: CONFIRMAR PAGO {customerPhone}`,
-      };
-    }
-    pending = await PendingPaymentModel.findOne({
-      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
-    })
-      .sort({ createdAt: -1 })
-      .lean();
-  } else {
-    pending = await PendingPaymentModel.findOne({
-      boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
-      customerPhone,
-    }).lean();
+  // The owner MUST specify the customer phone. The previous "LOOKUP_BY_BOUTIQUE"
+  // sentinel auto-resolved to the single / most-recent pending payment when the
+  // phone was omitted — but with exactly one pending payment it picked blindly,
+  // and when two customers' deposits overlap in time that recency pick is a coin
+  // flip that can confirm the WRONG order (deducting inventory + crediting LTV
+  // for the wrong customer). Require an explicit phone instead, regardless of how
+  // many pending payments exist.
+  if (!customerPhone || customerPhone === "LOOKUP_BY_BOUTIQUE") {
+    logger.warn(
+      { boutiqueId },
+      "ownerConfirm — customerPhone required, refusing blind auto-resolve",
+    );
+    return {
+      status: "error",
+      reason:
+        "customerPhone required — cannot auto-resolve without it. Reply with: CONFIRMAR PAGO {customerPhone}",
+    };
   }
+
+  const pending: IPendingPayment | null = await PendingPaymentModel.findOne({
+    boutiqueId: new mongoose.Types.ObjectId(boutiqueId),
+    customerPhone,
+  }).lean();
 
   if (!pending) {
     logger.info(

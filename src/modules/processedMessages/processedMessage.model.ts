@@ -5,7 +5,17 @@ import mongoose, { Schema } from "mongoose";
 // E11000 (duplicate key), the message has already been processed and is skipped.
 // Records expire after DEDUP_TTL_SECONDS to prevent unbounded growth.
 
-const DEDUP_TTL_SECONDS = 300; // 5 minutes — matches prior image dedup window
+// 24 hours. Raised from 300s (5 min): a late n8n retry — delayed queue, backoff,
+// or a manual replay hours later — must still be caught by the dedup gate. At 5
+// minutes a retry past the window found no marker and reprocessed (duplicate
+// order / alert). 24h matches the conversation-buffer TTL and the WhatsApp 24h
+// session window.
+//
+// NOTE: changing this value does NOT require a manual index rebuild. Mongoose
+// reconciles the TTL `expireAfterSeconds` via collMod on the next connection
+// (and MongoDB applies it on the following TTL sweep, within ~60s), so existing
+// markers simply adopt the new expiry — no migration needed.
+const DEDUP_TTL_SECONDS = 86_400; // 24 hours
 
 const processedMessageSchema = new Schema(
   {

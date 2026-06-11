@@ -27,6 +27,11 @@ type ClothingAttributes = {
 export type ImageSearchResult = {
   reply: string;
   productImages: Array<{ url: string; caption?: string }>;
+  // true  → a persistent failure occurred (network, token, non-JSON vision
+  //         output) and the owner should be alerted.
+  // false → a clean result, including a genuine "0 matches" — the customer was
+  //         answered gracefully and no owner alert is warranted.
+  shouldEscalate: boolean;
 };
 
 // ─── Step 1 — Download image from Meta API ────────────────────────────────────
@@ -65,11 +70,14 @@ async function downloadMetaImage(
 
 // ─── Step 2 — Analyze clothing with Claude Vision ─────────────────────────────
 
+// Returns the RAW model text (not parsed). The caller owns the JSON.parse so a
+// non-JSON vision response can be distinguished from a genuine "0 matches" and
+// escalated with a specific message rather than the generic fallback.
 async function analyzeClothingImage(
   base64: string,
   mediaType: string,
   boutiqueId: string,
-): Promise<ClothingAttributes> {
+): Promise<string> {
   const response = await client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 256,
@@ -127,7 +135,7 @@ Respond ONLY with a JSON object — no markdown, no explanation, no text before 
     .map((b) => (b as { type: "text"; text: string }).text)
     .join("");
 
-  return JSON.parse(raw) as ClothingAttributes;
+  return raw;
 }
 
 // ─── Step 3 — Search MongoDB by extracted attributes ──────────────────────────
@@ -183,7 +191,25 @@ export async function searchProductsByImage(
     logger.info({ mediaId }, "Starting image-based product search");
 
     const { base64, mediaType } = await downloadMetaImage(mediaId, accessToken);
-    const attrs = await analyzeClothingImage(base64, mediaType, boutiqueId);
+    const raw = await analyzeClothingImage(base64, mediaType, boutiqueId);
+
+    // Parse the vision output separately so a non-JSON response is escalated with
+    // a specific message instead of looking like a genuine "0 matches".
+    let attrs: ClothingAttributes;
+    try {
+      attrs = JSON.parse(raw) as ClothingAttributes;
+    } catch {
+      logger.error(
+        { rawPreview: raw.slice(0, 200) },
+        "Image search \u2014 Claude returned non-JSON vision output",
+      );
+      return {
+        reply:
+          "No pude identificar el producto en la foto. \u00BFMe describes qu\u00E9 buscas? \uD83D\uDE4F\uD83C\uDFFB",
+        productImages: [],
+        shouldEscalate: true,
+      };
+    }
 
     logger.info({ attrs }, "Clothing attributes extracted from image");
 
@@ -195,6 +221,8 @@ export async function searchProductsByImage(
         reply:
           "Ahorita te confirmo eso bonita, dame un momento \uD83D\uDE4F\uD83C\uDFFB",
         productImages: [],
+        // Genuine 0-match \u2014 the customer was answered; no owner alert needed.
+        shouldEscalate: false,
       };
     }
 
@@ -230,13 +258,16 @@ export async function searchProductsByImage(
       "Image search completed",
     );
 
-    return { reply, productImages };
+    return { reply, productImages, shouldEscalate: false };
   } catch (err) {
+    // Persistent failure (Meta media download, token, network). Escalate so the
+    // owner is alerted — this is NOT a "0 matches" and must not look like one.
     logger.error({ err }, "Image search failed — returning safe fallback");
     return {
       reply:
         "Ahorita te confirmo eso bonita, dame un momento \uD83D\uDE4F\uD83C\uDFFB",
       productImages: [],
+      shouldEscalate: true,
     };
   }
 }

@@ -737,8 +737,12 @@ export async function assignCustomerToOrder(
 ): Promise<SafeOrder> {
   const { orderId, customerId } = assignCustomerSchema.parse(input);
 
+  // Tenant-scoped existence check — a customerId from another boutique must not
+  // be attachable to this boutique's order (cross-tenant link + foreign LTV
+  // credit). boutiqueId comes from the JWT (resolver), never from client input.
   const customerExists = await CustomerModel.exists({
     _id: new Types.ObjectId(customerId),
+    boutiqueId: new Types.ObjectId(boutiqueId),
   });
   if (!customerExists) throw new NotFoundError("Customer not found");
 

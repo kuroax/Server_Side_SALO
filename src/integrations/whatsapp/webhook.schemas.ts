@@ -119,6 +119,10 @@ export const imageSearchResultSchema = z.object({
   // Use productImageSchema instead of z.unknown() — validates URLs and prevents
   // malformed image objects from crashing the WhatsApp send node downstream.
   productImages: z.array(productImageSchema).default([]),
+  // true when the visual search hit a persistent failure (network/token/non-JSON
+  // vision output) — the webhook escalates so the owner is alerted. false (the
+  // default for legacy callers) on clean results, including genuine 0-matches.
+  shouldEscalate: z.boolean().default(false),
 });
 
 // ─── Message idempotency (text + image) ──────────────────────────────────────

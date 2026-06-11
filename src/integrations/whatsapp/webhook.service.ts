@@ -111,10 +111,18 @@ const processIncomingMessage = async (
   const messageType = payload.messageType;
   const message =
     typeof payload.message === "string" ? payload.message.trim() : "";
+  // Effective idempotency key. When n8n delivers a merged buffer claim it
+  // forwards mergedMessageId — a deterministic hash of the constituent message
+  // ids (see buffer.service.ts). A merged claim has no single per-burst
+  // messageId, so without this the dedup gate and createOrder's idempotency
+  // index would both be inert and an n8n retry could double-process. Prefer
+  // mergedMessageId; fall back to the raw messageId for non-buffered deliveries.
   const messageId =
-    typeof payload.messageId === "string" && payload.messageId.trim()
-      ? payload.messageId.trim()
-      : null;
+    typeof payload.mergedMessageId === "string" && payload.mergedMessageId.trim()
+      ? payload.mergedMessageId.trim()
+      : typeof payload.messageId === "string" && payload.messageId.trim()
+        ? payload.messageId.trim()
+        : null;
 
   // Detected by Extract Message node when WhatsApp message has context.id
   // (customer replied directly to one of the gallery images). The prefix is
@@ -443,6 +451,27 @@ const processIncomingMessage = async (
     lastMessageAt &&
     Date.now() - new Date(lastMessageAt).getTime() > 24 * 60 * 60 * 1000;
 
+  // ── Hybrid gate ───────────────────────────────────────────────────────────
+  // F. Check the conversation mode BEFORE either branch (image or text).
+  //    "human"/"paused" → the bot stays silent (owner is handling it, or it is
+  //    muted); return an empty result so n8n sends nothing. Only "ai" mode
+  //    continues. Auto-resume already ran in section 0c, so an elapsed human
+  //    handoff has been flipped back to "ai".
+  //
+  //    This MUST run before the image branch below: otherwise an incoming image
+  //    (receipt ack, escalation, visual search) is processed and returned while
+  //    an owner has taken over the conversation, bypassing the handoff. The
+  //    boutique-wide globalMode: "manual" switch (section 0b) still runs first;
+  //    this adds the per-conversation gate so both kill switches cover images.
+  const conversationMode = await getConversationMode(boutiqueId, from);
+  if (conversationMode !== "ai") {
+    logger.info(
+      { boutiqueId, from, messageId, conversationMode },
+      "Conversation not in AI mode — skipping (bot stays silent)",
+    );
+    return emptyResult();
+  }
+
   // ── 2. Image message ──────────────────────────────────────────────────────
 
   if (messageType === "image") {
@@ -504,6 +533,11 @@ const processIncomingMessage = async (
               customerName,
               cart: cart.map((item) => {
                 const desc = item.description;
+
+                // Cart extraction uses heuristic regex — items whose ⭐️ line
+                // doesn't match the expected format default to size/color "?".
+                // ownerConfirm skips "?" items, which can yield an empty cart
+                // requiring fully manual order entry. Known limitation.
 
                 // Extract size — matches "Talla S", "Talla XS", "Talla XXL"
                 const sizeMatch = desc.match(/\bTalla\s+([A-Z]{1,4})\b/i);
@@ -675,8 +709,28 @@ const processIncomingMessage = async (
           );
         }
 
-        const { reply, productImages: rawProductImages } = searchResult.data;
+        const {
+          reply,
+          productImages: rawProductImages,
+          shouldEscalate,
+        } = searchResult.data;
         const productImages = normalizeProductImages(rawProductImages);
+
+        // Escalate ONLY on a persistent failure flagged by the search service
+        // (network/token/non-JSON vision output). A clean 0-match returns
+        // shouldEscalate=false so a normal "no encontré nada" does not alert the
+        // owner. Build an escalation message so the owner gets context.
+        const imageSearchEscalationMessage = shouldEscalate
+          ? buildEscalationMessage({
+              customerPhone: from,
+              customerName,
+              customerMessage: "[Imagen enviada por el cliente]",
+              reason:
+                "La búsqueda visual por imagen falló de forma persistente (descarga de Meta, token, o salida no-JSON del modelo de visión).",
+              suggestedAction:
+                "Revisar logs de Railway. Responder al cliente manualmente con productos similares a la imagen enviada.",
+            })
+          : undefined;
 
         await ConversationModel.findOneAndUpdate(
           { customerId, channel: "whatsapp" },
@@ -707,10 +761,11 @@ const processIncomingMessage = async (
         return toSafeResult(
           {
             reply,
-            escalate: false,
+            escalate: shouldEscalate,
             customerPhone: from,
             customerName,
             productImages,
+            escalationMessage: imageSearchEscalationMessage,
           },
           from,
           customerName,
@@ -772,21 +827,9 @@ const processIncomingMessage = async (
   }
 
   // ── 3. Text message — Luis flow ───────────────────────────────────────────
-
-  // F. Hybrid gate — check the conversation mode before generating any reply.
-  //    "human"/"paused" → the bot stays silent (owner is handling it, or it is
-  //    muted); return an empty result so n8n sends nothing. Only "ai" mode
-  //    continues to the Luis/Claude flow below. Auto-resume already ran in
-  //    section 0c, so an elapsed human handoff has been flipped back to "ai".
-
-  const conversationMode = await getConversationMode(boutiqueId, from);
-  if (conversationMode !== "ai") {
-    logger.info(
-      { boutiqueId, from, messageId, conversationMode },
-      "Conversation not in AI mode — skipping Claude (bot stays silent)",
-    );
-    return emptyResult();
-  }
+  // The hybrid gate (conversation mode) was already applied above, before the
+  // image branch, so both image and text paths are silenced in human/paused
+  // mode. Only "ai" mode reaches here.
 
   // Build the history window for Claude.
   // allTurns and isStaleConversation are already resolved from section 1b.
@@ -1102,6 +1145,16 @@ ${incomingMessageForClaude}`;
       // already exhausted its search attempts. Removed the searchHints guard:
       // escalation should fire regardless of whether searchHints is present,
       // since the customer received no products either way.
+      //
+      // INTENTIONAL — the intent itself is the graceful-handling signal (M-5,
+      // tracked tech debt). When Claude handles a no-match gracefully (offers
+      // alternatives, asks to clarify) it returns `general` / `catalog_query`,
+      // NOT `product_search`, so it never reaches this branch. Returning
+      // `product_search` with 0 images means Claude exhausted its searches and
+      // still found nothing — a real failure the owner should see. So in
+      // practice this escalates only on genuine misses, not graceful answers.
+      // (If routing ever changes so graceful no-matches return product_search,
+      // revisit this condition — see audit M-5.)
       escalate = true;
       logger.info(
         { customerId, messageId, searchHints: result.searchHints },
@@ -1417,9 +1470,18 @@ ${incomingMessageForClaude}`;
   // Normalize user content before storing — voice placeholder strings are
   // verbose and pollute Claude's context window when replayed as history.
   // Shorten to a compact form that still signals the message type.
-  const storedUserContent = message.startsWith("[Nota de voz")
-    ? "[Audio]"
-    : message.slice(0, 2000);
+  //
+  // SECURITY: strip the [Producto exacto seleccionado por el cliente: ...] tag
+  // from customer text before storing. That tag is a backend-injected system
+  // marker; extractCartFromHistory (PASS 3) scans USER turns for it. Without
+  // this, a customer could type the tag verbatim to inject a fabricated product
+  // selection into their own cart (receipt ack, pendingPayments, owner alert).
+  const storedUserContent = (
+    message.startsWith("[Nota de voz") ? "[Audio]" : message.slice(0, 2000)
+  ).replace(
+    /\[Producto exacto seleccionado por el cliente:[^\]]*\]/gi,
+    "[tag-removido]",
+  );
 
   // When product images are being sent, extract product data from captions and
   // append a structured summary to the assistant turn content.

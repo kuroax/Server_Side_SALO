@@ -30,6 +30,13 @@ export const webhookPayloadSchema = z.object({
   from: z.string().default("").transform(trimOrEmpty),
   message: z.string().default("").transform(trimOrEmpty),
   messageId: z.string().optional().transform(trimToUndefined),
+  // Deterministic idempotency key produced by claimBuffer when several WhatsApp
+  // messages are merged into one webhook POST. n8n forwards it here from the
+  // buffer-claim response. When present, webhook.service.ts uses it as the
+  // effective messageId (dedup gate + createOrder sourceMessageId) so a retry of
+  // the merged claim is deduplicated — a single buffered message has no stable
+  // per-burst messageId otherwise. Falls back to messageId when absent.
+  mergedMessageId: z.string().optional().transform(trimToUndefined),
   messageType: z.unknown().transform(normalizeMessageType),
   imageMediaId: z
     .string()

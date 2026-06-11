@@ -97,6 +97,10 @@ export const sendOwnerAlert = async (payload: AlertPayload): Promise<void> => {
       }),
     });
 
+    // Failed alerts are not retried — the webhook must not block on
+    // alert delivery. Trade-off: a Meta rate limit or token issue
+    // silently drops the owner notification. Future improvement:
+    // persist failed alerts to a retry queue or dead-letter store.
     if (!response.ok) {
       const errorBody = await response.text().catch(() => "<unreadable>");
       logger.error(

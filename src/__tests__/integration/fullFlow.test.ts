@@ -404,9 +404,12 @@ describe('JOURNEY: Frida-style complete purchase flow', () => {
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     })
 
+    // The owner must pass the explicit customer phone — the blind
+    // "LOOKUP_BY_BOUTIQUE" auto-resolve was removed (M-4) because it could
+    // confirm the wrong deposit when two customers' payments overlap.
     const result = await handleOwnerConfirm({
       boutiqueId: JOURNEY_BOUTIQUE_ID,
-      customerPhone: 'LOOKUP_BY_BOUTIQUE',
+      customerPhone: JOURNEY_PHONE,
       ownerPhone: OWNER_PHONE,
     })
 

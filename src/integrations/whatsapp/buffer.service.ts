@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ConversationBufferModel } from "#/modules/conversations/conversation-buffer.model.js";
 import { logger } from "#/config/logger.js";
 import { env } from "#/config/env.js";
@@ -7,6 +8,14 @@ import { env } from "#/config/env.js";
 // env.ts coerces, validates as a positive integer, and defaults to 55000 —
 // no defensive parsing needed here.
 const ELAPSED_THRESHOLD_MS = env.WHATSAPP_BUFFER_ELAPSED_THRESHOLD_MS;
+
+// MongoDB duplicate-key (E11000) detector — used by the atomic buffer push to
+// recognize a unique-index collision on { from, phoneNumberId }.
+const isDuplicateKeyError = (err: unknown): boolean =>
+  typeof err === "object" &&
+  err !== null &&
+  "code" in err &&
+  (err as { code: number }).code === 11000;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +62,11 @@ export type ClaimResult =
       imageMediaId: string | null; // First non-null imageMediaId across all messages
       imageCaption: string; // Caption from the image message (or empty string)
       contactName: string | null; // Contact name from the first message that has one
+      // Deterministic idempotency key derived from the constituent messageIds.
+      // The webhook uses it for the dedup gate + createOrder sourceMessageId so
+      // an n8n retry of the same buffer claim is deduplicated. null only when no
+      // buffered message carried a messageId.
+      mergedMessageId: string | null;
     };
 
 // ─── Push ─────────────────────────────────────────────────────────────────────
@@ -85,47 +99,74 @@ export const pushToBuffer = async (
   const normalizedMessageId =
     typeof messageId === "string" && messageId.trim() ? messageId.trim() : null;
 
-  // Launch-week duplicate guard:
-  // if the same messageId is already buffered for this sender, no-op safely.
-  if (normalizedMessageId) {
-    const duplicateExists = await ConversationBufferModel.exists({
-      from,
-      phoneNumberId,
-      "messages.messageId": normalizedMessageId,
-    });
+  const newMessage = {
+    text: message,
+    messageId: normalizedMessageId,
+    messageType: messageType ?? "text",
+    imageMediaId: imageMediaId ?? null,
+    imageCaption: imageCaption ?? "",
+    contactName: contactName ?? "Cliente",
+    timestamp: timestamp ?? null,
+    executionId,
+  };
 
-    if (duplicateExists) {
+  // Atomic dedup-and-push. When the message carries an id, the filter only
+  // matches the buffer if that id is NOT already present, so two concurrent
+  // pushes of the SAME id cannot both append — closing the check-then-write
+  // race the prior exists()+push pattern had. The $ne condition is omitted when
+  // there is no id (nothing to dedup on).
+  const filter: Record<string, unknown> = { from, phoneNumberId };
+  if (normalizedMessageId) {
+    filter["messages.messageId"] = { $ne: normalizedMessageId };
+  }
+  const update = {
+    $push: { messages: newMessage },
+    $set: { lastSeen: new Date(), ownerExecutionId: executionId },
+  };
+
+  try {
+    await ConversationBufferModel.findOneAndUpdate(filter, update, {
+      upsert: true,
+      new: true,
+    });
+  } catch (err) {
+    // E11000 = a { from, phoneNumberId } buffer already exists but the $ne
+    // filter excluded it, so the upsert tried to insert a colliding document.
+    // Two causes: (a) this id is already buffered → genuine duplicate; or
+    // (b) a concurrent push created the doc with a DIFFERENT id and we raced
+    // its insert. Disambiguate, and for (b) retry as a plain conditional push
+    // (no upsert) so a legitimate distinct message is never dropped.
+    if (!isDuplicateKeyError(err)) throw err;
+
+    if (normalizedMessageId) {
+      const alreadyBuffered = await ConversationBufferModel.exists({
+        from,
+        phoneNumberId,
+        "messages.messageId": normalizedMessageId,
+      });
+      if (alreadyBuffered) {
+        logger.info(
+          { from, phoneNumberId, executionId, messageId: normalizedMessageId },
+          "Buffer push — duplicate messageId ignored",
+        );
+        return { ok: true, duplicate: true };
+      }
+    }
+
+    const retried = await ConversationBufferModel.findOneAndUpdate(
+      filter,
+      update,
+      { new: true },
+    );
+    if (!retried) {
+      // The id was buffered by another racer between our check and this retry.
       logger.info(
         { from, phoneNumberId, executionId, messageId: normalizedMessageId },
-        "Buffer push — duplicate messageId ignored",
+        "Buffer push — duplicate messageId ignored (post-retry)",
       );
-
       return { ok: true, duplicate: true };
     }
   }
-
-  await ConversationBufferModel.findOneAndUpdate(
-    { from, phoneNumberId },
-    {
-      $push: {
-        messages: {
-          text: message,
-          messageId: normalizedMessageId,
-          messageType: messageType ?? "text",
-          imageMediaId: imageMediaId ?? null,
-          imageCaption: imageCaption ?? "",
-          contactName: contactName ?? "Cliente",
-          timestamp: timestamp ?? null,
-          executionId,
-        },
-      },
-      $set: {
-        lastSeen: new Date(),
-        ownerExecutionId: executionId,
-      },
-    },
-    { upsert: true, new: true },
-  );
 
   logger.info(
     { from, phoneNumberId, executionId, messageId: normalizedMessageId, messageType },
@@ -224,6 +265,23 @@ export const claimBuffer = async (
   // going — the webhook will handle it as an image message via imageMediaId.
   const mergedMessage = mergedParts.join("\n").trim();
 
+  // ── Deterministic merged messageId ────────────────────────────────────────
+  // The claimed buffer collapses several WhatsApp messages into one webhook
+  // POST. That POST previously carried no messageId, so the dedup gate and
+  // createOrder's idempotency index were both inert — an n8n retry of the same
+  // claim could double-process (duplicate order / prospect bump / alert).
+  // Hash the SORTED constituent messageIds so the same set of buffered messages
+  // always yields the same id regardless of arrival order. null when no buffered
+  // message carried a messageId (nothing stable to key on).
+  const sortedIds = messages
+    .map((m) => m.messageId)
+    .filter((id): id is string => Boolean(id))
+    .sort()
+    .join("|");
+  const mergedMessageId = sortedIds
+    ? "buf_" + createHash("sha256").update(sortedIds).digest("hex").slice(0, 32)
+    : null;
+
   if (!mergedMessage && !aggregatedImageMediaId) {
     logger.info(
       { from, phoneNumberId, executionId },
@@ -254,5 +312,6 @@ export const claimBuffer = async (
     imageMediaId: aggregatedImageMediaId,
     imageCaption: aggregatedImageCaption,
     contactName: aggregatedContactName,
+    mergedMessageId,
   };
 };

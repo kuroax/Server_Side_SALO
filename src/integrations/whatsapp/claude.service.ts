@@ -234,6 +234,12 @@ const BROWSE_ALL_PRODUCTS_TOOL: Anthropic.Tool = {
 
 // ─── Safe fallback ────────────────────────────────────────────────────────────
 
+// Every Claude failure path (api_timeout, api_error, tool_loop_exhausted,
+// max_tokens, non_json, schema_fail) calls SAFE_FALLBACK(gender, true), so each
+// failure escalates to the owner (needs_human alert).
+// Trade-off: transient provider blips generate alert noise.
+// Future improvement: add a per-boutique circuit breaker or backoff counter
+// before escalating on repeated failures. (Tracked tech debt — M-6.)
 const SAFE_FALLBACK = (
   gender: "female" | "male" | "unknown" = "unknown",
   shouldEscalate = false,
