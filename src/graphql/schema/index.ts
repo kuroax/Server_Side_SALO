@@ -25,7 +25,15 @@ import { usageLogTypeDefs }  from '#/modules/usageLogs/usageLog.typeDefs.js';
 import { usageLogResolvers } from '#/modules/usageLogs/usageLog.resolvers.js';
 
 import { boutiqueTypeDefs }      from '#/modules/boutiques/boutique.typeDefs.js';
-import { agentConfigResolvers }  from '#/modules/boutiques/boutique.resolvers.js';
+import { boutiqueResolvers, agentConfigResolvers } from '#/modules/boutiques/boutique.resolvers.js';
+
+// Only the boutique(id) query is exposed in the SDL for now. boutiqueResolvers
+// also defines boutiques / updateBoutique / setBoutiqueGlobalMode, but those
+// have no typeDefs yet — merging them whole would trip
+// requireResolversToMatchSchema. Scope to the single query the owner app needs.
+const boutiqueQueryResolvers = {
+  Query: { boutique: boutiqueResolvers.Query.boutique },
+};
 
 // Root types — every module extends these via `extend type Query / Mutation`
 const rootTypeDefs = /* #graphql */ `
@@ -55,6 +63,7 @@ export const schema = makeExecutableSchema({
     conversationStateResolvers,
     prospectResolvers,
     usageLogResolvers,
+    boutiqueQueryResolvers,
     agentConfigResolvers,
   ],
 });
