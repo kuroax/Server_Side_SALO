@@ -90,16 +90,13 @@ src/
 │       ├── webhook.auth.ts           # requireBufferWebhookSecret middleware
 │       ├── webhook.controller.ts     # Express controller for Meta webhook
 │       ├── webhook.router.ts         # Mounts all /api/webhooks/whatsapp routes
-│       ├── webhook.service.ts        # Orchestrates full bot flow (1387 lines; helpers extracted)
-│       │                                 # Reads boutique by phoneNumberId on every request
-│       │                                 # Early-returns (logs warn, no reply) if phoneNumberId absent
-│       │                                 # Passes boutique.businessInfo to ClaudeContext
+│       ├── webhook.service.ts        # Orchestrates full bot flow (reads boutique by phoneNumberId;
+│       │                                 # early-returns if absent; passes businessInfo to ClaudeContext)
 │       ├── webhook.cart.ts           # Cart/history parsers (pure)
 │       ├── webhook.escalation.ts     # Escalation + reply builders (pure)
 │       ├── webhook.product-search.ts # Product/inventory query layer
 │       ├── webhook.schemas.ts        # Webhook I/O Zod schemas, toSafeResult, idempotency
-│       └── webhook.validation.ts     # Zod schemas for Meta payload
-│                                         # phoneNumberId field added (optional, from metadata)
+│       └── webhook.validation.ts     # Zod schemas for Meta payload (incl. phoneNumberId)
 ├── modules/
 │   ├── auth/                         # JWT auth, login, refresh, password
 │   ├── boutiques/                    # Multi-tenant: one doc per boutique/client
@@ -180,6 +177,8 @@ vulnerability that allows cross-tenant data access.
 
 `updateBoutique` and `setBoutiqueGlobalMode` reject ids that differ from the
 JWT `boutiqueId` (resolver check + tenant-scoped `findOneAndUpdate` in the service).
+`assignCustomerToOrder` scopes its customer-existence check by `boutiqueId` — a
+foreign `customerId` can no longer be linked to another tenant's order.
 
 ### Conversation mode (hybrid AI/human)
 
@@ -199,8 +198,9 @@ Per-conversation mode is preferred for targeted handoffs.
 Distinct from `conversation.mode`. The `conversationState` module (model
 `ConversationState`, keyed by `boutiqueId + customerPhone`) gates replies in
 `webhook.service.ts`: `human`/`paused` silence the bot, `ai` lets Luis reply. The
-handler runs `checkAndApplyAutoResume` then `getConversationMode` before any
-Claude call. Owner alerts use `alert.service.ts`, which calls the WhatsApp Graph
+handler runs `checkAndApplyAutoResume` then `getConversationMode` before BOTH the
+image and text branches, so human/paused silences images (receipts, visual search,
+escalations) too. Owner alerts use `alert.service.ts`, which calls the WhatsApp Graph
 API directly — a deliberate exception (owner alerts only) to the no-direct-Meta rule.
 
 ### Webhook lookup
@@ -215,8 +215,8 @@ instead of hardcoded constants.
 `ownerConfirm.service.ts` (`POST /api/webhooks/whatsapp/owner-confirm`) creates the
 order when the owner confirms a deposit. It reads Meta credentials (`accessToken`,
 `phoneNumberId`) from the boutique document server-side — never from the request
-body — refuses `LOOKUP_BY_BOUTIQUE` when >1 pending payment exists, and returns the
-existing order instead of creating a duplicate. The duplicate guard + `createOrder`
+body — requires an explicit `customerPhone` (the `LOOKUP_BY_BOUTIQUE` auto-resolve was
+removed), and returns the existing order instead of a duplicate. The duplicate guard + `createOrder`
 run in one `withTransaction`; the new order is then set `paid` + `confirmed`
 (LTV credit, inventory deduction).
 
@@ -457,26 +457,14 @@ BANK_ACCOUNT_IMAGE_URL            # Cloudinary URL for bank account image card
 **Optional — Embedded Signup (add before ES goes live):**
 
 ```
-META_APP_ID        # Meta App ID: 2300378030444599
-                   # Required for Embedded Signup token exchange endpoint
-META_APP_SECRET    # From App Dashboard > Basic settings
-                   # Used to exchange the 30s code for a long-lived boutique token
-SYSTEM_USER_TOKEN  # System User SALO (ID: 61577448959274) master token
-                   # Used for platform-level Meta API calls (subscribe WABA, etc.)
+META_APP_ID        # Meta App ID: 2300378030444599 — ES token exchange endpoint
+META_APP_SECRET    # App Dashboard > Basic — exchanges 30s code for boutique token
+SYSTEM_USER_TOKEN  # System User SALO (ID: 61577448959274) — platform calls (subscribe WABA)
 ```
 
-**Per-boutique credentials (now in MongoDB, not env vars):**
-
-After `seed-boutique.ts` runs, these values live in the `boutiques` collection per
-tenant. The env vars below are FALLBACK for the first boutique only:
-
-```
-WHATSAPP_ACCESS_TOKEN   # Fallback token for tenant #1 (Axel) only
-BANK_ACCOUNT_IMAGE_URL  # Fallback bank image URL for tenant #1 only
-```
-
-For all boutiques added via Embedded Signup, credentials live exclusively
-in `boutique.accessToken` and `boutique.bankAccountImageUrl`.
+**Per-boutique credentials live in MongoDB, not env vars.** `WHATSAPP_ACCESS_TOKEN`
+and `BANK_ACCOUNT_IMAGE_URL` are FALLBACK for tenant #1 only; Embedded Signup
+boutiques use `boutique.accessToken` / `boutique.bankAccountImageUrl` exclusively.
 
 **CORS_ORIGINS** is computed from CORS_ORIGIN at startup:
 
@@ -565,8 +553,12 @@ Meta webhook → n8n → POST /api/webhooks/whatsapp
   → n8n sends WhatsApp reply / images / bank account image / owner alert
 ```
 
-Dedup: if processing throws after `markMessageProcessed`, `unmarkMessageProcessed`
-rolls the marker back so the n8n retry is processed, not silently dropped.
+Dedup: `processedMessages` TTL = 24h (raised from 5m to catch late retries). If
+processing throws after `markMessageProcessed`, `unmarkMessageProcessed` rolls the
+marker back so the n8n retry is processed, not dropped. Buffered claims carry a
+deterministic `mergedMessageId` (`"buf_"` + SHA-256 of SORTED constituent messageIds)
+from `claimBuffer`, forwarded n8n → `webhook.service.ts`; the dedup gate and
+`createOrder` `sourceMessageId` key off it, so merged retries dedup end to end.
 
 ---
 
@@ -644,7 +636,6 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `[payment_info_sent]` now fires at PASO 2 (after confirmation) | Early receipt not context-detected | Rely on caption |
 | `owner-confirm` needs n8n to parse "CONFIRMAR PAGO" + send secret/creds | Unusable until n8n wired | Wire n8n command parsing |
 | Receipt without orderHints stores cart size/color as `?` | owner-confirm can't resolve → manual order | Capture full variant on receipt |
-| LOOKUP_BY_BOUTIQUE still used when owner omits phone | Ambiguous if >1 pending (now refused) but single-pending silently picks | Always pass customerPhone in CONFIRMAR PAGO command |
 | Receipt color/size parser is heuristic | Wrong/empty color fails inventory match | Capture variant at source |
 | Eval hits real `MONGODB_URI` + spends real Claude credits | Prod connection / cost | Gate behind test DB/flag |
 | `MOCK_SEARCH_PRODUCTS` ignores keyword (always Jersey) | Weak search coverage | Make it keyword-aware |
@@ -700,6 +691,8 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never remove the `JSON_REMINDER` injection from claude.service.ts
 - Never register a second Mongoose model named `"Conversation"` — the gate model is `ConversationState`
 - Never blanket short-circuit image messages — preserve visual search and gallery-reply flows
+- Never process the image branch before checking `getConversationMode` — the mode gate must run before both image and text paths
+- Never generate a `mergedMessageId` from unsorted messageIds — sort before hashing to keep the ID stable across concurrent pushes
 - Never import from webhook.service.ts directly — use the focused sub-modules (webhook.cart, webhook.escalation, webhook.schemas, webhook.product-search) for their respective concerns
 - Never let `sendOwnerAlert` throw or log `accessToken` — alerts must never break the webhook flow
 - Never read conversationState mode without first running `checkAndApplyAutoResume`

@@ -33,6 +33,10 @@ export type SafeUser = {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  // Tenant display info — populated by login/register/me from the boutique doc.
+  // Null when the boutique cannot be resolved.
+  boutiqueName?: string | null;
+  boutiqueSlug?: string | null;
 };
 
 // ─── Auth Payloads ────────────────────────────────────────────────────────────

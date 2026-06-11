@@ -22,6 +22,7 @@ import {
   verifyRefreshToken,
   toAuthUser,
 } from '#/modules/auth/auth.utils.js';
+import { findBoutiqueById } from '#/modules/boutiques/boutique.service.js';
 import { logger } from '#/config/logger.js';
 import {
   AuthenticationError,
@@ -107,9 +108,15 @@ export const register = async (
     'User registered',
   );
 
+  const boutique = await findBoutiqueById(user.boutiqueId.toString());
+
   return {
     ...generateTokens(payload),
-    user: toAuthUser(user),
+    user: {
+      ...toAuthUser(user),
+      boutiqueName: boutique?.name ?? null,
+      boutiqueSlug: boutique?.slug ?? null,
+    },
   };
 };
 
@@ -146,10 +153,16 @@ export const login = async (input: unknown): Promise<AuthPayload> => {
 
   logger.info({ userId: user._id, role: user.role, boutiqueId: user.boutiqueId }, 'User logged in');
 
+  const boutique = await findBoutiqueById(user.boutiqueId.toString());
+
   return {
     accessToken,
     refreshToken,
-    user: toAuthUser(user),
+    user: {
+      ...toAuthUser(user),
+      boutiqueName: boutique?.name ?? null,
+      boutiqueSlug: boutique?.slug ?? null,
+    },
   };
 };
 
