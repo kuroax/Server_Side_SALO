@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   BOUTIQUE_STATUS,
+  BOUTIQUE_ONBOARDING_STATUS,
   CONVERSATION_MODE,
 } from "#/modules/boutiques/boutique.types.js";
 
@@ -15,6 +16,17 @@ const boutiqueStatusEnum = z.enum([
 const conversationModeEnum = z.enum([
   CONVERSATION_MODE.AUTO,
   CONVERSATION_MODE.MANUAL,
+]);
+
+const boutiqueOnboardingStatusEnum = z.enum([
+  BOUTIQUE_ONBOARDING_STATUS.CREATED,
+  BOUTIQUE_ONBOARDING_STATUS.BUSINESS_CONFIGURED,
+  BOUTIQUE_ONBOARDING_STATUS.AI_CONFIGURED,
+  BOUTIQUE_ONBOARDING_STATUS.WHATSAPP_PENDING,
+  BOUTIQUE_ONBOARDING_STATUS.WHATSAPP_CONNECTED,
+  BOUTIQUE_ONBOARDING_STATUS.TESTING,
+  BOUTIQUE_ONBOARDING_STATUS.ACTIVE,
+  BOUTIQUE_ONBOARDING_STATUS.SUSPENDED,
 ]);
 
 // ─── Business info ────────────────────────────────────────────────────────────
@@ -95,6 +107,7 @@ export const updateBoutiqueSchema = z
     businessInfo: businessInfoSchema.partial().optional(),
     globalMode: conversationModeEnum.optional(),
     status: boutiqueStatusEnum.optional(),
+    onboardingStatus: boutiqueOnboardingStatusEnum.optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     error: "At least one field must be provided",
