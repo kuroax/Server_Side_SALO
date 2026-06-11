@@ -62,9 +62,8 @@ export const embeddedSignupPageHandler = (
   }
 
   const boutiqueId = req.query["boutiqueId"] as string | undefined;
-  const token = req.query["token"] as string | undefined;
 
-  if (!boutiqueId || !token) {
+  if (!boutiqueId) {
     res
       .status(400)
       .type("text/html")
@@ -76,11 +75,11 @@ export const embeddedSignupPageHandler = (
     return;
   }
 
-  // Encode boutiqueId and token in the state param so /boutique-callback
-  // can retrieve them without needing a server-side session.
-  const state = Buffer.from(JSON.stringify({ boutiqueId, token })).toString(
-    "base64url",
-  );
+  // The JWT is no longer passed in the URL. The React Native WebView injects it
+  // post-load via window.__SALO_TOKEN__, and the landing page script builds the
+  // base64url state param client-side. So we only construct the OAuth base URL
+  // here (without the state param) and let the page append &state=... once the
+  // token is available.
   const backendUrl =
     SALO_BACKEND_URL ?? "https://serversidesalo-production.up.railway.app";
   const redirectUri = `${backendUrl}/boutique-callback`;
@@ -94,7 +93,6 @@ export const embeddedSignupPageHandler = (
     "scope",
     "whatsapp_business_management,whatsapp_business_messaging",
   );
-  oauthUrl.searchParams.set("state", state);
   oauthUrl.searchParams.set("display", "page");
   oauthUrl.searchParams.set(
     "extras",
@@ -105,9 +103,8 @@ export const embeddedSignupPageHandler = (
     }),
   );
 
-  // Render a minimal landing page that auto-redirects to Facebook.
-  // The short delay lets the WebView render before navigating so the
-  // user sees the SALO branded page briefly instead of a blank flash.
+  // Render a minimal landing page that auto-redirects to Facebook once the
+  // WebView-injected token is available.
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
@@ -115,7 +112,7 @@ export const embeddedSignupPageHandler = (
   res
     .status(200)
     .type("text/html")
-    .send(renderLandingPage(oauthUrl.toString()));
+    .send(renderLandingPage(oauthUrl.toString(), boutiqueId));
 };
 
 // ─── Callback handler ─────────────────────────────────────────────────────────
@@ -343,9 +340,13 @@ export const embeddedSignupCallbackHandler = async (
 
 // ─── HTML templates ───────────────────────────────────────────────────────────
 
-// Landing page — shows SALO branding briefly then auto-navigates to Facebook.
-function renderLandingPage(oauthUrl: string): string {
-  const safeUrl = oauthUrl.replace(/'/g, "\'");
+// Landing page — shows SALO branding then auto-navigates to Facebook once the
+// React Native WebView injects the JWT via window.__SALO_TOKEN__. The state
+// param (base64url of {boutiqueId, token}) is built client-side so the token
+// never travels in the URL of this page.
+function renderLandingPage(oauthBaseUrl: string, boutiqueId: string): string {
+  const safeOauthBaseUrl = oauthBaseUrl.replace(/'/g, "\'");
+  const safeBoutiqueId = boutiqueId.replace(/'/g, "\'");
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -398,11 +399,49 @@ function renderLandingPage(oauthUrl: string): string {
     <p class="loading-text">Redirigiendo a Facebook…</p>
   </main>
   <script>
-    // Redirect immediately — the brief branded page is shown while the
-    // WebView navigates to Facebook's OAuth flow.
-    setTimeout(function() {
-      window.location.href = '${safeUrl}';
-    }, 800);
+    (function() {
+      var BOUTIQUE_ID = '${safeBoutiqueId}';
+      var BASE_OAUTH_URL = '${safeOauthBaseUrl}';
+      var MAX_WAIT_MS = 5000;
+      var POLL_INTERVAL_MS = 50;
+      var waited = 0;
+      var poll;
+
+      function toBase64Url(str) {
+        return btoa(str)
+          .replace(/\\+/g, '-')
+          .replace(/\\//g, '_')
+          .replace(/=/g, '');
+      }
+
+      function doRedirect(token) {
+        var state = toBase64Url(JSON.stringify({
+          boutiqueId: BOUTIQUE_ID,
+          token: token
+        }));
+        window.location.href = BASE_OAUTH_URL +
+          '&state=' + encodeURIComponent(state);
+      }
+
+      window.__SALO_READY__ = function(token) {
+        if (poll) clearInterval(poll);
+        doRedirect(token);
+      };
+
+      poll = setInterval(function() {
+        waited += POLL_INTERVAL_MS;
+        if (window.__SALO_TOKEN__) {
+          clearInterval(poll);
+          doRedirect(window.__SALO_TOKEN__);
+        } else if (waited >= MAX_WAIT_MS) {
+          clearInterval(poll);
+          document.body.innerHTML =
+            '<div style="color:#ff6b6b;text-align:center;padding:40px;' +
+            'font-family:system-ui">' +
+            'Error de sesión — vuelve a la app e intenta de nuevo.</div>';
+        }
+      }, POLL_INTERVAL_MS);
+    })();
   </script>
 </body>
 </html>`;

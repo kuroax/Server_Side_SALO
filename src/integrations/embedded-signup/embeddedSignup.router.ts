@@ -11,7 +11,9 @@ const router = Router();
 // Serves a branded landing page that immediately redirects the WebView to
 // Facebook's OAuth URL. No auth required — opened by the React Native WebView
 // before the user has interacted with the SALO app in this context.
-// Query params: boutiqueId (ObjectId), token (JWT access token)
+// Query params: boutiqueId (ObjectId)
+// Token is injected post-load via window.__SALO_TOKEN__ by
+// the React Native WebView's injectedJavaScript.
 router.get("/boutique-signup", embeddedSignupPageHandler);
 
 // ─── GET /boutique-callback ────────────────────────────────────────────────────
