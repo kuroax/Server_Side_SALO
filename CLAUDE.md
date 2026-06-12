@@ -224,9 +224,10 @@ run in one `withTransaction`; the new order is then set `paid` + `confirmed`
 
 - **Tenant #1 (shopalogdl):** Manually onboarded. `seed-boutique.ts` creates the
   boutique doc and backfills `boutiqueId` on all existing docs.
-- **Subsequent tenants:** Onboarded via WhatsApp Embedded Signup (in development).
-  Token exchange endpoint: `POST /api/boutiques/signup`. Requires `META_APP_ID`
-  and `META_APP_SECRET` in Railway env vars.
+- **Subsequent tenants:** WhatsApp Embedded Signup. `GET /boutique-signup` serves a page that reads
+  the WebView-injected `window.__SALO_TOKEN__` (`injectedJavaScript`), builds a base64url `state`
+  client-side, then redirects to Facebook OAuth. `GET /boutique-callback` decodes `state`.
+  `POST /api/boutiques/signup` = legacy fallback.
 
 ---
 
@@ -621,7 +622,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `extractCartFromHistory` is regex-driven                                                                             | Any prompt change silently regresses receipt acks                                                                               | Deferred — structural fix post-demo                                                                                    |
 | `updateProduct` missing inventory cleanup on variant removal                                                         | Orphaned inventory records                                                                                                      | Deferred                                                                                                               |
 | Server-side pagination on orders/customers/products                                                                  | Fixed slice limits at scale                                                                                                     | Deferred                                                                                                               |
-| Conversation control system (ai/human/paused gate)                                                                  | Owner and bot can reply simultaneously                                                                                          | **In progress** — `conversationState` gate + new-prospect/receipt alerts live; owner auto-takeover detection pending    |
+| Conversation control (ai/human/paused gate) | Owner+bot can reply at once | gate+alerts live; auto-takeover pending |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
 | n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Messages without `phoneNumberId` are dropped (early-return, no reply, WARN logged) — fallback shim removed                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
@@ -703,3 +704,4 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never silence a SAFE_FALLBACK — all failure paths (timeout, api_error, max_tokens, non_json, schema_fail, loop_exhausted) must escalate to the owner
 - Never answer size/talla questions in plain text — always JSON (intent: general)
 - Never confirm or perform an order cancellation — always escalate (intent: needs_human)
+- Never put the signup JWT in a `/boutique-signup`/`/boutique-callback` URL — use the injected `window.__SALO_TOKEN__` via base64url `state`
