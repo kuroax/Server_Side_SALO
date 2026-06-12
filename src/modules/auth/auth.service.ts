@@ -5,6 +5,9 @@ import {
   registerSchema,
   refreshTokenSchema,
   changePasswordSchema,
+  setNotificationsEnabledSchema,
+  registerPushTokenSchema,
+  unregisterPushTokenSchema,
 } from '#/modules/auth/auth.validation.js';
 import type {
   AuthPayload,
@@ -27,6 +30,7 @@ import { logger } from '#/config/logger.js';
 import {
   AuthenticationError,
   AuthorizationError,
+  NotFoundError,
   ValidationError,
 } from '#/shared/errors/index.js';
 
@@ -262,7 +266,7 @@ export const listUsers = async (
     _id: { $ne: callerId }, // exclude the caller from the list
   })
     .sort({ createdAt: 1 })
-    .lean<{ _id: { toString(): string }; boutiqueId: { toString(): string }; username: string; email?: string; role: Role; isActive: boolean; createdAt: Date; updatedAt: Date }[]>();
+    .lean<{ _id: { toString(): string }; boutiqueId: { toString(): string }; username: string; email?: string; role: Role; isActive: boolean; notificationsEnabled: boolean; createdAt: Date; updatedAt: Date }[]>();
 
   return users.map((u) => ({
     id:         u._id.toString(),
@@ -271,6 +275,7 @@ export const listUsers = async (
     email:      u.email ?? undefined,
     role:       u.role,
     isActive:   u.isActive,
+    notificationsEnabled: u.notificationsEnabled ?? true,
     createdAt:  u.createdAt.toISOString(),
     updatedAt:  u.updatedAt.toISOString(),
   }));
@@ -313,6 +318,111 @@ export const deactivateUser = async (
   await UserModel.findByIdAndUpdate(targetId, { isActive: false });
 
   logger.info({ targetId, callerId }, 'User deactivated');
+
+  return true;
+};
+
+// ─── Set Notifications Enabled ────────────────────────────────────────────────
+// Toggles the caller's own push-notification preference. Scoped by
+// { _id, boutiqueId } per the tenant-isolation pattern — a user can only ever
+// mutate their own record within their own boutique.
+
+export const setNotificationsEnabled = async (
+  userId: string,
+  boutiqueId: string,
+  input: unknown,
+): Promise<boolean> => {
+  const validated = setNotificationsEnabledSchema.parse(input);
+
+  const result = await UserModel.updateOne(
+    { _id: userId, boutiqueId: new Types.ObjectId(boutiqueId) },
+    { $set: { notificationsEnabled: validated.enabled } },
+  );
+
+  if (result.matchedCount === 0) {
+    throw new NotFoundError('User not found');
+  }
+
+  return true;
+};
+
+// ─── Register Push Token ──────────────────────────────────────────────────────
+// Upsert-by-token: if the device token already exists on the user, refresh its
+// platform/updatedAt in place; otherwise append a new entry. This keeps the
+// same device from accumulating duplicates across reinstalls / token refreshes.
+// Scoped by { _id, boutiqueId } for tenant isolation.
+
+export const registerPushToken = async (
+  userId: string,
+  boutiqueId: string,
+  input: unknown,
+): Promise<boolean> => {
+  const validated = registerPushTokenSchema.parse(input);
+  const boutiqueObjectId = new Types.ObjectId(boutiqueId);
+  const now = new Date();
+
+  // Pass 1: token already present → update it in place (positional operator).
+  const updateExisting = await UserModel.updateOne(
+    {
+      _id: userId,
+      boutiqueId: boutiqueObjectId,
+      'pushTokens.token': validated.token,
+    },
+    {
+      $set: {
+        'pushTokens.$.platform': validated.platform,
+        'pushTokens.$.updatedAt': now,
+      },
+    },
+  );
+
+  if (updateExisting.matchedCount > 0) {
+    return true;
+  }
+
+  // Pass 2: token not present → append a new entry. Matching only on
+  // { _id, boutiqueId } means a missing match here signals the user itself
+  // does not exist (within this tenant), which is a NotFoundError.
+  const appendNew = await UserModel.updateOne(
+    { _id: userId, boutiqueId: boutiqueObjectId },
+    {
+      $push: {
+        pushTokens: {
+          token: validated.token,
+          platform: validated.platform,
+          updatedAt: now,
+        },
+      },
+    },
+  );
+
+  if (appendNew.matchedCount === 0) {
+    throw new NotFoundError('User not found');
+  }
+
+  return true;
+};
+
+// ─── Unregister Push Token ────────────────────────────────────────────────────
+// Removes a device token from the caller (e.g. on logout / uninstall). Scoped by
+// { _id, boutiqueId }. Idempotent — removing an absent token is not an error as
+// long as the user exists.
+
+export const unregisterPushToken = async (
+  userId: string,
+  boutiqueId: string,
+  input: unknown,
+): Promise<boolean> => {
+  const validated = unregisterPushTokenSchema.parse(input);
+
+  const result = await UserModel.updateOne(
+    { _id: userId, boutiqueId: new Types.ObjectId(boutiqueId) },
+    { $pull: { pushTokens: { token: validated.token } } },
+  );
+
+  if (result.matchedCount === 0) {
+    throw new NotFoundError('User not found');
+  }
 
   return true;
 };

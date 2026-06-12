@@ -69,6 +69,7 @@ export const toAuthUser = (user: IUserDocument): SafeUser => ({
   email: user.email,
   role: user.role,
   isActive: user.isActive,
+  notificationsEnabled: user.notificationsEnabled,
   createdAt: user.createdAt instanceof Date
     ? user.createdAt.toISOString()
     : new Date(user.createdAt).toISOString(),

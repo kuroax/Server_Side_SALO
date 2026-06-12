@@ -48,6 +48,24 @@ const userSchema = new Schema<IUserWithTimestamps>(
       type: Boolean,
       default: true,
     },
+    notificationsEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    // Internal device push tokens — select:false so they never ride along on a
+    // user read (same treatment as `password`). Never mapped into SafeUser/SDL.
+    pushTokens: {
+      type: [
+        {
+          _id: false,
+          token: { type: String, required: true },
+          platform: { type: String, enum: ['ios', 'android'], required: true },
+          updatedAt: { type: Date, default: Date.now },
+        },
+      ],
+      select: false,
+      default: [],
+    },
   },
   {
     timestamps: true,

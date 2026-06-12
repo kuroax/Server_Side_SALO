@@ -18,6 +18,7 @@ export const authTypeDefs = `
     email: String
     role: Role!
     isActive: Boolean!
+    notificationsEnabled: Boolean!
     createdAt: String!
     updatedAt: String!
     # Tenant display info — only populated by the me query (loaded from the
@@ -64,6 +65,12 @@ export const authTypeDefs = `
     confirmPassword: String!
   }
 
+  # platform must be "ios" or "android" — validated server-side via Zod.
+  input RegisterPushTokenInput {
+    token: String!
+    platform: String!
+  }
+
   # ─── Queries ────────────────────────────────────────────────────────────────
 
   extend type Query {
@@ -79,6 +86,12 @@ export const authTypeDefs = `
     login(input: LoginInput!): AuthPayload!
     refreshToken(input: RefreshTokenInput!): RefreshPayload!
     changePassword(input: ChangePasswordInput!): Boolean!
+    # Toggles the caller's own push-notification preference.
+    setNotificationsEnabled(enabled: Boolean!): Boolean!
+    # Registers/refreshes a device push token for the caller (upsert by token).
+    registerPushToken(input: RegisterPushTokenInput!): Boolean!
+    # Removes a device push token from the caller (e.g. on logout/uninstall).
+    unregisterPushToken(token: String!): Boolean!
     logout: Boolean!
     # Soft-deletes a team member (sets isActive: false). Owner and admin only.
     # Cannot deactivate yourself or the owner account.

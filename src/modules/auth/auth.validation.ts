@@ -84,3 +84,30 @@ export const changePasswordSchema = z
   });
 
 export type ChangePasswordSchema = z.infer<typeof changePasswordSchema>;
+
+// ─── Notification Preference ──────────────────────────────────────────────────
+
+export const setNotificationsEnabledSchema = z.object({
+  enabled: z.boolean(),
+});
+
+export type SetNotificationsEnabledSchema = z.infer<
+  typeof setNotificationsEnabledSchema
+>;
+
+// ─── Push Tokens ──────────────────────────────────────────────────────────────
+
+export const registerPushTokenSchema = z.object({
+  token: z.string().min(1, 'Push token is required'),
+  platform: z.enum(['ios', 'android'], { message: 'Invalid platform' }),
+});
+
+export type RegisterPushTokenSchema = z.infer<typeof registerPushTokenSchema>;
+
+export const unregisterPushTokenSchema = z.object({
+  token: z.string().min(1, 'Push token is required'),
+});
+
+export type UnregisterPushTokenSchema = z.infer<
+  typeof unregisterPushTokenSchema
+>;

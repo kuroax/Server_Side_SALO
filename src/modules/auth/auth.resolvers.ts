@@ -7,6 +7,9 @@ import {
   getCurrentUser,
   listUsers,
   deactivateUser,
+  setNotificationsEnabled,
+  registerPushToken,
+  unregisterPushToken,
 } from '#/modules/auth/auth.service.js';
 import { requireAuth, requireRoles } from '#/shared/utils/auth.guards.js';
 import { ROLES, type Role } from '#/modules/auth/auth.types.js';
@@ -90,6 +93,45 @@ export const authResolvers = {
       requireAuth(context);
       await changePassword(context.user!.id, input);
       return true;
+    },
+
+    setNotificationsEnabled: async (
+      _parent: unknown,
+      { enabled }: { enabled: boolean },
+      context: GraphQLContext,
+    ) => {
+      requireAuth(context);
+      return setNotificationsEnabled(
+        context.user!.id,
+        context.user!.boutiqueId,
+        { enabled },
+      );
+    },
+
+    registerPushToken: async (
+      _parent: unknown,
+      { input }: { input: Record<string, unknown> },
+      context: GraphQLContext,
+    ) => {
+      requireAuth(context);
+      return registerPushToken(
+        context.user!.id,
+        context.user!.boutiqueId,
+        input,
+      );
+    },
+
+    unregisterPushToken: async (
+      _parent: unknown,
+      { token }: { token: string },
+      context: GraphQLContext,
+    ) => {
+      requireAuth(context);
+      return unregisterPushToken(
+        context.user!.id,
+        context.user!.boutiqueId,
+        { token },
+      );
     },
 
     logout: async (

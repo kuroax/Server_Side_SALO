@@ -12,6 +12,16 @@ export const ROLES = {
 
 export type Role = (typeof ROLES)[keyof typeof ROLES];
 
+// ─── Push tokens ──────────────────────────────────────────────────────────────
+
+export type PushPlatform = 'ios' | 'android';
+
+export type PushToken = {
+  token: string;
+  platform: PushPlatform;
+  updatedAt: Date;
+};
+
 // ─── User ─────────────────────────────────────────────────────────────────────
 
 export type IUser = {
@@ -21,6 +31,10 @@ export type IUser = {
   password: string;
   role: Role;
   isActive: boolean;
+  notificationsEnabled: boolean;
+  // select:false — internal device tokens, never returned to the client (same
+  // treatment as `password`). Not part of SafeUser.
+  pushTokens: PushToken[];
 };
 
 // createdAt and updatedAt serialized as ISO strings before returning to client
@@ -31,6 +45,7 @@ export type SafeUser = {
   email?: string;
   role: Role;
   isActive: boolean;
+  notificationsEnabled: boolean;
   createdAt: string;
   updatedAt: string;
   // Tenant display info — populated by login/register/me from the boutique doc.
