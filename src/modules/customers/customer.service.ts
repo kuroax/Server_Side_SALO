@@ -364,3 +364,36 @@ export const activateCustomer = async (
 
   return toCustomerResponse(doc);
 };
+
+// ─── Batch name lookup (DataLoader-backed) ──────────────────────────────────────
+// Resolves many customerIds to their display names in ONE tenant-scoped query.
+// Backs the per-request customerNameLoader (see graphql/context.ts) so the Order
+// GraphQL type can expose customerName without the frontend depending on a capped
+// LIST_CUSTOMERS page. boutiqueId comes from the JWT context — NEVER from order
+// data — so a foreign customerId can never resolve a cross-tenant name.
+// Non-ObjectId strings are skipped (never queried); missing/soft-deleted/foreign
+// ids simply have no Map entry, which the loader surfaces as null.
+export const findCustomerNamesByIds = async (
+  ids: readonly string[],
+  boutiqueId: string,
+): Promise<Map<string, string>> => {
+  const objectIds = ids
+    .filter((id) => Types.ObjectId.isValid(id))
+    .map((id) => new Types.ObjectId(id));
+
+  const result = new Map<string, string>();
+  if (objectIds.length === 0) return result;
+
+  const docs = await CustomerModel.find({
+    _id: { $in: objectIds },
+    boutiqueId: new Types.ObjectId(boutiqueId),
+  })
+    .select('_id name')
+    .lean<{ _id: Types.ObjectId; name: string }[]>();
+
+  for (const doc of docs) {
+    result.set(doc._id.toString(), doc.name);
+  }
+
+  return result;
+};

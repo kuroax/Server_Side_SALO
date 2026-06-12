@@ -29,6 +29,23 @@ const ORDER_DELETE_ROLES: Role[] = ['owner'];
 // ─── Resolvers ────────────────────────────────────────────────────────────────
 
 export const orderResolvers = {
+  // ─── Field resolvers ──────────────────────────────────────────────────────────
+  // customerName is resolved per-request via the batched DataLoader so the
+  // frontend no longer depends on a capped LIST_CUSTOMERS page to display names.
+  // The loader is tenant-scoped (boutiqueId from the JWT, never from order data),
+  // so a foreign customerId can never leak a cross-boutique name. Customer-less
+  // orders (customerId null) skip the loader and resolve to null.
+  Order: {
+    async customerName(
+      parent: { customerId: string | null },
+      _args: unknown,
+      context: GraphQLContext,
+    ): Promise<string | null> {
+      if (!parent.customerId) return null;
+      return context.customerNameLoader.load(parent.customerId);
+    },
+  },
+
   Query: {
     async order(
       _: unknown,

@@ -52,6 +52,7 @@ export const orderTypeDefs = /* #graphql */ `
     id:               ID!
     orderNumber:      String!
     customerId:       ID           # nullable — bot may not yet have resolved the customer
+    customerName:     String        # resolved server-side via DataLoader; null if customer-less or not found
     channel:          OrderChannel!
     status:           OrderStatus!
     paymentStatus:    PaymentStatus!
