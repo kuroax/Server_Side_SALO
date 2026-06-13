@@ -263,6 +263,8 @@ type JWTPayload = {
 `boutiqueId` is signed into the JWT at login. Resolvers extract it from
 `context.user.boutiqueId` — they never accept it as a client argument.
 
+The User doc also stores `notificationsEnabled` (in SafeUser/SDL) and `pushTokens` (`{ token, platform, updatedAt }`, `select: false`).
+
 ---
 
 ## Validation pattern (Zod v4)
@@ -622,18 +624,16 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 | `extractCartFromHistory` is regex-driven                                                                             | Any prompt change silently regresses receipt acks                                                                               | Deferred — structural fix post-demo                                                                                    |
 | `updateProduct` missing inventory cleanup on variant removal                                                         | Orphaned inventory records                                                                                                      | Deferred                                                                                                               |
 | Server-side pagination on orders/customers/products                                                                  | Fixed slice limits at scale                                                                                                     | Deferred                                                                                                               |
-| Conversation control (ai/human/paused gate) | Owner+bot can reply at once | gate+alerts live; auto-takeover pending |
 | Token revocation not implemented                                                                                     | Stolen refresh token valid until expiry                                                                                         | Accepted for V1                                                                                                        |
 | n8n `showroom_visit` has no dedicated escalation branch                                                              | Owner sees generic text                                                                                                         | Deferred                                                                                                               |
 | n8n SALO Backend node missing `phoneNumberId` in JSON body                                                           | Messages without `phoneNumberId` are dropped (early-return, no reply, WARN logged) — fallback shim removed                                               | **Pending — add `"phoneNumberId": "{{ $json.phoneNumberId }}"` to SALO Backend node body**                             |
-| Owner-reply detection not wired (coexistence handoff) | Owner + bot can reply at once; no auto-flip to `human` | Blocked — needs n8n to forward status/echo events with `recipient_id` |
+| Owner-reply detection not wired (coexistence handoff) | gate+alerts live; owner + bot can still reply at once; no auto-flip to `human` | Blocked — needs n8n to forward status/echo events with `recipient_id` |
 | `human_takeover_needed` / `prospect_stage_changed` alerts defined but never sent | Owner gets no handoff or stage-change notification | Wire call sites on escalate/pause and stage change |
 | `alert.service.ts` calls WhatsApp Graph API directly | Breaks "all Meta creds in n8n" invariant; token used in backend | Accepted for owner alerts; revisit if alerts move to n8n |
 | Two conversation models (`ConversationState` vs `Conversation`) | Duplicate state; divergent mode semantics (ai/human/paused vs auto/manual) | Consolidate post-MVP |
 | `setHumanMode` endpoint has no caller | Endpoint exists but nothing invokes it | Wire n8n/app to call on owner takeover |
 | `product_search` 0 results auto-escalates | Conflicts with new text-reply prompt guidance | Reconcile in `webhook.service.ts` |
 | browse-all `*` block duplicates the inventory join in `searchProductsForClaude` | Two joins can drift | Refactor to a shared helper |
-| Broad/inventory routing now always round-trips to Claude | API cost+latency; depends on model routing | Monitor misroutes and cost |
 | `[payment_info_sent]` now fires at PASO 2 (after confirmation) | Early receipt not context-detected | Rely on caption |
 | `owner-confirm` needs n8n to parse "CONFIRMAR PAGO" + send secret/creds | Unusable until n8n wired | Wire n8n command parsing |
 | Receipt without orderHints stores cart size/color as `?` | owner-confirm can't resolve → manual order | Capture full variant on receipt |
@@ -684,6 +684,7 @@ Vitest + supertest + mongodb-memory-server (no Jest — NodeNext ESM). Run `npm 
 - Never accept `boutiqueId` as a GraphQL argument from the client — always
   read it from `context.user.boutiqueId` (signed into JWT at login)
 - Never expose `boutique.accessToken` in any GraphQL resolver response
+- Never expose `pushTokens` in SafeUser or the GraphQL SDL — `select: false`, like `password`
 - Never let `updateBoutique`/`setBoutiqueGlobalMode` act on an id that differs from `context.user.boutiqueId`
 - Never put per-boutique config (showroomAddress, shippingPrice, etc.) back in
   env vars — it belongs in `boutique.businessInfo` in MongoDB
